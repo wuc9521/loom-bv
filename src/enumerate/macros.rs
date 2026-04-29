@@ -142,6 +142,9 @@ macro_rules! enum_ownedexpr {
             #[debug(fmt = "(f2{} {:?} {:?})", _0, _1, _2)]
             #[display(fmt = "({} {} {})", "crate::parse::deffun::ENV.name(*_0, 2)", _1, _2)]
             Fop2Dyn(usize, Box<OwnedExpr>, Box<OwnedExpr>),
+            #[debug(fmt = "{}", "crate::enumerate::expr::format_owned_dyn_app(*_0, _1)")]
+            #[display(fmt = "{}", "crate::enumerate::expr::format_owned_dyn_app(*_0, _1)")]
+            FopDyn(usize, Vec<OwnedExpr>),
             #[debug(fmt = "(ite {:?} {:?} {:?})", _0, _1, _2)]
             #[display(fmt = "(ite (= {} #x0000000000000000) {} {})", _0, _1, _2)]
             Ite(Box<OwnedExpr>, Box<OwnedExpr>, Box<OwnedExpr>),

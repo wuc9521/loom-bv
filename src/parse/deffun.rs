@@ -1,4 +1,4 @@
-use std::{array, cell::UnsafeCell};
+use std::cell::UnsafeCell;
 
 use derive_more::DebugCustom;
 use sygus_parser::ast::{Identifier, Index, Sort, SyGuSCmd, SyGuSFile};
@@ -16,7 +16,7 @@ pub struct DefineFun {
     pub expr: OwnedExpr,
 }
 
-pub struct Environ(UnsafeCell<[Vec<DefineFun>; 3]>);
+pub struct Environ(UnsafeCell<Vec<Vec<DefineFun>>>);
 
 impl Environ {
     fn parse_width_from_identifier(id: &Identifier) -> Option<usize> {
@@ -59,10 +59,10 @@ impl Environ {
     }
 
     pub fn new() -> Self {
-        Environ(array::from_fn(|_| Vec::new()).into())
+        Environ(vec![Vec::new(), Vec::new(), Vec::new()].into())
     }
 
-    pub fn inner(&self) -> &mut [Vec<DefineFun>; 3] {
+    pub fn inner(&self) -> &mut Vec<Vec<DefineFun>> {
         unsafe { self.0.get().as_mut().unwrap() }
     }
 
@@ -80,12 +80,6 @@ impl Environ {
                         (name, bits)
                     })
                     .collect();
-                if args.len() > 2 {
-                    return Err(new_custom_error_span(
-                        "DefineFun: Number of args must be <= 2".into(),
-                        pest::Span::new("", 0, 0).unwrap(),
-                    ));
-                }
                 let name = Box::leak(name.clone().into_boxed_str());
                 let ret_bits = Self::parse_sort_width(ret).ok_or_else(|| {
                     new_custom_error_span(
@@ -95,6 +89,9 @@ impl Environ {
                 })?;
                 let expr = OwnedExpr::from_term(body, args.as_slice())?;
                 info!("DefineFun: {} {:?} -> {:?}", name, args.iter().map(|(name, _)| *name).collect::<Vec<_>>(), expr);
+                if self.inner().len() <= args.len() {
+                    self.inner().resize_with(args.len() + 1, Vec::new);
+                }
                 self.inner()[args.len()].push(DefineFun {
                     name,
                     args: args.iter().map(|(name, _)| *name).collect(),

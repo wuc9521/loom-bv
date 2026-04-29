@@ -193,7 +193,11 @@ fn main_inner(
             Ok((original_problem, result))
         }
     } else {
-        panic!()
+        Err(format!(
+            "Unsupported SyGuS benchmark shape for {}: expected PBE examples, a define-fun reference implementation, or a nullary bit-constraint task",
+            problem.name
+        )
+        .into())
     }
 }
 

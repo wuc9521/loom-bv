@@ -87,6 +87,7 @@ fn owned_expr_width(expr: &OwnedExpr) -> usize {
         OwnedExpr::Concat(a, b) => owned_expr_width(a) + owned_expr_width(b),
         OwnedExpr::Extract(_, hi, lo) => (hi - lo + 1) as usize,
         OwnedExpr::Fop0Dyn(id) => deffun::ENV.ret_bits(*id, 0),
+        OwnedExpr::FopDyn(id, args) => deffun::ENV.ret_bits(*id, args.len()),
         OwnedExpr::Const(v) => v.bits(),
         OwnedExpr::Var(_) => 64,
         OwnedExpr::Not(a)
@@ -108,6 +109,15 @@ fn owned_expr_width(expr: &OwnedExpr) -> usize {
         | OwnedExpr::SRem(a, _) => owned_expr_width(a),
         OwnedExpr::Ite(_, a, _) => owned_expr_width(a),
     }
+}
+
+pub fn format_owned_dyn_app(fid: usize, args: &[OwnedExpr]) -> String {
+    let rendered_args = args
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("({} {})", deffun::ENV.name(fid, args.len()), rendered_args)
 }
 
 impl<'a> Expr<'a> {
@@ -542,6 +552,14 @@ impl OwnedExpr {
                         ));
                     }
                 }
+                if let Some(fid) = deffun::ENV.lookup(opname, args.len()) {
+                    return Ok(Self::FopDyn(
+                        fid,
+                        args.iter()
+                            .map(|arg| Self::from_term(arg, env))
+                            .collect::<parse::Result<Vec<_>>>()?,
+                    ));
+                }
                 Err(new_custom_error_span(
                     format!("Unrecongnized Expression: {}", term),
                     empty_span(),
@@ -591,6 +609,12 @@ impl OwnedExpr {
         if let OwnedExpr::Ite(_, _, _) = self {
             return ();
         }
+        if let OwnedExpr::FopDyn(_, args) = self {
+            for arg in args {
+                arg.for_each_subexpr(f);
+            }
+            return ();
+        }
         if let OwnedExpr::Fop1Dyn(_, a) = self {
             a.for_each_subexpr(f);
             return ();
@@ -633,6 +657,9 @@ impl OwnedExpr {
         }
         if let OwnedExpr::Ite(a, b, c) = self {
             return 1 + a.size() + b.size() + c.size();
+        }
+        if let OwnedExpr::FopDyn(_, args) = self {
+            return 1 + args.iter().map(OwnedExpr::size).sum::<usize>();
         }
         if let OwnedExpr::Fop1Dyn(_, a) = self {
             return 1 + a.size();
@@ -687,6 +714,14 @@ impl OwnedExpr {
                 b.to_sygus(arg_names),
                 c.to_sygus(arg_names)
             );
+        }
+        if let OwnedExpr::FopDyn(id, args) = self {
+            let rendered_args = args
+                .iter()
+                .map(|arg| arg.to_sygus(arg_names))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return format!("({} {})", deffun::ENV.name(*id, args.len()), rendered_args);
         }
         if let OwnedExpr::Fop1Dyn(id, a) = self {
             return format!("({} {})", deffun::ENV.name(*id, 1), a.to_sygus(arg_names));
@@ -814,6 +849,13 @@ impl OwnedExpr {
         if let OwnedExpr::Const(a) = self {
             return Ok(a.clone());
         }
+        if let OwnedExpr::FopDyn(id, exprs) = self {
+            let values = exprs
+                .iter()
+                .map(|expr| expr.eval(args))
+                .collect::<Result<Vec<_>, _>>()?;
+            return deffun::ENV.apply(*id, exprs.len()).eval(&values);
+        }
         if let OwnedExpr::Ite(e1, e2, e3) = self {
             return Ok(op::ite(e1.eval(args)?, e2.eval(args)?, e3.eval(args)?));
         }
@@ -855,6 +897,10 @@ impl OwnedExpr {
         }
         if let OwnedExpr::Const(a) = self {
             return Bv([a.as_u64_lossy(); N].into());
+        }
+        if let OwnedExpr::FopDyn(id, exprs) = self {
+            let values = exprs.iter().map(|expr| expr.eval_bv(args)).collect::<Vec<_>>();
+            return deffun::ENV.apply(*id, exprs.len()).eval_bv(&values);
         }
         if let OwnedExpr::Ite(e1, e2, e3) = self {
             return op::bv::ite(e1.eval_bv(args), e2.eval_bv(args), e3.eval_bv(args));

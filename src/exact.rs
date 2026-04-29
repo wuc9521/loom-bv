@@ -6,6 +6,7 @@ use crate::{
     enumerate::{
         config::{Config, Rule},
         expr::OwnedExpr,
+        op,
         value::Value,
     },
     parse::{self, new_custom_error_span, SynthProblem},
@@ -93,11 +94,7 @@ fn search_nullary_single_nt(
         for rule in config.iter() {
             match rule {
                 Rule::Var(_) | Rule::Const(_) | Rule::Fop0(_) => {}
-                Rule::Not
-                | Rule::Neg
-                | Rule::LShrC(_)
-                | Rule::ShlC(_)
-                | Rule::Fop1(_) => {
+                Rule::Not | Rule::Neg | Rule::LShrC(_) | Rule::ShlC(_) | Rule::Fop1(_) => {
                     let children = by_size[size - 1].clone();
                     for child in &children {
                         let Some(expr) = build_unary(rule, child, problem.bits) else {
@@ -199,8 +196,7 @@ fn search_nullary_single_nt(
 enum MultiNtRule {
     Atom(OwnedExpr),
     Alias(usize),
-    Unary(usize, usize),
-    Binary(usize, usize, usize),
+    Apply(usize, Vec<usize>),
     Ite(usize, usize, usize),
 }
 
@@ -210,13 +206,71 @@ struct MultiNtGrammar<'a> {
     start: usize,
 }
 
+#[derive(Clone)]
+struct Candidate {
+    expr: OwnedExpr,
+    value: Value,
+}
+
+fn instantiate_defined_fun(fid: usize, nargs: usize, args: &[OwnedExpr]) -> OwnedExpr {
+    match args {
+        [] => OwnedExpr::Fop0Dyn(fid),
+        [a] => OwnedExpr::Fop1Dyn(fid, Box::new(a.clone())),
+        [a, b] => OwnedExpr::Fop2Dyn(fid, Box::new(a.clone()), Box::new(b.clone())),
+        _ => OwnedExpr::FopDyn(fid, args.to_vec()),
+    }
+}
+
+fn for_each_size_split(
+    total: usize,
+    arity: usize,
+    sizes: &mut Vec<usize>,
+    f: &mut impl FnMut(&[usize]),
+) {
+    if arity == 0 {
+        if total == 0 {
+            f(sizes);
+        }
+        return;
+    }
+    if arity == 1 {
+        sizes.push(total);
+        f(sizes);
+        sizes.pop();
+        return;
+    }
+    let min_rest = arity - 1;
+    for first in 1..=(total - min_rest) {
+        sizes.push(first);
+        for_each_size_split(total - first, arity - 1, sizes, f);
+        sizes.pop();
+    }
+}
+
+fn for_each_candidate_tuple(
+    candidate_pools: &[Vec<Candidate>],
+    tuple: &mut Vec<Candidate>,
+    f: &mut impl FnMut(&[Candidate]),
+) {
+    if tuple.len() == candidate_pools.len() {
+        f(tuple);
+        return;
+    }
+    let idx = tuple.len();
+    for candidate in &candidate_pools[idx] {
+        tuple.push(candidate.clone());
+        for_each_candidate_tuple(candidate_pools, tuple, f);
+        tuple.pop();
+    }
+}
+
 fn search_nullary_multi_nt(
     problem: &SynthProblem<'static>,
     spec: &NullarySpec,
 ) -> parse::Result<OwnedExpr> {
     let grammar = build_multi_nt_grammar(problem)?;
     let nt_count = grammar.nts.len();
-    let mut by_size = vec![vec![Vec::<OwnedExpr>::new(); MAX_NULLARY_SIZE + 1]; nt_count];
+    let mut by_size = vec![vec![Vec::<Candidate>::new(); MAX_NULLARY_SIZE + 1]; nt_count];
     let mut seen = vec![HashMap::<Value, usize>::new(); nt_count];
 
     for (nt_idx, (_, rules)) in grammar.nts.iter().enumerate() {
@@ -224,9 +278,18 @@ fn search_nullary_multi_nt(
             let MultiNtRule::Atom(expr) = rule else {
                 continue;
             };
+            let value = expr.eval(&[]).map_err(|_| {
+                new_custom_error_span(
+                    format!("Nullary exact search failed to evaluate candidate {}", expr),
+                    pest::Span::new("", 0, 0).unwrap(),
+                )
+            })?;
             if let Some(found) = insert_multi_nt_candidate(
                 nt_idx,
-                expr.clone(),
+                Candidate {
+                    expr: expr.clone(),
+                    value,
+                },
                 1,
                 &grammar,
                 spec,
@@ -259,51 +322,82 @@ fn search_nullary_multi_nt(
                             }
                         }
                     }
-                    MultiNtRule::Unary(fid, child_nt) => {
-                        let children = by_size[child_nt][size - 1].clone();
-                        for child in children {
-                            let expr = OwnedExpr::Fop1Dyn(fid, Box::new(child));
-                            if let Some(found) = insert_multi_nt_candidate(
-                                nt_idx,
-                                expr,
-                                size,
-                                &grammar,
-                                spec,
-                                &mut seen,
-                                &mut by_size,
-                            )? {
-                                return Ok(found);
-                            }
-                        }
-                    }
-                    MultiNtRule::Binary(fid, lhs_nt, rhs_nt) => {
-                        if size < 3 {
+                    MultiNtRule::Apply(fid, ref child_nts) => {
+                        if size <= child_nts.len() {
                             continue;
                         }
-                        for lhs_size in 1..=(size - 2) {
-                            let rhs_size = size - 1 - lhs_size;
-                            let lhs_terms = by_size[lhs_nt][lhs_size].clone();
-                            let rhs_terms = by_size[rhs_nt][rhs_size].clone();
-                            for lhs in &lhs_terms {
-                                for rhs in &rhs_terms {
-                                    let expr = OwnedExpr::Fop2Dyn(
-                                        fid,
-                                        Box::new(lhs.clone()),
-                                        Box::new(rhs.clone()),
-                                    );
-                                    if let Some(found) = insert_multi_nt_candidate(
-                                        nt_idx,
-                                        expr,
-                                        size,
-                                        &grammar,
-                                        spec,
-                                        &mut seen,
-                                        &mut by_size,
-                                    )? {
-                                        return Ok(found);
-                                    }
+                        let total_child_size = size - 1;
+                        let mut found = None;
+                        let mut pending_error = None;
+                        let mut size_args = Vec::with_capacity(child_nts.len());
+                        for_each_size_split(
+                            total_child_size,
+                            child_nts.len(),
+                            &mut size_args,
+                            &mut |size_args| {
+                                if found.is_some() || pending_error.is_some() {
+                                    return;
                                 }
-                            }
+                                let candidate_pools = child_nts
+                                    .iter()
+                                    .zip(size_args.iter())
+                                    .map(|(child_nt, child_size)| {
+                                        by_size[*child_nt][*child_size].clone()
+                                    })
+                                    .collect::<Vec<_>>();
+                                let mut tuple = Vec::with_capacity(child_nts.len());
+                                for_each_candidate_tuple(
+                                    &candidate_pools,
+                                    &mut tuple,
+                                    &mut |tuple| {
+                                        if found.is_some() || pending_error.is_some() {
+                                            return;
+                                        }
+                                        let values = tuple
+                                            .iter()
+                                            .map(|candidate| candidate.value.clone())
+                                            .collect::<Vec<_>>();
+                                        let expr_args = tuple
+                                            .iter()
+                                            .map(|candidate| candidate.expr.clone())
+                                            .collect::<Vec<_>>();
+                                        let value = match crate::parse::deffun::ENV
+                                            .apply(fid, child_nts.len())
+                                            .eval(&values)
+                                        {
+                                            Ok(value) => value,
+                                            Err(_) => return,
+                                        };
+                                        let expr = Candidate {
+                                            expr: instantiate_defined_fun(
+                                                fid,
+                                                child_nts.len(),
+                                                &expr_args,
+                                            ),
+                                            value,
+                                        };
+                                        match insert_multi_nt_candidate(
+                                            nt_idx,
+                                            expr,
+                                            size,
+                                            &grammar,
+                                            spec,
+                                            &mut seen,
+                                            &mut by_size,
+                                        ) {
+                                            Ok(Some(expr)) => found = Some(expr),
+                                            Ok(None) => {}
+                                            Err(err) => pending_error = Some(err),
+                                        }
+                                    },
+                                );
+                            },
+                        );
+                        if let Some(err) = pending_error {
+                            return Err(err);
+                        }
+                        if let Some(found) = found {
+                            return Ok(found);
                         }
                     }
                     MultiNtRule::Ite(cond_nt, then_nt, else_nt) => {
@@ -322,11 +416,18 @@ fn search_nullary_multi_nt(
                                 for cond in &cond_terms {
                                     for then_expr in &then_terms {
                                         for else_expr in &else_terms {
-                                            let expr = OwnedExpr::Ite(
-                                                Box::new(cond.clone()),
-                                                Box::new(then_expr.clone()),
-                                                Box::new(else_expr.clone()),
-                                            );
+                                            let expr = Candidate {
+                                                value: op::ite(
+                                                    cond.value.clone(),
+                                                    then_expr.value.clone(),
+                                                    else_expr.value.clone(),
+                                                ),
+                                                expr: OwnedExpr::Ite(
+                                                    Box::new(cond.expr.clone()),
+                                                    Box::new(then_expr.expr.clone()),
+                                                    Box::new(else_expr.expr.clone()),
+                                                ),
+                                            };
                                             if let Some(found) = insert_multi_nt_candidate(
                                                 nt_idx,
                                                 expr,
@@ -360,31 +461,27 @@ fn search_nullary_multi_nt(
 
 fn insert_multi_nt_candidate(
     nt_idx: usize,
-    expr: OwnedExpr,
+    candidate: Candidate,
     size: usize,
     grammar: &MultiNtGrammar<'_>,
     spec: &NullarySpec,
     seen: &mut [HashMap<Value, usize>],
-    by_size: &mut [Vec<Vec<OwnedExpr>>],
+    by_size: &mut [Vec<Vec<Candidate>>],
 ) -> parse::Result<Option<OwnedExpr>> {
-    let value = expr.eval(&[]).map_err(|_| {
-        new_custom_error_span(
-            format!("Nullary exact search failed to evaluate candidate {}", expr),
-            pest::Span::new("", 0, 0).unwrap(),
-        )
-    })?;
-    if nt_idx == grammar.start && spec.matches(&value) {
-        return Ok(Some(expr));
+    if nt_idx == grammar.start && spec.matches(&candidate.value) {
+        return Ok(Some(candidate.expr));
     }
-    if seen[nt_idx].contains_key(&value) {
+    if seen[nt_idx].contains_key(&candidate.value) {
         return Ok(None);
     }
-    seen[nt_idx].insert(value, size);
-    by_size[nt_idx][size].push(expr);
+    seen[nt_idx].insert(candidate.value.clone(), size);
+    by_size[nt_idx][size].push(candidate);
     Ok(None)
 }
 
-fn build_multi_nt_grammar(problem: &SynthProblem<'static>) -> parse::Result<MultiNtGrammar<'static>> {
+fn build_multi_nt_grammar(
+    problem: &SynthProblem<'static>,
+) -> parse::Result<MultiNtGrammar<'static>> {
     fn parse_identifier_atom(id: &Identifier) -> Option<OwnedExpr> {
         let name = id.get_name();
         if name.eq_ignore_ascii_case("true") {
@@ -400,21 +497,39 @@ fn build_multi_nt_grammar(problem: &SynthProblem<'static>) -> parse::Result<Mult
 
     fn parse_literal_atom(lit: &SyGuSLiteral) -> Option<OwnedExpr> {
         match lit {
-            SyGuSLiteral::Bool(v) => Some(OwnedExpr::Const(Value::from_u64(if *v { 1 } else { 0 }, 1))),
+            SyGuSLiteral::Bool(v) => {
+                Some(OwnedExpr::Const(Value::from_u64(if *v { 1 } else { 0 }, 1)))
+            }
             SyGuSLiteral::Numeral(v) => Some(OwnedExpr::Const(Value::from_u64(*v as u64, 64))),
             SyGuSLiteral::HexConst(v) => {
-                let s = if v.starts_with("#x") { v.clone() } else { format!("#x{}", v) };
+                let s = if v.starts_with("#x") {
+                    v.clone()
+                } else {
+                    format!("#x{}", v)
+                };
                 let width = v.trim_start_matches("#x").len() * 4;
-                crate::parse::literals::value_constant(&s, width.max(1), pest::Span::new("", 0, 0).unwrap())
-                    .ok()
-                    .map(OwnedExpr::Const)
+                crate::parse::literals::value_constant(
+                    &s,
+                    width.max(1),
+                    pest::Span::new("", 0, 0).unwrap(),
+                )
+                .ok()
+                .map(OwnedExpr::Const)
             }
             SyGuSLiteral::BinConst(v) => {
-                let s = if v.starts_with("#b") { v.clone() } else { format!("#b{}", v) };
+                let s = if v.starts_with("#b") {
+                    v.clone()
+                } else {
+                    format!("#b{}", v)
+                };
                 let width = v.trim_start_matches("#b").len();
-                crate::parse::literals::value_constant(&s, width.max(1), pest::Span::new("", 0, 0).unwrap())
-                    .ok()
-                    .map(OwnedExpr::Const)
+                crate::parse::literals::value_constant(
+                    &s,
+                    width.max(1),
+                    pest::Span::new("", 0, 0).unwrap(),
+                )
+                .ok()
+                .map(OwnedExpr::Const)
             }
             SyGuSLiteral::Decimal(_) | SyGuSLiteral::StringConst(_) => None,
         }
@@ -483,20 +598,11 @@ fn build_multi_nt_grammar(problem: &SynthProblem<'static>) -> parse::Result<Mult
                     match (opname, child_nts.as_slice()) {
                         ("ite", [a, b, c]) => rules.push(MultiNtRule::Ite(*a, *b, *c)),
                         _ => {
-                            if let Some(fid) = crate::parse::deffun::ENV.lookup(opname, child_nts.len()) {
+                            if let Some(fid) =
+                                crate::parse::deffun::ENV.lookup(opname, child_nts.len())
+                            {
                                 match child_nts.as_slice() {
-                                    [a] => rules.push(MultiNtRule::Unary(fid, *a)),
-                                    [a, b] => rules.push(MultiNtRule::Binary(fid, *a, *b)),
-                                    _ => {
-                                        return Err(new_custom_error_span(
-                                            format!(
-                                                "Unsupported nullary grammar operator arity {} for {}",
-                                                child_nts.len(),
-                                                opname
-                                            ),
-                                            pest::Span::new("", 0, 0).unwrap(),
-                                        ));
-                                    }
+                                    _ => rules.push(MultiNtRule::Apply(fid, child_nts.clone())),
                                 }
                             } else {
                                 return Err(new_custom_error_span(
