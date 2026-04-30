@@ -16,6 +16,7 @@ fn u64_decimal(input: &str) -> Result<u64, std::num::ParseIntError> {
     u64::from_str_radix(input, 10)
 }
 
+#[cfg(feature = "chatgpt")]
 pub fn u64_constant_python<'i>(input: &str) -> Option<u64> {
     let res : IResult<&str, u64> = alt((
         preceded(tag("0x"), map_res(take_while1(|x: char| x.is_digit(16)), u64_hex)),
@@ -101,8 +102,10 @@ pub fn value_constant<'i>(input: &str, bits: usize, span: Span<'i>) -> Result<Va
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "chatgpt")]
     use super::u64_constant_python;
 
+    #[cfg(feature = "chatgpt")]
     #[test]
     fn test1() {
         assert_eq!(u64_constant_python("0x01"), Some(1));

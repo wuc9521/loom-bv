@@ -10,6 +10,7 @@ use self::expr::Expr;
 pub mod expr;
 pub mod config;
 pub mod algo;
+pub mod algo_multi;
 pub mod algo2;
 pub mod algo3;
 pub mod algo4;
@@ -69,15 +70,6 @@ impl<const N: usize> std::ops::Sub for Bv<N> {
 impl<const N: usize> Bv<N>  {
     pub const ONES : Self = Bv([u64::MAX; N]);
     pub const ZEROS : Self = Bv([u64::MIN; N]);
-    pub fn to_int(self) -> [i64; N] {
-        self.map(|p| p as i64)
-    }
-    pub fn from(iter: impl Iterator<Item=u64>) -> Self {
-        let mut vec: Vec<_> = iter.take(N).collect();
-        vec.resize(N, 0);
-        let a : [u64; N] = vec.try_into().unwrap();
-        Self(a.into())
-    }
     pub fn count(&self) -> u32 {
         self.0.iter().map(|x| x.count_ones()).sum()
     }

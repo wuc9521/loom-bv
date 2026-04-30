@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
+
+use rustc_hash::FxHashMap;
 
 use sygus_parser::ast::{Identifier, Literal as SyGuSLiteral, SyGuSCmd, SyGuSFile, SyGuSTerm};
 
@@ -49,10 +52,8 @@ impl NullarySpec {
                 if value.bits() != *bits {
                     return false;
                 }
-                let raw = value.to_biguint();
                 known_bits.iter().all(|(bit, expected)| {
-                    let actual = ((&raw >> *bit) & num_bigint::BigUint::from(1u8))
-                        == num_bigint::BigUint::from(1u8);
+                    let actual = value.bit(*bit);
                     actual == *expected
                 })
             }
@@ -75,8 +76,8 @@ fn search_nullary_single_nt(
     spec: &NullarySpec,
 ) -> parse::Result<OwnedExpr> {
     let config = Config::<1>::from_problem(problem, true)?;
-    let mut by_size: Vec<Vec<OwnedExpr>> = vec![Vec::new(); MAX_NULLARY_SIZE + 1];
-    let mut seen = HashMap::<Value, usize>::new();
+    let mut by_size: Vec<Vec<Candidate>> = vec![Vec::new(); MAX_NULLARY_SIZE + 1];
+    let mut seen = FxHashMap::<Value, usize>::default();
 
     for rule in config.iter() {
         if !rule.is_atom() {
@@ -85,7 +86,15 @@ fn search_nullary_single_nt(
         let Some(expr) = build_atom(rule) else {
             continue;
         };
-        if let Some(found) = insert_candidate(expr, 1, spec, &mut seen, &mut by_size)? {
+        let value = expr.eval(&[]).map_err(|_| {
+            new_custom_error_span(
+                format!("Nullary exact search failed to evaluate candidate {}", expr),
+                pest::Span::new("", 0, 0).unwrap(),
+            )
+        })?;
+        if let Some(found) =
+            insert_single_nt_candidate_lazy(value, 1, spec, &mut seen, &mut by_size, || expr)?
+        {
             return Ok(found);
         }
     }
@@ -95,14 +104,21 @@ fn search_nullary_single_nt(
             match rule {
                 Rule::Var(_) | Rule::Const(_) | Rule::Fop0(_) => {}
                 Rule::Not | Rule::Neg | Rule::LShrC(_) | Rule::ShlC(_) | Rule::Fop1(_) => {
-                    let children = by_size[size - 1].clone();
-                    for child in &children {
-                        let Some(expr) = build_unary(rule, child, problem.bits) else {
+                    let children_len = by_size[size - 1].len();
+                    for idx in 0..children_len {
+                        let child = &by_size[size - 1][idx];
+                        let Some(value) = eval_unary_rule(rule, &child.value, problem.bits) else {
                             continue;
                         };
-                        if let Some(found) =
-                            insert_candidate(expr, size, spec, &mut seen, &mut by_size)?
-                        {
+                        let child_expr = child.expr.clone();
+                        if let Some(found) = insert_single_nt_candidate_lazy(
+                            value,
+                            size,
+                            spec,
+                            &mut seen,
+                            &mut by_size,
+                            || build_unary(rule, &child_expr, problem.bits).unwrap(),
+                        )? {
                             return Ok(found);
                         }
                     }
@@ -126,16 +142,26 @@ fn search_nullary_single_nt(
                     }
                     for lhs_size in 1..=(size - 2) {
                         let rhs_size = size - 1 - lhs_size;
-                        let lhs_terms = by_size[lhs_size].clone();
-                        let rhs_terms = by_size[rhs_size].clone();
-                        for lhs in &lhs_terms {
-                            for rhs in &rhs_terms {
-                                let Some(expr) = build_binary(rule, lhs, rhs) else {
+                        let lhs_len = by_size[lhs_size].len();
+                        let rhs_len = by_size[rhs_size].len();
+                        for lhs_idx in 0..lhs_len {
+                            for rhs_idx in 0..rhs_len {
+                                let lhs = &by_size[lhs_size][lhs_idx];
+                                let rhs = &by_size[rhs_size][rhs_idx];
+                                let Some(value) = eval_binary_rule(rule, &lhs.value, &rhs.value)
+                                else {
                                     continue;
                                 };
-                                if let Some(found) =
-                                    insert_candidate(expr, size, spec, &mut seen, &mut by_size)?
-                                {
+                                let lhs_expr = lhs.expr.clone();
+                                let rhs_expr = rhs.expr.clone();
+                                if let Some(found) = insert_single_nt_candidate_lazy(
+                                    value,
+                                    size,
+                                    spec,
+                                    &mut seen,
+                                    &mut by_size,
+                                    || build_binary(rule, &lhs_expr, &rhs_expr).unwrap(),
+                                )? {
                                     return Ok(found);
                                 }
                             }
@@ -152,23 +178,36 @@ fn search_nullary_single_nt(
                             if else_size == 0 {
                                 continue;
                             }
-                            let cond_terms = by_size[cond_size].clone();
-                            let then_terms = by_size[then_size].clone();
-                            let else_terms = by_size[else_size].clone();
-                            for cond in &cond_terms {
-                                for then_expr in &then_terms {
-                                    for else_expr in &else_terms {
-                                        let expr = OwnedExpr::Ite(
-                                            Box::new(cond.clone()),
-                                            Box::new(then_expr.clone()),
-                                            Box::new(else_expr.clone()),
+                            let cond_len = by_size[cond_size].len();
+                            let then_len = by_size[then_size].len();
+                            let else_len = by_size[else_size].len();
+                            for cond_idx in 0..cond_len {
+                                for then_idx in 0..then_len {
+                                    for else_idx in 0..else_len {
+                                        let cond = &by_size[cond_size][cond_idx];
+                                        let then_expr = &by_size[then_size][then_idx];
+                                        let else_expr = &by_size[else_size][else_idx];
+                                        let value = op::ite(
+                                            cond.value.clone(),
+                                            then_expr.value.clone(),
+                                            else_expr.value.clone(),
                                         );
-                                        if let Some(found) = insert_candidate(
-                                            expr,
+                                        let cond_owned = cond.expr.clone();
+                                        let then_owned = then_expr.expr.clone();
+                                        let else_owned = else_expr.expr.clone();
+                                        if let Some(found) = insert_single_nt_candidate_lazy(
+                                            value,
                                             size,
                                             spec,
                                             &mut seen,
                                             &mut by_size,
+                                            || {
+                                                OwnedExpr::Ite(
+                                                    Box::new(cond_owned),
+                                                    Box::new(then_owned),
+                                                    Box::new(else_owned),
+                                                )
+                                            },
                                         )? {
                                             return Ok(found);
                                         }
@@ -212,7 +251,7 @@ struct Candidate {
     value: Value,
 }
 
-fn instantiate_defined_fun(fid: usize, nargs: usize, args: &[OwnedExpr]) -> OwnedExpr {
+fn instantiate_defined_fun(fid: usize, args: &[OwnedExpr]) -> OwnedExpr {
     match args {
         [] => OwnedExpr::Fop0Dyn(fid),
         [a] => OwnedExpr::Fop1Dyn(fid, Box::new(a.clone())),
@@ -247,21 +286,29 @@ fn for_each_size_split(
     }
 }
 
-fn for_each_candidate_tuple(
-    candidate_pools: &[Vec<Candidate>],
-    tuple: &mut Vec<Candidate>,
-    f: &mut impl FnMut(&[Candidate]),
+fn for_each_candidate_tuple<'a>(
+    candidate_pools: &[&'a [Candidate]],
+    tuple: &mut Vec<&'a Candidate>,
+    f: &mut impl FnMut(&[&'a Candidate]),
 ) {
     if tuple.len() == candidate_pools.len() {
         f(tuple);
         return;
     }
     let idx = tuple.len();
-    for candidate in &candidate_pools[idx] {
-        tuple.push(candidate.clone());
+    for candidate in candidate_pools[idx] {
+        tuple.push(candidate);
         for_each_candidate_tuple(candidate_pools, tuple, f);
         tuple.pop();
     }
+}
+
+fn evaluate_apply_value(applied: &OwnedExpr, tuple: &[&Candidate]) -> Result<Value, ()> {
+    let mut values = Vec::with_capacity(tuple.len());
+    for candidate in tuple {
+        values.push(candidate.value.clone());
+    }
+    applied.eval(&values).map_err(|_| ())
 }
 
 fn search_nullary_multi_nt(
@@ -271,7 +318,7 @@ fn search_nullary_multi_nt(
     let grammar = build_multi_nt_grammar(problem)?;
     let nt_count = grammar.nts.len();
     let mut by_size = vec![vec![Vec::<Candidate>::new(); MAX_NULLARY_SIZE + 1]; nt_count];
-    let mut seen = vec![HashMap::<Value, usize>::new(); nt_count];
+    let mut seen = vec![FxHashMap::<Value, usize>::default(); nt_count];
 
     for (nt_idx, (_, rules)) in grammar.nts.iter().enumerate() {
         for rule in rules {
@@ -284,17 +331,15 @@ fn search_nullary_multi_nt(
                     pest::Span::new("", 0, 0).unwrap(),
                 )
             })?;
-            if let Some(found) = insert_multi_nt_candidate(
+            if let Some(found) = insert_multi_nt_candidate_lazy(
                 nt_idx,
-                Candidate {
-                    expr: expr.clone(),
-                    value,
-                },
+                value,
                 1,
                 &grammar,
                 spec,
                 &mut seen,
                 &mut by_size,
+                || expr.clone(),
             )? {
                 return Ok(found);
             }
@@ -307,16 +352,20 @@ fn search_nullary_multi_nt(
                 match *rule {
                     MultiNtRule::Atom(_) => {}
                     MultiNtRule::Alias(child_nt) => {
-                        let children = by_size[child_nt][size].clone();
-                        for child in children {
-                            if let Some(found) = insert_multi_nt_candidate(
+                        let children_len = by_size[child_nt][size].len();
+                        for idx in 0..children_len {
+                            let child = &by_size[child_nt][size][idx];
+                            let child_value = child.value.clone();
+                            let child_expr = child.expr.clone();
+                            if let Some(found) = insert_multi_nt_candidate_lazy(
                                 nt_idx,
-                                child,
+                                child_value,
                                 size,
                                 &grammar,
                                 spec,
                                 &mut seen,
                                 &mut by_size,
+                                || child_expr,
                             )? {
                                 return Ok(found);
                             }
@@ -342,10 +391,12 @@ fn search_nullary_multi_nt(
                                     .iter()
                                     .zip(size_args.iter())
                                     .map(|(child_nt, child_size)| {
-                                        by_size[*child_nt][*child_size].clone()
+                                        by_size[*child_nt][*child_size].as_slice()
                                     })
                                     .collect::<Vec<_>>();
+                                let applied = crate::parse::deffun::ENV.apply(fid, child_nts.len());
                                 let mut tuple = Vec::with_capacity(child_nts.len());
+                                let mut staged = FxHashMap::<Value, Vec<OwnedExpr>>::default();
                                 for_each_candidate_tuple(
                                     &candidate_pools,
                                     &mut tuple,
@@ -353,44 +404,47 @@ fn search_nullary_multi_nt(
                                         if found.is_some() || pending_error.is_some() {
                                             return;
                                         }
-                                        let values = tuple
-                                            .iter()
-                                            .map(|candidate| candidate.value.clone())
-                                            .collect::<Vec<_>>();
+                                        let value = match evaluate_apply_value(&applied, tuple) {
+                                            Ok(value) => value,
+                                            Err(()) => return,
+                                        };
+                                        if nt_idx == grammar.start && spec.matches(&value) {
+                                            let expr_args = tuple
+                                                .iter()
+                                                .map(|candidate| candidate.expr.clone())
+                                                .collect::<Vec<_>>();
+                                            found = Some(instantiate_defined_fun(fid, &expr_args));
+                                            return;
+                                        }
+                                        if seen[nt_idx].contains_key(&value) || staged.contains_key(&value) {
+                                            return;
+                                        }
                                         let expr_args = tuple
                                             .iter()
                                             .map(|candidate| candidate.expr.clone())
                                             .collect::<Vec<_>>();
-                                        let value = match crate::parse::deffun::ENV
-                                            .apply(fid, child_nts.len())
-                                            .eval(&values)
-                                        {
-                                            Ok(value) => value,
-                                            Err(_) => return,
-                                        };
-                                        let expr = Candidate {
-                                            expr: instantiate_defined_fun(
-                                                fid,
-                                                child_nts.len(),
-                                                &expr_args,
-                                            ),
-                                            value,
-                                        };
-                                        match insert_multi_nt_candidate(
-                                            nt_idx,
-                                            expr,
-                                            size,
-                                            &grammar,
-                                            spec,
-                                            &mut seen,
-                                            &mut by_size,
-                                        ) {
-                                            Ok(Some(expr)) => found = Some(expr),
-                                            Ok(None) => {}
-                                            Err(err) => pending_error = Some(err),
-                                        }
+                                        staged.insert(value, expr_args);
                                     },
                                 );
+                                for (value, expr_args) in staged.drain() {
+                                    match insert_multi_nt_candidate_lazy(
+                                        nt_idx,
+                                        value,
+                                        size,
+                                        &grammar,
+                                        spec,
+                                        &mut seen,
+                                        &mut by_size,
+                                        || instantiate_defined_fun(fid, &expr_args),
+                                    ) {
+                                        Ok(Some(expr)) => found = Some(expr),
+                                        Ok(None) => {}
+                                        Err(err) => {
+                                            pending_error = Some(err);
+                                            break;
+                                        }
+                                    }
+                                }
                             },
                         );
                         if let Some(err) = pending_error {
@@ -410,36 +464,61 @@ fn search_nullary_multi_nt(
                                 if else_size == 0 {
                                     continue;
                                 }
-                                let cond_terms = by_size[cond_nt][cond_size].clone();
-                                let then_terms = by_size[then_nt][then_size].clone();
-                                let else_terms = by_size[else_nt][else_size].clone();
-                                for cond in &cond_terms {
-                                    for then_expr in &then_terms {
-                                        for else_expr in &else_terms {
-                                            let expr = Candidate {
-                                                value: op::ite(
-                                                    cond.value.clone(),
-                                                    then_expr.value.clone(),
-                                                    else_expr.value.clone(),
-                                                ),
-                                                expr: OwnedExpr::Ite(
+                                let cond_len = by_size[cond_nt][cond_size].len();
+                                let then_len = by_size[then_nt][then_size].len();
+                                let else_len = by_size[else_nt][else_size].len();
+                                let mut staged = FxHashMap::<Value, (OwnedExpr, OwnedExpr, OwnedExpr)>::default();
+                                for cond_idx in 0..cond_len {
+                                    let cond = &by_size[cond_nt][cond_size][cond_idx];
+                                    for then_idx in 0..then_len {
+                                        let then_expr = &by_size[then_nt][then_size][then_idx];
+                                        for else_idx in 0..else_len {
+                                            let else_expr =
+                                                &by_size[else_nt][else_size][else_idx];
+                                            let value = op::ite(
+                                                cond.value.clone(),
+                                                then_expr.value.clone(),
+                                                else_expr.value.clone(),
+                                            );
+                                            if nt_idx == grammar.start && spec.matches(&value) {
+                                                return Ok(OwnedExpr::Ite(
                                                     Box::new(cond.expr.clone()),
                                                     Box::new(then_expr.expr.clone()),
                                                     Box::new(else_expr.expr.clone()),
-                                                ),
-                                            };
-                                            if let Some(found) = insert_multi_nt_candidate(
-                                                nt_idx,
-                                                expr,
-                                                size,
-                                                &grammar,
-                                                spec,
-                                                &mut seen,
-                                                &mut by_size,
-                                            )? {
-                                                return Ok(found);
+                                                ));
                                             }
+                                            if seen[nt_idx].contains_key(&value) || staged.contains_key(&value) {
+                                                continue;
+                                            }
+                                            staged.insert(
+                                                value,
+                                                (
+                                                    cond.expr.clone(),
+                                                    then_expr.expr.clone(),
+                                                    else_expr.expr.clone(),
+                                                ),
+                                            );
                                         }
+                                    }
+                                }
+                                for (value, (cond_expr, then_expr, else_expr)) in staged.drain() {
+                                    if let Some(found) = insert_multi_nt_candidate_lazy(
+                                        nt_idx,
+                                        value,
+                                        size,
+                                        &grammar,
+                                        spec,
+                                        &mut seen,
+                                        &mut by_size,
+                                        || {
+                                            OwnedExpr::Ite(
+                                                Box::new(cond_expr),
+                                                Box::new(then_expr),
+                                                Box::new(else_expr),
+                                            )
+                                        },
+                                    )? {
+                                        return Ok(found);
                                     }
                                 }
                             }
@@ -459,24 +538,30 @@ fn search_nullary_multi_nt(
     ))
 }
 
-fn insert_multi_nt_candidate(
+fn insert_multi_nt_candidate_lazy(
     nt_idx: usize,
-    candidate: Candidate,
+    value: Value,
     size: usize,
     grammar: &MultiNtGrammar<'_>,
     spec: &NullarySpec,
-    seen: &mut [HashMap<Value, usize>],
+    seen: &mut [FxHashMap<Value, usize>],
     by_size: &mut [Vec<Vec<Candidate>>],
+    build_expr: impl FnOnce() -> OwnedExpr,
 ) -> parse::Result<Option<OwnedExpr>> {
-    if nt_idx == grammar.start && spec.matches(&candidate.value) {
-        return Ok(Some(candidate.expr));
+    if nt_idx == grammar.start && spec.matches(&value) {
+        return Ok(Some(build_expr()));
     }
-    if seen[nt_idx].contains_key(&candidate.value) {
-        return Ok(None);
+    match seen[nt_idx].entry(value.clone()) {
+        Entry::Occupied(_) => Ok(None),
+        Entry::Vacant(entry) => {
+            entry.insert(size);
+            by_size[nt_idx][size].push(Candidate {
+                expr: build_expr(),
+                value,
+            });
+            Ok(None)
+        }
     }
-    seen[nt_idx].insert(candidate.value.clone(), size);
-    by_size[nt_idx][size].push(candidate);
-    Ok(None)
 }
 
 fn build_multi_nt_grammar(
@@ -540,7 +625,7 @@ fn build_multi_nt_grammar(
         .iter()
         .enumerate()
         .map(|(idx, nt)| (nt.0, idx))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
 
     let mut nts = Vec::with_capacity(problem.cfg.len());
     for nt in problem.cfg.iter() {
@@ -627,28 +712,28 @@ fn build_multi_nt_grammar(
     Ok(MultiNtGrammar { nts, start: 0 })
 }
 
-fn insert_candidate(
-    expr: OwnedExpr,
+fn insert_single_nt_candidate_lazy(
+    value: Value,
     size: usize,
     spec: &NullarySpec,
-    seen: &mut HashMap<Value, usize>,
-    by_size: &mut [Vec<OwnedExpr>],
+    seen: &mut FxHashMap<Value, usize>,
+    by_size: &mut [Vec<Candidate>],
+    build_expr: impl FnOnce() -> OwnedExpr,
 ) -> parse::Result<Option<OwnedExpr>> {
-    let value = expr.eval(&[]).map_err(|_| {
-        new_custom_error_span(
-            format!("Nullary exact search failed to evaluate candidate {}", expr),
-            pest::Span::new("", 0, 0).unwrap(),
-        )
-    })?;
     if spec.matches(&value) {
-        return Ok(Some(expr));
+        return Ok(Some(build_expr()));
     }
-    if seen.contains_key(&value) {
-        return Ok(None);
+    match seen.entry(value.clone()) {
+        Entry::Occupied(_) => Ok(None),
+        Entry::Vacant(entry) => {
+            entry.insert(size);
+            by_size[size].push(Candidate {
+                expr: build_expr(),
+                value,
+            });
+            Ok(None)
+        }
     }
-    seen.insert(value, size);
-    by_size[size].push(expr);
-    Ok(None)
 }
 
 fn build_atom(rule: &Rule<1>) -> Option<OwnedExpr> {
@@ -696,6 +781,39 @@ fn build_binary(rule: &Rule<1>, lhs: &OwnedExpr, rhs: &OwnedExpr) -> Option<Owne
         Rule::SRem => Some(OwnedExpr::SRem(lhs, rhs)),
         Rule::AShr => Some(OwnedExpr::AShr(lhs, rhs)),
         Rule::Fop2(id) => Some(OwnedExpr::Fop2Dyn(*id, lhs, rhs)),
+        _ => None,
+    }
+}
+
+fn eval_unary_rule(rule: &Rule<1>, child: &Value, bits: usize) -> Option<Value> {
+    match rule {
+        Rule::Not => Some(op::not(child.clone())),
+        Rule::Neg => Some(op::neg(child.clone())),
+        Rule::LShrC(v) => Some(op::lshr(child.clone(), Value::from_u64(*v, bits))),
+        Rule::ShlC(v) => Some(op::shl(child.clone(), Value::from_u64(*v, bits))),
+        Rule::Fop1(id) => crate::parse::deffun::ENV.apply(*id, 1).eval(&[child.clone()]).ok(),
+        _ => None,
+    }
+}
+
+fn eval_binary_rule(rule: &Rule<1>, lhs: &Value, rhs: &Value) -> Option<Value> {
+    match rule {
+        Rule::Add => Some(op::add(lhs.clone(), rhs.clone())),
+        Rule::Xor => Some(op::xor(lhs.clone(), rhs.clone())),
+        Rule::And => Some(op::and(lhs.clone(), rhs.clone())),
+        Rule::Or => Some(op::or(lhs.clone(), rhs.clone())),
+        Rule::Sub => Some(op::sub(lhs.clone(), rhs.clone())),
+        Rule::Mul => Some(op::mul(lhs.clone(), rhs.clone())),
+        Rule::UDiv => op::udiv(lhs.clone(), rhs.clone()).ok(),
+        Rule::LShr => Some(op::lshr(lhs.clone(), rhs.clone())),
+        Rule::Shl => Some(op::shl(lhs.clone(), rhs.clone())),
+        Rule::SDiv => op::sdiv(lhs.clone(), rhs.clone()).ok(),
+        Rule::URem => op::urem(lhs.clone(), rhs.clone()).ok(),
+        Rule::SRem => op::srem(lhs.clone(), rhs.clone()).ok(),
+        Rule::AShr => Some(op::ashr(lhs.clone(), rhs.clone())),
+        Rule::Fop2(id) => crate::parse::deffun::ENV.apply(*id, 2)
+            .eval(&[lhs.clone(), rhs.clone()])
+            .ok(),
         _ => None,
     }
 }
@@ -752,6 +870,9 @@ fn parse_bit_constraints(
 }
 
 fn parse_bit_constraint(term: &SyGuSTerm, target_name: &str) -> Option<(usize, bool)> {
+    if let SyGuSTerm::Annotated(inner, _) = term {
+        return parse_bit_constraint(inner, target_name);
+    }
     let SyGuSTerm::Application(eq, args) = term else {
         return None;
     };
@@ -765,6 +886,7 @@ fn parse_bit_constraint(term: &SyGuSTerm, target_name: &str) -> Option<(usize, b
 
 fn bit_literal(term: &SyGuSTerm) -> Option<bool> {
     match term {
+        SyGuSTerm::Annotated(inner, _) => bit_literal(inner),
         SyGuSTerm::Identifier(id) => {
             let name = id.get_name();
             if name.eq_ignore_ascii_case("true") {
@@ -799,36 +921,64 @@ fn bit_literal(term: &SyGuSTerm) -> Option<bool> {
 }
 
 fn extract_bit_of_target(term: &SyGuSTerm, target_name: &str) -> Option<usize> {
+    fn index_numeral(idx: &sygus_parser::ast::Index) -> Option<usize> {
+        match idx {
+            sygus_parser::ast::Index::Numeral(v) => Some(*v),
+            sygus_parser::ast::Index::Symbol(_) => None,
+        }
+    }
+
+    fn extract_indices(id: &Identifier) -> Option<(usize, usize)> {
+        match id {
+            Identifier::Indexed(sym, idxs) if sym == "extract" && idxs.len() >= 2 => {
+                match (index_numeral(&idxs[0]), index_numeral(&idxs[1])) {
+                    (Some(hi), Some(lo)) => Some((hi, lo)),
+                    _ => None,
+                }
+            }
+            Identifier::Indexed(sym, idxs) if sym == "_" && idxs.len() >= 3 => {
+                match (&idxs[0], index_numeral(&idxs[1]), index_numeral(&idxs[2])) {
+                    (sygus_parser::ast::Index::Symbol(op), Some(hi), Some(lo))
+                        if op == "extract" =>
+                    {
+                        Some((hi, lo))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+        .or_else(|| {
+            let text = id.to_string();
+            let parts = text
+                .trim_matches(|c| c == '(' || c == ')')
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            match parts.as_slice() {
+                ["_", "extract", hi, lo] => match (hi.parse::<usize>(), lo.parse::<usize>()) {
+                    (Ok(hi), Ok(lo)) => Some((hi, lo)),
+                    _ => None,
+                },
+                ["extract", hi, lo] => match (hi.parse::<usize>(), lo.parse::<usize>()) {
+                    (Ok(hi), Ok(lo)) => Some((hi, lo)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        })
+    }
+
     match term {
+        SyGuSTerm::Annotated(inner, _) => extract_bit_of_target(inner, target_name),
         SyGuSTerm::Application(id, args) if args.len() == 1 => {
             let arg_is_target =
                 matches!(&args[0], SyGuSTerm::Identifier(var) if var.get_name() == target_name);
             if !arg_is_target {
                 return None;
             }
-            if let Identifier::Indexed(sym, idxs) = id {
-                if sym == "extract" && idxs.len() >= 2 {
-                    if let (
-                        sygus_parser::ast::Index::Numeral(hi),
-                        sygus_parser::ast::Index::Numeral(lo),
-                    ) = (&idxs[0], &idxs[1])
-                    {
-                        if hi == lo {
-                            return Some(*hi);
-                        }
-                    }
-                }
-                if sym == "_" && idxs.len() >= 3 {
-                    if let (
-                        sygus_parser::ast::Index::Symbol(op),
-                        sygus_parser::ast::Index::Numeral(hi),
-                        sygus_parser::ast::Index::Numeral(lo),
-                    ) = (&idxs[0], &idxs[1], &idxs[2])
-                    {
-                        if op == "extract" && hi == lo {
-                            return Some(*hi);
-                        }
-                    }
+            if let Some((hi, lo)) = extract_indices(id) {
+                if hi == lo {
+                    return Some(hi);
                 }
             }
             None

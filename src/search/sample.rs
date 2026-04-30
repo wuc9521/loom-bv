@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     enumerate::{
         algo::Algo,
-        algo2, algo3, algo4,
+        algo2, algo3, algo4, algo_multi,
         config::Config,
         Algo as AAlgo,
     },
@@ -83,7 +83,7 @@ impl SampleConfig {
     pub fn search_inner<const N: usize>(
         &self,
         sol: &mut Solutions,
-        problem: &SynthProblem,
+        problem: &SynthProblem<'static>,
         rng: &mut StdRng,
     ) -> parse::Result<bool> {
         let (args, out) = sol.sample::<N, _>(rng);
@@ -97,6 +97,18 @@ impl SampleConfig {
         let mut filter = self
             .filter
             .state(args.clone(), &out, &bump, self.partial_solution);
+        if problem.cfg.len() > 1 {
+            let mut algo = algo_multi::Algo::new(problem, args, out.clone(), &bump)?;
+            let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
+            let result = !filter.solved;
+            info!(
+                "Searched for {} {} {} Expressions.",
+                algo.len(),
+                algo.count(),
+                algo.count2()
+            );
+            return Ok(result);
+        }
         let config = Config::from_problem(problem, self.partial_solution)?;
         // let consts = config
         //     .iter()
@@ -177,7 +189,7 @@ impl SampleConfig {
     pub fn search(
         &self,
         sol: &mut Solutions,
-        problem: &SynthProblem,
+        problem: &SynthProblem<'static>,
         rng: &mut StdRng,
     ) -> parse::Result<bool> {
         sol.set_cover_limit(if self.cover_limit == 0 {

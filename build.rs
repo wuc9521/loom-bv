@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
 fn main() {
+    if std::env::var_os("CARGO_FEATURE_CHATGPT").is_none() {
+        return;
+    }
+
     let dir: PathBuf = ["tree-sitter", "tree-sitter-python"].iter().collect();
 
     let mut python_parser = cc::Build::new();

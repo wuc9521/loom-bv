@@ -124,15 +124,6 @@ impl PbeConstraint {
         Ok(PbeConstraint { input, output })
     }
 
-    pub fn bv<const N: usize>(&self) -> (Vec<Bv<N>>, Bv<N>) {
-        (
-            self.input
-                .iter()
-                .map(|x| Bv::from(x.iter().map(|v| v.as_u64_lossy())))
-                .collect(),
-            Bv::from(self.output.iter().map(|v| v.as_u64_lossy())),
-        )
-    }
     pub fn bv_from_slice<const N: usize>(&self, iter: &[usize; N]) -> (Vec<Bv<N>>, Bv<N>) {
         (
             self.input
@@ -163,6 +154,7 @@ impl PbeConstraint {
                 .collect(),
         )
     }
+    #[cfg(feature = "chatgpt")]
     pub fn test_owned(&self, expr: &OwnedExpr) -> sdset::SetBuf<usize> {
         SetBuf::new_unchecked(
             (0..self.len())
@@ -196,26 +188,6 @@ impl PbeConstraint {
         })
     }
 
-    pub fn test_on(&self, expr: &Expr, iter: impl Iterator<Item = usize>) -> sdset::SetBuf<usize> {
-        SetBuf::new_unchecked(
-            iter.into_iter()
-                .flat_map(
-                    #[inline(always)]
-                    |i| {
-                        if expr
-                            .eval(self.args(i).as_slice())
-                            .map(|x| x == self.output[i].clone())
-                            .unwrap_or(false)
-                        {
-                            Some(i)
-                        } else {
-                            None
-                        }
-                    },
-                )
-                .collect(),
-        )
-    }
     pub fn set_output(mut self, value: Value) -> Self {
         self.output.iter_mut().for_each(|x| *x = value.clone());
         self
@@ -238,6 +210,7 @@ impl PbeConstraint {
             }
         }
     }
+    #[cfg(feature = "chatgpt")]
     pub fn fmt(&self, arity: usize) -> String {
         let iter = (0..self.output.len()).map(|x| {
             (

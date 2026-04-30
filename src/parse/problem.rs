@@ -4,7 +4,7 @@ use sygus_parser::ast::{Identifier, Index, Sort, SortedVar, SyGuSCmd, SyGuSFile}
 
 use crate::enumerate::expr::OwnedExpr;
 
-use super::{cfg::Cfg, new_custom_error_span, Error};
+use super::{cfg::Cfg, new_custom_error_span, Error, SortAliases};
 
 #[derive(Clone, DebugCustom)]
 #[debug(fmt = "synth-fun {} {:?}", name, args)]
@@ -53,42 +53,11 @@ impl<'i> SynthProblem<'i> {
     }
 
     pub fn parse_from_file(file: &SyGuSFile) -> Result<SynthProblem<'static>, Error> {
-        fn parse_width_from_identifier(id: &Identifier) -> Option<usize> {
-            match id {
-                Identifier::Symbol(sym) => sym.parse::<usize>().ok(),
-                Identifier::Indexed(sym, idxs) => {
-                    if sym == "_" && idxs.len() >= 2 {
-                        if let (Index::Symbol(head), Index::Numeral(width)) = (&idxs[0], &idxs[1]) {
-                            if head == "BitVec" {
-                                return Some(*width);
-                            }
-                        }
-                    }
-                    if sym == "BitVec" {
-                        if let Some(Index::Numeral(width)) = idxs.first() {
-                            return Some(*width);
-                        }
-                    }
-                    idxs.iter().find_map(|i| match i {
-                        Index::Numeral(v) => Some(*v),
-                        Index::Symbol(_) => None,
-                    })
-                }
-            }
-        }
-
-        fn parse_bv_width(sort: &Sort) -> Option<usize> {
-            match sort {
-                Sort::Simple(id) => parse_width_from_identifier(id),
-                Sort::Parameterized(id, ss) => {
-                    parse_width_from_identifier(id).or_else(|| ss.iter().find_map(parse_bv_width))
-                }
-            }
-        }
+        let sort_aliases = SortAliases::from_file(file);
 
         for cmd in &file.cmds {
             if let SyGuSCmd::SynthFun(name, args, ret, cfg) = cmd {
-                let bits = parse_bv_width(ret).ok_or_else(|| {
+                let bits = sort_aliases.parse_sort_width(ret).ok_or_else(|| {
                     let span = Span::new("", 0, 0).unwrap();
                     new_custom_error_span(
                         format!("Unknown return value: display={}, debug={:?}", ret, ret),

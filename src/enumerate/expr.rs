@@ -361,9 +361,6 @@ impl<'a> Expr<'a> {
 enum_ownedexpr!();
 
 impl OwnedExpr {
-    pub fn equal(&self, expr: &Expr) -> bool {
-        self == &expr.into()
-    }
     pub fn from_term(term: &SyGuSTerm, env: &[(&str, u64)]) -> parse::Result<Self> {
         fn empty_span() -> Span<'static> {
             Span::new("", 0, 0).expect("empty span should be valid")
@@ -378,6 +375,42 @@ impl OwnedExpr {
                 sygus_parser::ast::Index::Numeral(v) => Some(*v as u64),
                 sygus_parser::ast::Index::Symbol(_) => None,
             }
+        }
+
+        fn extract_indices(id: &Identifier) -> Option<(u64, u64)> {
+            match id {
+                Identifier::Indexed(sym, idxs) if sym == "_" && idxs.len() >= 3 => {
+                    match (&idxs[0], index_numeral(&idxs[1]), index_numeral(&idxs[2])) {
+                        (sygus_parser::ast::Index::Symbol(op), Some(hi), Some(lo))
+                            if op == "extract" && hi >= lo =>
+                        {
+                            Some((hi, lo))
+                        }
+                        _ => None,
+                    }
+                }
+                Identifier::Indexed(sym, idxs) if sym == "extract" && idxs.len() >= 2 => {
+                    match (index_numeral(&idxs[0]), index_numeral(&idxs[1])) {
+                        (Some(hi), Some(lo)) if hi >= lo => Some((hi, lo)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+            .or_else(|| {
+                let text = id.to_string();
+                let parts = text
+                    .trim_matches(|c| c == '(' || c == ')')
+                    .split_whitespace()
+                    .collect::<Vec<_>>();
+                match parts.as_slice() {
+                    ["_", "extract", hi, lo] => match (hi.parse::<u64>(), lo.parse::<u64>()) {
+                        (Ok(hi), Ok(lo)) if hi >= lo => Some((hi, lo)),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            })
         }
 
         fn literal_to_value(lit: &SyGuSLiteral) -> parse::Result<Value> {
@@ -447,21 +480,13 @@ impl OwnedExpr {
             SyGuSTerm::Annotated(inner, _) => Self::from_term(inner, env),
             SyGuSTerm::Application(id, args) => {
                 let opname = symbol_name(id);
-                if opname == "extract" && args.len() == 1 {
-                    if let Identifier::Indexed(_, idxs) = id {
-                        if idxs.len() >= 2 {
-                            if let (Some(hi), Some(lo)) =
-                                (index_numeral(&idxs[0]), index_numeral(&idxs[1]))
-                            {
-                                if hi >= lo {
-                                    return Ok(Self::Extract(
-                                        Self::from_term(&args[0], env)?.into(),
-                                        hi,
-                                        lo,
-                                    ));
-                                }
-                            }
-                        }
+                if args.len() == 1 {
+                    if let Some((hi, lo)) = extract_indices(id) {
+                        return Ok(Self::Extract(
+                            Self::from_term(&args[0], env)?.into(),
+                            hi,
+                            lo,
+                        ));
                     }
                 }
                 if opname == "concat" && args.len() >= 2 {
@@ -571,62 +596,7 @@ impl OwnedExpr {
         }
     }
 
-    pub fn for_each_subexpr(&self, f: &mut impl FnMut(&OwnedExpr) -> ()) -> () {
-        f(self);
-        macro_rules! foreach_op {
-            (1, $op:ident) => {
-                if let OwnedExpr::$op(e1) = self {
-                    e1.for_each_subexpr(f);
-                    return;
-                }
-            };
-            (2, $op:ident) => {{
-                if let OwnedExpr::$op(e1, e2) = self {
-                    e1.for_each_subexpr(f);
-                    e2.for_each_subexpr(f);
-                    return;
-                }
-            }};
-        }
-        if let OwnedExpr::Var(_) = self {
-            return ();
-        }
-        if let OwnedExpr::Concat(a, b) = self {
-            a.for_each_subexpr(f);
-            b.for_each_subexpr(f);
-            return ();
-        }
-        if let OwnedExpr::Extract(a, _, _) = self {
-            a.for_each_subexpr(f);
-            return ();
-        }
-        if let OwnedExpr::Fop0Dyn(_) = self {
-            return ();
-        }
-        if let OwnedExpr::Const(_) = self {
-            return ();
-        }
-        if let OwnedExpr::Ite(_, _, _) = self {
-            return ();
-        }
-        if let OwnedExpr::FopDyn(_, args) = self {
-            for arg in args {
-                arg.for_each_subexpr(f);
-            }
-            return ();
-        }
-        if let OwnedExpr::Fop1Dyn(_, a) = self {
-            a.for_each_subexpr(f);
-            return ();
-        }
-        if let OwnedExpr::Fop2Dyn(_, a, b) = self {
-            a.for_each_subexpr(f);
-            b.for_each_subexpr(f);
-            return ();
-        }
-        all_ops!(arity);
-        panic!();
-    }
+    #[cfg(feature = "chatgpt")]
     pub fn size(&self) -> usize {
         macro_rules! foreach_op {
             (1, $op:ident) => {

@@ -49,10 +49,6 @@ impl Value {
         Self::from_u64(0, bits)
     }
 
-    pub fn one(bits: usize) -> Self {
-        Self::from_u64(1, bits)
-    }
-
     pub fn is_zero(&self) -> bool {
         match self {
             Value::Small { raw, .. } => *raw == 0,
@@ -71,6 +67,23 @@ impl Value {
         match self {
             Value::Small { raw, .. } => BigUint::from(*raw),
             Value::Big { raw, .. } => raw.clone(),
+        }
+    }
+
+    pub fn bit(&self, bit: usize) -> bool {
+        if bit >= self.bits() {
+            return false;
+        }
+        match self {
+            Value::Small { raw, .. } => ((*raw >> bit) & 1) == 1,
+            Value::Big { raw, .. } => {
+                let limb = bit / 64;
+                let offset = bit % 64;
+                raw.iter_u64_digits()
+                    .nth(limb)
+                    .map(|digit| ((digit >> offset) & 1) == 1)
+                    .unwrap_or(false)
+            }
         }
     }
 

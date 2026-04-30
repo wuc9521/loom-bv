@@ -1,0 +1,212 @@
+#![feature(portable_simd)]
+#![feature(map_try_insert)]
+#![feature(int_roundings)]
+
+use enumerate::expr::OwnedExpr;
+use figment::{
+    providers::{Format, Serialized, Toml},
+    Figment,
+};
+#[cfg(feature = "chatgpt")]
+use itertools::Itertools;
+use parse::{constraint::RefImplConstraint, deffun, PbeConstraint};
+use sygus_parser::ast::{SyGuSCmd, SyGuSFile};
+#[cfg(feature = "chatgpt")]
+use std::sync::mpsc;
+use std::{env, thread};
+
+use crate::{exact::NullarySpec, parse::SynthProblem, search::search::SearchConfig};
+
+extern crate pest;
+
+mod cegis;
+#[cfg(feature = "chatgpt")]
+pub mod chatgpt;
+mod deductive;
+pub mod enumerate;
+mod exact;
+pub mod hash;
+pub mod log;
+pub mod parse;
+pub mod search;
+mod solutions;
+mod tree_learning;
+
+type SolverResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+fn run_cegis_with_large_stack(
+    mut config: SearchConfig,
+    problem: SynthProblem<'static>,
+    refimpl: RefImplConstraint,
+) -> Result<OwnedExpr, String> {
+    const CEGIS_STACK_SIZE: usize = 256 * 1024 * 1024;
+    let handle = thread::Builder::new()
+        .name("cegis-worker".to_string())
+        .stack_size(CEGIS_STACK_SIZE)
+        .spawn(move || {
+            config
+                .cegis_loop(&problem, &refimpl)
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|e| format!("failed to spawn cegis worker: {e}"))?;
+    match handle.join() {
+        Ok(res) => res,
+        Err(_) => Err("cegis worker panicked".to_string()),
+    }
+}
+
+fn solve_file_inner(
+    file: &SyGuSFile,
+    config_path: Option<&str>,
+    description: String,
+) -> SolverResult<(SynthProblem<'static>, OwnedExpr)> {
+    deffun::ENV.clear();
+    deffun::ENV.parse_from_file(file)?;
+    let mut problem = SynthProblem::parse_from_file(file)?;
+    problem.description = description;
+    let pbecstr = PbeConstraint::parse_from_file(problem.name, problem.args.len(), file)?;
+    if let Some(spec) = NullarySpec::from_file(file, &problem)? {
+        let result = exact::search_nullary(&problem, &spec)?;
+        return Ok((problem, result));
+    }
+    if pbecstr.len() > 0 {
+        let fig = Figment::new().merge(Serialized::defaults(SearchConfig::default_pbe()));
+        let fig = if let Some(path) = config_path {
+            fig.merge(Toml::file(path))
+        } else {
+            fig
+        };
+        let mut config: SearchConfig = fig.extract()?;
+        config.is_pbe = true;
+        let result = config.search(&problem, &pbecstr, PbeConstraint::new(problem.args.len()))?;
+        Ok((problem, result))
+    } else if let Some(refimpl) =
+        RefImplConstraint::parse_from_file(file, problem.name, problem.args.len())?
+    {
+        let original_problem = problem.clone();
+        let fig = Figment::new().merge(Serialized::defaults(SearchConfig::default_refimpl()));
+        let fig = if let Some(path) = config_path {
+            fig.merge(Toml::file(path))
+        } else {
+            fig
+        };
+        let mut config: SearchConfig = fig.extract()?;
+        if config.chatgpt {
+            #[cfg(not(feature = "chatgpt"))]
+            {
+                config.chatgpt = false;
+            }
+            #[cfg(feature = "chatgpt")]
+            if let Ok(key) = env::var("OPENAI_API_KEY").or(env::var("OPENAI_API")) {
+                unsafe {
+                    env::set_var("OPENAI_KEY", key);
+                };
+            } else {
+                config.chatgpt = false;
+            }
+        }
+        #[cfg(feature = "chatgpt")]
+        if config.chatgpt && problem.description != "" {
+            let l = log::log_level();
+            let (sender, receiver) = mpsc::channel();
+            let sd = sender.clone();
+            let _ = thread::spawn({
+                let (config, problem, refimpl) = (config.clone(), problem.clone(), refimpl.clone());
+                move || sd.send(run_cegis_with_large_stack(config, problem, refimpl))
+            });
+            let _ = thread::spawn(move || {
+                log::set_log_level(l);
+                let pbe = refimpl.generate_pbe(3, problem.args.len(), &mut config.rng());
+                info!("Use ChatGPT to guide the search");
+                let result = chatgpt::ask(&problem, pbe.clone(), config.gpt_version.clone());
+                info!("Use ChatGPT to guide the search: {:?}", result);
+                for r in result.iter() {
+                    if let Some(last) = r.get("last") {
+                        if pbe.test_owned(last).len() >= 3 {
+                            if config.cegis_check(&problem, &refimpl, last) {
+                                sender.send(Ok(last.clone())).unwrap();
+                                return;
+                            }
+                        }
+                    }
+                }
+                let map = chatgpt::collect_subexpr(result);
+                let v = map
+                    .into_iter()
+                    .flat_map(|(e, i)| if i >= 4 && e.size() < 10 { Some(e) } else { None })
+                    .collect_vec();
+                if !v.is_empty() {
+                    info!("Use ChatGPT to guide the search: {:?}", v);
+                    problem.chatgpt_exprs = v;
+                    sender
+                        .send(run_cegis_with_large_stack(config, problem, refimpl))
+                        .unwrap();
+                }
+            });
+            let a = receiver
+                .recv()
+                .unwrap()
+                .map_err(|e| format!("cegis failed: {e}"))?;
+            return Ok((original_problem, a));
+        }
+        let result = run_cegis_with_large_stack(config, problem, refimpl)
+            .map_err(|e| format!("cegis failed: {e}"))?;
+        Ok((original_problem, result))
+    } else {
+        Err(format!(
+            "Unsupported SyGuS benchmark shape for {}: expected PBE examples, a define-fun reference implementation, or a nullary bit-constraint task",
+            problem.name
+        )
+        .into())
+    }
+}
+
+pub fn solve_sygus_file(
+    file: &SyGuSFile,
+    config_path: Option<&str>,
+    description: &str,
+    verbose: u8,
+) -> SolverResult<String> {
+    log::set_log_level(verbose + 2);
+    unsafe {
+        env::set_var("RUST_MIN_STACK", "268435456");
+    }
+    const MAIN_STACK_SIZE: usize = 256 * 1024 * 1024;
+    let file = file.clone();
+    let config_path = config_path.map(str::to_string);
+    let description = description.to_string();
+    let handle = thread::Builder::new()
+        .name("main-worker".to_string())
+        .stack_size(MAIN_STACK_SIZE)
+        .spawn(move || solve_file_inner(&file, config_path.as_deref(), description))
+        .map_err(|e| format!("failed to spawn main worker: {e}"))?;
+    let result = handle
+        .join()
+        .map_err(|_| "main worker panicked".to_string())??;
+    Ok(format!("(\n{}\n)", result.0.format_solution(&result.1)))
+}
+
+pub fn solve_sygus_cmds(
+    cmds: &[SyGuSCmd],
+    config_path: Option<&str>,
+    description: &str,
+    verbose: u8,
+) -> SolverResult<String> {
+    let file = SyGuSFile { cmds: cmds.to_vec() };
+    match solve_sygus_file(&file, config_path, description, verbose) {
+        Ok(result) => Ok(result),
+        Err(err) => {
+            let message = err.to_string();
+            if !message.contains("Unsupported SyGuS benchmark shape") {
+                return Err(err);
+            }
+            let mut normalized = Vec::new();
+            sygus_parser::writer::write_cmds(&mut normalized, cmds)?;
+            normalized.push(b'\n');
+            let normalized = String::from_utf8(normalized)?;
+            let reparsed =
+                SyGuSFile::from_str(&normalized).map_err(|e| format!("failed to normalize SyGuS commands: {e}"))?;
+            solve_sygus_file(&reparsed, config_path, description, verbose)
+        }
+    }
+}

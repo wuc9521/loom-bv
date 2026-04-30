@@ -1,14 +1,14 @@
 use derive_more::DebugCustom;
-use rand::{rngs::StdRng, seq::SliceRandom};
-use sygus_parser::ast::{
-    Identifier, Index, Sort, SyGuSCmd, SyGuSFile,
-};
+use sygus_parser::ast::{SyGuSCmd, SyGuSFile};
 
 use crate::{
     enumerate::expr::OwnedExpr,
     parse,
 };
 
+#[cfg(feature = "chatgpt")]
+use rand::{rngs::StdRng, seq::SliceRandom};
+#[cfg(feature = "chatgpt")]
 use super::PbeConstraint;
 
 #[derive(DebugCustom, Clone)]
@@ -24,38 +24,7 @@ impl RefImplConstraint {
         target_name: &str,
         target_arity: usize,
     ) -> Result<Option<Self>, parse::Error> {
-        fn parse_width_from_identifier(id: &Identifier) -> Option<usize> {
-            match id {
-                Identifier::Symbol(sym) => sym.parse::<usize>().ok(),
-                Identifier::Indexed(sym, idxs) => {
-                    if sym == "_" && idxs.len() >= 2 {
-                        if let (Index::Symbol(head), Index::Numeral(width)) = (&idxs[0], &idxs[1]) {
-                            if head == "BitVec" {
-                                return Some(*width);
-                            }
-                        }
-                    }
-                    if sym == "BitVec" {
-                        if let Some(Index::Numeral(width)) = idxs.first() {
-                            return Some(*width);
-                        }
-                    }
-                    idxs.iter().find_map(|i| match i {
-                        Index::Numeral(v) => Some(*v),
-                        Index::Symbol(_) => None,
-                    })
-                }
-            }
-        }
-
-        fn parse_sort_width(sort: &Sort) -> Option<usize> {
-            match sort {
-                Sort::Simple(id) => parse_width_from_identifier(id),
-                Sort::Parameterized(id, ss) => {
-                    parse_width_from_identifier(id).or_else(|| ss.iter().find_map(parse_sort_width))
-                }
-            }
-        }
+        let sort_aliases = parse::SortAliases::from_file(file);
 
         for cmd in &file.cmds {
             if let SyGuSCmd::DefineFun(name, args, _, body) = cmd {
@@ -66,7 +35,7 @@ impl RefImplConstraint {
                     .iter()
                     .map(|v| {
                         let name = Box::leak(v.name.clone().into_boxed_str()) as &'static str;
-                        let bits = parse_sort_width(&v.sort).unwrap_or(1) as u64;
+                        let bits = sort_aliases.parse_sort_width(&v.sort).unwrap_or(1) as u64;
                         (name, bits)
                     })
                     .collect();
@@ -80,6 +49,7 @@ impl RefImplConstraint {
 
         Ok(None)
     }
+    #[cfg(feature = "chatgpt")]
     pub fn generate_pbe(&self, count: usize, arity: usize, rng: &mut StdRng) -> PbeConstraint {
         let mut res = PbeConstraint::new(arity);
         for _ in 0..count {

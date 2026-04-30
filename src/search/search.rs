@@ -104,26 +104,28 @@ impl SearchConfig {
                 conds.cond_buffer = Some(cond);
                 let problem = problem;
 
-                let config = Config::<1>::from_problem(&problem, true).unwrap();
-                if config.iter().any(|x| *x == Rule::<1>::And)
-                    && config.iter().any(|x| *x == Rule::<1>::LShr)
-                {
-                    info!("Searching Conditions.");
-                    for shift in config.iter() {
-                        if let Rule::Const(shift) = shift {
-                            let shift = shift.as_u64_lossy() as usize;
-                            use Expr::*;
-                            for i in 0..problem.args.len() {
-                                conds.add_solution(
-                                    &And(
-                                        &LShr(
-                                            &Var(i),
-                                            &Const(Value::from_u64(shift as u64, problem.bits)),
+                if problem.cfg.len() == 1 {
+                    let config = Config::<1>::from_problem(&problem, true).unwrap();
+                    if config.iter().any(|x| *x == Rule::<1>::And)
+                        && config.iter().any(|x| *x == Rule::<1>::LShr)
+                    {
+                        info!("Searching Conditions.");
+                        for shift in config.iter() {
+                            if let Rule::Const(shift) = shift {
+                                let shift = shift.as_u64_lossy() as usize;
+                                use Expr::*;
+                                for i in 0..problem.args.len() {
+                                    conds.add_solution(
+                                        &And(
+                                            &LShr(
+                                                &Var(i),
+                                                &Const(Value::from_u64(shift as u64, problem.bits)),
+                                            ),
+                                            &Const(Value::from_u64(1, 1)),
                                         ),
-                                        &Const(Value::from_u64(1, 1)),
-                                    ),
-                                    0,
-                                );
+                                        0,
+                                    );
+                                }
                             }
                         }
                     }
@@ -255,6 +257,7 @@ impl SearchConfig {
         }
         Ok(result)
     }
+    #[cfg(feature = "chatgpt")]
     pub fn cegis_check<'a>(
         &mut self,
         problem: &SynthProblem<'a>,

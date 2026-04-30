@@ -13,13 +13,6 @@ pub struct NonTerminal<'i>(pub &'i str, pub Vec<SyGuSGTerm>);
 pub struct Cfg<'i>(Vec<NonTerminal<'i>>);
 
 impl<'i> Cfg<'i> {
-    pub fn nt(&self, name: &str) -> Option<usize> {
-        self.iter()
-            .enumerate()
-            .find(|x| x.1 .0 == name)
-            .map(|x| x.0)
-    }
-
     pub fn from_grammar(grammar: &GrammarDef) -> Result<Cfg<'static>, Error> {
         let nts = grammar
             .grouped_rule_lists
