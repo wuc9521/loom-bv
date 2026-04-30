@@ -15,7 +15,6 @@ use crate::{
     info,
     parse::PbeConstraint,
     tree_learning::{self, Bits},
-    warn,
 };
 
 pub type CondBuffer = Arc<Mutex<Vec<(OwnedExpr, Bits)>>>;
@@ -52,9 +51,9 @@ impl<'a> Solutions<'a> {
     }
     pub fn add_solution(&mut self, sol: &Expr<'_>, counter: usize) -> bool {
         let set = self.pbecstr.test(sol);
-        if set.len() == 0 {
-            warn!("{:?}", sol);
-        }
+        // if set.len() == 0 {
+        //     warn!("{:?}", sol);
+        // }
         if set.len() >= self.cover_limit || set.len() >= self.unsolved.len() {
             if self.additional_check.len() > 0 {
                 if self.additional_check.test(sol).len() < self.additional_check.len() {

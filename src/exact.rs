@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use std::collections::hash_map::Entry;
+use std::collections::BTreeMap;
 
 use rustc_hash::FxHashMap;
 
@@ -14,8 +14,6 @@ use crate::{
     },
     parse::{self, new_custom_error_span, SynthProblem},
 };
-
-const MAX_NULLARY_SIZE: usize = 24;
 
 pub enum NullarySpec {
     Exact(Value),
@@ -76,10 +74,11 @@ fn search_nullary_single_nt(
     spec: &NullarySpec,
 ) -> parse::Result<OwnedExpr> {
     let config = Config::<1>::from_problem(problem, true)?;
-    let mut by_size: Vec<Vec<Candidate>> = vec![Vec::new(); MAX_NULLARY_SIZE + 1];
+    let mut by_size: Vec<Vec<Candidate>> = vec![Vec::new(), Vec::new()];
     let mut seen = FxHashMap::<Value, usize>::default();
+    let mut stats = vec![RuleStats::default(); config.len()];
 
-    for rule in config.iter() {
+    for (rule_idx, rule) in config.iter().enumerate() {
         if !rule.is_atom() {
             continue;
         }
@@ -92,15 +91,25 @@ fn search_nullary_single_nt(
                 pest::Span::new("", 0, 0).unwrap(),
             )
         })?;
-        if let Some(found) =
-            insert_single_nt_candidate_lazy(value, 1, spec, &mut seen, &mut by_size, || expr)?
-        {
-            return Ok(found);
+        match insert_single_nt_candidate_lazy(value, 1, spec, &mut seen, &mut by_size, || expr)? {
+            InsertOutcome::Found(found) => return Ok(found),
+            InsertOutcome::Inserted => stats[rule_idx].novel += 1,
+            InsertOutcome::Duplicate => {}
         }
+        stats[rule_idx].attempts += 1;
     }
 
-    for size in 2..=MAX_NULLARY_SIZE {
-        for rule in config.iter() {
+    let mut size = 2;
+    loop {
+        by_size.push(Vec::new());
+        let mut order = (0..config.len()).collect::<Vec<_>>();
+        order.sort_by(|&a, &b| {
+            rule_priority(&config[a], stats[a])
+                .cmp(&rule_priority(&config[b], stats[b]))
+                .reverse()
+        });
+        for rule_idx in order {
+            let rule = &config[rule_idx];
             match rule {
                 Rule::Var(_) | Rule::Const(_) | Rule::Fop0(_) => {}
                 Rule::Not | Rule::Neg | Rule::LShrC(_) | Rule::ShlC(_) | Rule::Fop1(_) => {
@@ -111,7 +120,7 @@ fn search_nullary_single_nt(
                             continue;
                         };
                         let child_expr = child.expr.clone();
-                        if let Some(found) = insert_single_nt_candidate_lazy(
+                        match insert_single_nt_candidate_lazy(
                             value,
                             size,
                             spec,
@@ -119,8 +128,11 @@ fn search_nullary_single_nt(
                             &mut by_size,
                             || build_unary(rule, &child_expr, problem.bits).unwrap(),
                         )? {
-                            return Ok(found);
+                            InsertOutcome::Found(found) => return Ok(found),
+                            InsertOutcome::Inserted => stats[rule_idx].novel += 1,
+                            InsertOutcome::Duplicate => {}
                         }
+                        stats[rule_idx].attempts += 1;
                     }
                 }
                 Rule::Add
@@ -154,7 +166,7 @@ fn search_nullary_single_nt(
                                 };
                                 let lhs_expr = lhs.expr.clone();
                                 let rhs_expr = rhs.expr.clone();
-                                if let Some(found) = insert_single_nt_candidate_lazy(
+                                match insert_single_nt_candidate_lazy(
                                     value,
                                     size,
                                     spec,
@@ -162,8 +174,11 @@ fn search_nullary_single_nt(
                                     &mut by_size,
                                     || build_binary(rule, &lhs_expr, &rhs_expr).unwrap(),
                                 )? {
-                                    return Ok(found);
+                                    InsertOutcome::Found(found) => return Ok(found),
+                                    InsertOutcome::Inserted => stats[rule_idx].novel += 1,
+                                    InsertOutcome::Duplicate => {}
                                 }
+                                stats[rule_idx].attempts += 1;
                             }
                         }
                     }
@@ -195,7 +210,7 @@ fn search_nullary_single_nt(
                                         let cond_owned = cond.expr.clone();
                                         let then_owned = then_expr.expr.clone();
                                         let else_owned = else_expr.expr.clone();
-                                        if let Some(found) = insert_single_nt_candidate_lazy(
+                                        match insert_single_nt_candidate_lazy(
                                             value,
                                             size,
                                             spec,
@@ -209,8 +224,11 @@ fn search_nullary_single_nt(
                                                 )
                                             },
                                         )? {
-                                            return Ok(found);
+                                            InsertOutcome::Found(found) => return Ok(found),
+                                            InsertOutcome::Inserted => stats[rule_idx].novel += 1,
+                                            InsertOutcome::Duplicate => {}
                                         }
+                                        stats[rule_idx].attempts += 1;
                                     }
                                 }
                             }
@@ -220,15 +238,44 @@ fn search_nullary_single_nt(
                 Rule::ChatGPT(_, _) => {}
             }
         }
+        size += 1;
     }
+}
 
-    Err(new_custom_error_span(
-        format!(
-            "Nullary exact search failed within size bound {} for {}",
-            MAX_NULLARY_SIZE, problem.name
-        ),
-        pest::Span::new("", 0, 0).unwrap(),
-    ))
+#[derive(Clone, Copy, Default)]
+struct RuleStats {
+    attempts: usize,
+    novel: usize,
+}
+
+fn rule_priority(rule: &Rule<1>, stats: RuleStats) -> (usize, usize, usize) {
+    let base = match rule {
+        Rule::Fop2(_) => 5,
+        Rule::Fop1(_) => 4,
+        Rule::Ite => 0,
+        Rule::Add
+        | Rule::Xor
+        | Rule::And
+        | Rule::Or
+        | Rule::Sub
+        | Rule::Mul
+        | Rule::UDiv
+        | Rule::LShr
+        | Rule::Shl
+        | Rule::SDiv
+        | Rule::URem
+        | Rule::SRem
+        | Rule::AShr => 1,
+        Rule::Not | Rule::Neg | Rule::LShrC(_) | Rule::ShlC(_) => 2,
+        Rule::Const(_) | Rule::Fop0(_) => 3,
+        Rule::Var(_) | Rule::ChatGPT(_, _) => 0,
+    };
+    let yield_score = if stats.attempts == 0 {
+        usize::MAX / 4
+    } else {
+        (stats.novel * 1024) / stats.attempts.max(1)
+    };
+    (base, yield_score, stats.novel)
 }
 
 #[derive(Clone)]
@@ -317,7 +364,7 @@ fn search_nullary_multi_nt(
 ) -> parse::Result<OwnedExpr> {
     let grammar = build_multi_nt_grammar(problem)?;
     let nt_count = grammar.nts.len();
-    let mut by_size = vec![vec![Vec::<Candidate>::new(); MAX_NULLARY_SIZE + 1]; nt_count];
+    let mut by_size = vec![vec![Vec::<Candidate>::new(); 2]; nt_count];
     let mut seen = vec![FxHashMap::<Value, usize>::default(); nt_count];
 
     for (nt_idx, (_, rules)) in grammar.nts.iter().enumerate() {
@@ -346,7 +393,11 @@ fn search_nullary_multi_nt(
         }
     }
 
-    for size in 2..=MAX_NULLARY_SIZE {
+    let mut size = 2;
+    loop {
+        for buckets in &mut by_size {
+            buckets.push(Vec::new());
+        }
         for (nt_idx, (_, rules)) in grammar.nts.iter().enumerate() {
             for rule in rules {
                 match *rule {
@@ -416,7 +467,9 @@ fn search_nullary_multi_nt(
                                             found = Some(instantiate_defined_fun(fid, &expr_args));
                                             return;
                                         }
-                                        if seen[nt_idx].contains_key(&value) || staged.contains_key(&value) {
+                                        if seen[nt_idx].contains_key(&value)
+                                            || staged.contains_key(&value)
+                                        {
                                             return;
                                         }
                                         let expr_args = tuple
@@ -467,14 +520,15 @@ fn search_nullary_multi_nt(
                                 let cond_len = by_size[cond_nt][cond_size].len();
                                 let then_len = by_size[then_nt][then_size].len();
                                 let else_len = by_size[else_nt][else_size].len();
-                                let mut staged = FxHashMap::<Value, (OwnedExpr, OwnedExpr, OwnedExpr)>::default();
+                                let mut staged =
+                                    FxHashMap::<Value, (OwnedExpr, OwnedExpr, OwnedExpr)>::default(
+                                    );
                                 for cond_idx in 0..cond_len {
                                     let cond = &by_size[cond_nt][cond_size][cond_idx];
                                     for then_idx in 0..then_len {
                                         let then_expr = &by_size[then_nt][then_size][then_idx];
                                         for else_idx in 0..else_len {
-                                            let else_expr =
-                                                &by_size[else_nt][else_size][else_idx];
+                                            let else_expr = &by_size[else_nt][else_size][else_idx];
                                             let value = op::ite(
                                                 cond.value.clone(),
                                                 then_expr.value.clone(),
@@ -487,7 +541,9 @@ fn search_nullary_multi_nt(
                                                     Box::new(else_expr.expr.clone()),
                                                 ));
                                             }
-                                            if seen[nt_idx].contains_key(&value) || staged.contains_key(&value) {
+                                            if seen[nt_idx].contains_key(&value)
+                                                || staged.contains_key(&value)
+                                            {
                                                 continue;
                                             }
                                             staged.insert(
@@ -527,15 +583,8 @@ fn search_nullary_multi_nt(
                 }
             }
         }
+        size += 1;
     }
-
-    Err(new_custom_error_span(
-        format!(
-            "Nullary exact search failed within size bound {} for {}",
-            MAX_NULLARY_SIZE, problem.name
-        ),
-        pest::Span::new("", 0, 0).unwrap(),
-    ))
 }
 
 fn insert_multi_nt_candidate_lazy(
@@ -712,6 +761,12 @@ fn build_multi_nt_grammar(
     Ok(MultiNtGrammar { nts, start: 0 })
 }
 
+enum InsertOutcome {
+    Found(OwnedExpr),
+    Inserted,
+    Duplicate,
+}
+
 fn insert_single_nt_candidate_lazy(
     value: Value,
     size: usize,
@@ -719,19 +774,19 @@ fn insert_single_nt_candidate_lazy(
     seen: &mut FxHashMap<Value, usize>,
     by_size: &mut [Vec<Candidate>],
     build_expr: impl FnOnce() -> OwnedExpr,
-) -> parse::Result<Option<OwnedExpr>> {
+) -> parse::Result<InsertOutcome> {
     if spec.matches(&value) {
-        return Ok(Some(build_expr()));
+        return Ok(InsertOutcome::Found(build_expr()));
     }
     match seen.entry(value.clone()) {
-        Entry::Occupied(_) => Ok(None),
+        Entry::Occupied(_) => Ok(InsertOutcome::Duplicate),
         Entry::Vacant(entry) => {
             entry.insert(size);
             by_size[size].push(Candidate {
                 expr: build_expr(),
                 value,
             });
-            Ok(None)
+            Ok(InsertOutcome::Inserted)
         }
     }
 }
@@ -791,7 +846,10 @@ fn eval_unary_rule(rule: &Rule<1>, child: &Value, bits: usize) -> Option<Value> 
         Rule::Neg => Some(op::neg(child.clone())),
         Rule::LShrC(v) => Some(op::lshr(child.clone(), Value::from_u64(*v, bits))),
         Rule::ShlC(v) => Some(op::shl(child.clone(), Value::from_u64(*v, bits))),
-        Rule::Fop1(id) => crate::parse::deffun::ENV.apply(*id, 1).eval(&[child.clone()]).ok(),
+        Rule::Fop1(id) => crate::parse::deffun::ENV
+            .apply(*id, 1)
+            .eval(&[child.clone()])
+            .ok(),
         _ => None,
     }
 }
@@ -811,7 +869,8 @@ fn eval_binary_rule(rule: &Rule<1>, lhs: &Value, rhs: &Value) -> Option<Value> {
         Rule::URem => op::urem(lhs.clone(), rhs.clone()).ok(),
         Rule::SRem => op::srem(lhs.clone(), rhs.clone()).ok(),
         Rule::AShr => Some(op::ashr(lhs.clone(), rhs.clone())),
-        Rule::Fop2(id) => crate::parse::deffun::ENV.apply(*id, 2)
+        Rule::Fop2(id) => crate::parse::deffun::ENV
+            .apply(*id, 2)
             .eval(&[lhs.clone(), rhs.clone()])
             .ok(),
         _ => None,

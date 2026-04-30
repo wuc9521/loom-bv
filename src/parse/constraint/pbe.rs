@@ -1,11 +1,10 @@
 use itertools::Itertools;
-use pest::Span;
 use rand::{rngs::StdRng, Rng};
 use sdset::SetBuf;
 
 use derive_more::DebugCustom;
 use smallvec::SmallVec;
-use sygus_parser::ast::{Identifier, Literal as SyGuSLiteral, SyGuSCmd, SyGuSFile, SyGuSTerm};
+use sygus_parser::ast::{SyGuSFile, SyGuSTerm};
 
 use crate::enumerate::{
     expr::{Expr, OwnedExpr},
@@ -13,7 +12,8 @@ use crate::enumerate::{
     Bv,
 };
 
-use super::super::{literals, new_custom_error_span, Error};
+use super::{constraints, literal_to_value, term_call_to, term_eq};
+use super::super::Error;
 
 #[derive(DebugCustom, Clone)]
 #[debug(fmt = "{:#x?} -> {:#x?}", input, output)]
@@ -36,90 +36,33 @@ impl PbeConstraint {
         self.input.len()
     }
     pub fn parse_from_file(func: &str, arity: usize, file: &SyGuSFile) -> Result<Self, Error> {
-        fn empty_span() -> Span<'static> {
-            Span::new("", 0, 0).expect("empty span should be valid")
-        }
-        fn id_name(id: &Identifier) -> &str {
-            id.get_name()
-        }
-        fn lit_to_value(lit: &SyGuSLiteral) -> Result<Value, Error> {
-            match lit {
-                SyGuSLiteral::Numeral(v) => Ok(Value::from_u64(*v as u64, 64)),
-                SyGuSLiteral::Bool(v) => Ok(Value::from_u64(if *v { 1 } else { 0 }, 1)),
-                SyGuSLiteral::HexConst(v) => {
-                    let s = if v.starts_with("#x") {
-                        v.clone()
-                    } else {
-                        format!("#x{}", v)
-                    };
-                    let bits = v.trim_start_matches("#x").len() * 4;
-                    literals::value_constant(&s, bits.max(1), empty_span())
-                }
-                SyGuSLiteral::BinConst(v) => {
-                    let s = if v.starts_with("#b") {
-                        v.clone()
-                    } else {
-                        format!("#b{}", v)
-                    };
-                    let bits = v.trim_start_matches("#b").len();
-                    literals::value_constant(&s, bits.max(1), empty_span())
-                }
-                SyGuSLiteral::Decimal(_) | SyGuSLiteral::StringConst(_) => {
-                    Err(new_custom_error_span(
-                        "PBEConstraint: Expecting Constant.".into(),
-                        empty_span(),
-                    ))
-                }
-            }
-        }
-
         let mut input: Vec<Vec<Value>> = (0..arity).map(|_| Vec::new()).collect();
         let mut output = Vec::new();
-        for cmd in &file.cmds {
-            if let SyGuSCmd::Constraint(value) = cmd {
-                if let SyGuSTerm::Application(eq, eq_args) = value {
-                    if id_name(eq) != "=" || eq_args.len() != 2 {
-                        return Err(new_custom_error_span(
-                            "PBEConstraint: Expecting Input-Output Examples (= (<func> <arg1> ...) <output>).".into(),
-                            empty_span(),
-                        ));
-                    }
-                    let l = &eq_args[0];
-                    let r = &eq_args[1];
-                    if let SyGuSTerm::Application(fid, args) = l {
-                        if id_name(fid) == func && args.len() == arity {
-                            for (arg, vec) in args.iter().zip(input.iter_mut()) {
-                                if let SyGuSTerm::Literal(lit) = arg {
-                                    vec.push(lit_to_value(lit)?);
-                                } else {
-                                    return Err(new_custom_error_span(
-                                        "PBEConstraint: Expecting Constant for input.".into(),
-                                        empty_span(),
-                                    ));
-                                }
-                            }
-                            if let SyGuSTerm::Literal(lit) = r {
-                                output.push(lit_to_value(lit)?);
-                            } else {
-                                return Err(new_custom_error_span(
-                                    "PBEConstraint: Expecting Constant for output.".into(),
-                                    empty_span(),
-                                ));
-                            }
-                        }
-                    } else {
-                        return Err(new_custom_error_span(
-                            "PBEConstraint: Expecting Input Examples.".into(),
-                            empty_span(),
-                        ));
-                    }
-                } else {
-                    return Err(new_custom_error_span(
-                        "PBEConstraint: Expecting Input-Output Examples (= (<func> <arg1> ...) <output>).".into(),
-                        empty_span(),
-                    ));
-                }
+        for value in constraints(file) {
+            let Some((lhs, rhs)) = term_eq(value) else {
+                continue;
+            };
+            let Some(args) = term_call_to(lhs, func, arity) else {
+                continue;
+            };
+            let mut row = Vec::with_capacity(arity);
+            for arg in args {
+                let SyGuSTerm::Literal(lit) = arg else {
+                    row.clear();
+                    break;
+                };
+                row.push(literal_to_value(lit)?);
             }
+            if row.len() != arity {
+                continue;
+            }
+            let SyGuSTerm::Literal(lit) = rhs else {
+                continue;
+            };
+            for (value, vec) in row.into_iter().zip(input.iter_mut()) {
+                vec.push(value);
+            }
+            output.push(literal_to_value(lit)?);
         }
         Ok(PbeConstraint { input, output })
     }
