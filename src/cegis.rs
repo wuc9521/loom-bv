@@ -28,25 +28,35 @@ impl CegisState {
         }
     }
 
-    pub fn verify(&mut self, expr: &OwnedExpr) -> bool {
-        let mut solver = self.conf.clone().spawn(Parser).unwrap();
-        solver.set_logic(rsmt2::Logic::QF_BV).unwrap();
+    pub fn verify(&mut self, expr: &OwnedExpr) -> Result<bool, String> {
+        let mut solver = self
+            .conf
+            .clone()
+            .spawn(Parser)
+            .map_err(|e| format!("failed to spawn verifier solver: {e}"))?;
+        solver
+            .set_logic(rsmt2::Logic::QF_BV)
+            .map_err(|e| format!("failed to set verifier logic: {e}"))?;
         for i in 0..self.constraint.args {
             solver
                 .declare_const(VAR_NAMES[i], &format!("(_ BitVec {})", self.bits))
-                .unwrap();
+                .map_err(|e| format!("failed to declare verifier var {}: {e}", VAR_NAMES[i]))?;
         }
         let s = format!("(not (= {} {}))", self.constraint.ref_impl, expr);
-        // println!("{}", s);
-        solver.assert(s).unwrap();
+        solver
+            .assert(s)
+            .map_err(|e| format!("failed to assert verifier constraint: {e}"))?;
 
         loop {
             let a = run_with_timeout(10, {
                 let s = unsafe { you_can::borrow_unchecked(&mut solver) };
                 move || s.check_sat()
             });
-            if let Some(Ok(true)) = a {
-                let model = solver.get_model().unwrap();
+            match a {
+                Some(Ok(true)) => {
+                let model = solver
+                    .get_model()
+                    .map_err(|e| format!("failed to read verifier model: {e}"))?;
                 let mut args = (0..self.constraint.args)
                     .map(|_| Value::zero(self.bits))
                     .collect_vec();
@@ -68,7 +78,7 @@ impl CegisState {
                 if let Ok(out) = self.constraint.ref_impl.eval(&*args) {
                     self.examples.add_example(&*args, out.clone());
                     info!("{:?} can not be verified. {:?} -> {}", expr, args, out);
-                    return false;
+                    return Ok(false);
                 } else {
                     let statement = if let [a] = &*args {
                         format!("(distinct v0 {})", a.to_smt_hex())
@@ -81,10 +91,14 @@ impl CegisState {
                                 .join(" ")
                         )
                     };
-                    solver.assert(statement).unwrap();
+                    solver
+                        .assert(statement)
+                        .map_err(|e| format!("failed to refine verifier constraint: {e}"))?;
                 }
-            } else {
-                return true;
+                }
+                Some(Ok(false)) => return Ok(true),
+                Some(Err(e)) => return Err(format!("verifier solver check_sat failed: {e}")),
+                None => return Err("verifier solver timed out".into()),
             }
         }
     }

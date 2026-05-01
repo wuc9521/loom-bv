@@ -3,7 +3,7 @@ mod pbe;
 mod refimpl;
 
 use pest::Span;
-use sygus_parser::ast::{Identifier, Literal as SyGuSLiteral, SyGuSCmd, SyGuSFile, SyGuSTerm};
+use sygus_parser::ast::{Identifier, Literal as SyGuSLiteral, SyGuSTerm};
 
 use crate::enumerate::value::Value;
 
@@ -69,13 +69,6 @@ fn term_call_to<'a>(term: &'a SyGuSTerm, name: &str, arity: usize) -> Option<&'a
     } else {
         None
     }
-}
-
-fn constraints(file: &SyGuSFile) -> impl Iterator<Item = &SyGuSTerm> {
-    file.cmds.iter().filter_map(|cmd| match cmd {
-        SyGuSCmd::Constraint(term) => Some(term),
-        _ => None,
-    })
 }
 
 fn term_var_name(term: &SyGuSTerm) -> Option<&str> {

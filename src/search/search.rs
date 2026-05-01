@@ -71,6 +71,23 @@ impl SearchConfig {
             seed: usize::MAX,
         }
     }
+    pub fn default_refimpl_classic() -> Self {
+        Self {
+            random_example: 50,
+            additional_check: 0,
+            ar_ratio: 2,
+            ite_tree_limit: 100000,
+            smt_solver: "bitwuzla".into(),
+            limited_ite: false,
+            chatgpt: false,
+            cond_search: SampleConfig::cond_default(),
+            expr_search: SampleConfig::expr_default(),
+            improve_search: SampleConfig::improve_default(),
+            gpt_version: "gpt-4o".into(),
+            is_pbe: false,
+            seed: usize::MAX,
+        }
+    }
     pub fn rng(&self) -> rand::rngs::StdRng {
         if self.seed != usize::MAX {
             rand::SeedableRng::seed_from_u64(self.seed as u64)
@@ -166,6 +183,15 @@ impl SearchConfig {
         if exprs.tree_learning() {
             return Ok(exprs.get_tree());
         }
+        if limited_ite {
+            if let Some(best) = exprs.best_solution() {
+                return Ok(best);
+            }
+            return Err(parse::new_custom_error_span(
+                "Search: no candidate survived expression search.".into(),
+                pest::Span::new("", 0, 0).unwrap(),
+            ));
+        }
 
         if !limited_ite {
             info!("Improving Expressions.");
@@ -176,8 +202,11 @@ impl SearchConfig {
                 self.improve_search.filter.count_limit_solved *= self.ar_ratio;
             }
         }
-
-        Ok(exprs.get_tree())
+        if let Some(best) = exprs.best_solution() {
+            Ok(best)
+        } else {
+            Ok(exprs.get_tree())
+        }
     }
 
     // #[inline(always)]
@@ -244,7 +273,9 @@ impl SearchConfig {
         }
 
         let mut result = self.search(&problem, &cegis.examples, no_additional_check.clone())?;
-        while !cegis.verify(&result) {
+        while !cegis.verify(&result).map_err(|e| {
+            parse::new_custom_error_span(e, pest::Span::new("", 0, 0).unwrap())
+        })? {
             result = self.search(
                 &problem,
                 &cegis.examples,
@@ -270,16 +301,16 @@ impl SearchConfig {
             refimpl.clone(),
             self.get_smt_conf(),
         );
-        cegis.verify(expr)
+        cegis.verify(expr).unwrap_or(false)
     }
     pub fn get_smt_conf<'a>(&self) -> SmtConf {
         match &*self.smt_solver {
             "z3" => SmtConf::default_z3(),
             "bitwuzla" => {
                 let mut conf = SmtConf::yices_2("bitwuzla");
-                conf.option("-i");
-                conf.option("--smt2");
-                conf.option("--model-gen");
+                conf.option("--lang");
+                conf.option("smt2");
+                conf.option("-m");
                 conf
             }
             s => panic!("Unrecongized Solver: {}", s),

@@ -12,8 +12,8 @@ use crate::enumerate::{
     Bv,
 };
 
-use super::{constraints, literal_to_value, term_call_to, term_eq};
-use super::super::Error;
+use super::{literal_to_value, term_call_to, term_eq};
+use super::super::{Error, ProblemView};
 
 #[derive(DebugCustom, Clone)]
 #[debug(fmt = "{:#x?} -> {:#x?}", input, output)]
@@ -36,9 +36,18 @@ impl PbeConstraint {
         self.input.len()
     }
     pub fn parse_from_file(func: &str, arity: usize, file: &SyGuSFile) -> Result<Self, Error> {
+        let view = ProblemView::from_file(file);
+        Self::parse_from_view(func, arity, &view)
+    }
+
+    pub fn parse_from_view(
+        func: &str,
+        arity: usize,
+        view: &ProblemView<'_>,
+    ) -> Result<Self, Error> {
         let mut input: Vec<Vec<Value>> = (0..arity).map(|_| Vec::new()).collect();
         let mut output = Vec::new();
-        for value in constraints(file) {
+        for value in &view.constraints {
             let Some((lhs, rhs)) = term_eq(value) else {
                 continue;
             };

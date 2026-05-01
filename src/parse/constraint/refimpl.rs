@@ -1,5 +1,5 @@
 use derive_more::DebugCustom;
-use sygus_parser::ast::{SortedVar, SyGuSCmd, SyGuSFile, SyGuSTerm};
+use sygus_parser::ast::{SortedVar, SyGuSFile, SyGuSTerm};
 
 use crate::{
     enumerate::expr::OwnedExpr,
@@ -10,7 +10,7 @@ use crate::{
 use rand::{rngs::StdRng, seq::SliceRandom};
 #[cfg(feature = "chatgpt")]
 use super::PbeConstraint;
-use super::{constraints, term_app, term_eq, term_var_name};
+use super::{term_app, term_eq, term_var_name};
 
 #[derive(DebugCustom, Clone)]
 #[debug(fmt = "{:?}", ref_impl)]
@@ -22,6 +22,15 @@ pub struct RefImplConstraint {
 impl RefImplConstraint {
     pub fn parse_from_file(
         file: &SyGuSFile,
+        target_name: &str,
+        target_arity: usize,
+    ) -> Result<Option<Self>, parse::Error> {
+        let view = parse::ProblemView::from_file(file);
+        Self::parse_from_view(&view, target_name, target_arity)
+    }
+
+    pub fn parse_from_view(
+        view: &parse::ProblemView<'_>,
         target_name: &str,
         target_arity: usize,
     ) -> Result<Option<Self>, parse::Error> {
@@ -62,37 +71,35 @@ impl RefImplConstraint {
             Some(env)
         }
 
-        let sort_aliases = parse::SortAliases::from_file(file);
-
-        for cmd in &file.cmds {
-            if let SyGuSCmd::DefineFun(name, args, _, body) = cmd {
-                if name != target_name || args.len() != target_arity {
-                    continue;
-                }
-                let vargs: Vec<(&'static str, u64)> = args
-                    .iter()
-                    .map(|v| {
-                        let name = Box::leak(v.name.clone().into_boxed_str()) as &'static str;
-                        let bits = sort_aliases.parse_sort_width(&v.sort).unwrap_or(1) as u64;
-                        (name, bits)
-                    })
-                    .collect();
-                let e = OwnedExpr::from_term(body, &*vargs)?;
-                return Ok(Some(Self {
-                    ref_impl: e,
-                    args: vargs.len(),
-                }));
+        for def in &view.define_funs {
+            if def.name != target_name || def.args.len() != target_arity {
+                continue;
             }
+            let vargs: Vec<(&'static str, u64)> = def
+                .args
+                .iter()
+                .map(|v| {
+                    let name = Box::leak(v.name.clone().into_boxed_str()) as &'static str;
+                    let bits = view.sort_aliases.parse_sort_width(&v.sort).unwrap_or(1) as u64;
+                    (name, bits)
+                })
+                .collect();
+            let e = OwnedExpr::from_term(def.body, &*vargs)?;
+            return Ok(Some(Self {
+                ref_impl: e,
+                args: vargs.len(),
+            }));
         }
 
-        let Some(target_decl) = file.cmds.iter().find_map(|cmd| match cmd {
-            SyGuSCmd::SynthFun(name, args, _, _) if name == target_name => Some(args.as_slice()),
-            _ => None,
-        }) else {
+        let Some(target_decl) = view
+            .synth_fun
+            .filter(|synth| synth.name == target_name)
+            .map(|synth| synth.args)
+        else {
             return Ok(None);
         };
 
-        for term in constraints(file) {
+        for term in &view.constraints {
             let Some((lhs_eq, rhs_eq)) = term_eq(term) else {
                 continue;
             };
@@ -120,18 +127,15 @@ impl RefImplConstraint {
                 continue;
             };
 
-            for helper_cmd in &file.cmds {
-                let SyGuSCmd::DefineFun(name, helper_formals, _ret, body) = helper_cmd else {
-                    continue;
-                };
-                if name != helper_name {
+            for helper_def in &view.define_funs {
+                if helper_def.name != helper_name {
                     continue;
                 }
-                let Some(env) = helper_env_from_call(helper_formals, helper_call_args, target_decl)
+                let Some(env) = helper_env_from_call(helper_def.args, helper_call_args, target_decl)
                 else {
                     continue;
                 };
-                let e = OwnedExpr::from_term(body, &env)?;
+                let e = OwnedExpr::from_term(helper_def.body, &env)?;
                 return Ok(Some(Self {
                     ref_impl: e,
                     args: target_arity,

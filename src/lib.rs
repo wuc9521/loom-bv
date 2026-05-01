@@ -9,7 +9,7 @@ use figment::{
 };
 #[cfg(feature = "chatgpt")]
 use itertools::Itertools;
-use parse::{constraint::RefImplConstraint, deffun, PbeConstraint};
+use parse::{constraint::RefImplConstraint, deffun, PbeConstraint, ProblemView};
 use sygus_parser::ast::{SyGuSCmd, SyGuSFile};
 #[cfg(feature = "chatgpt")]
 use std::sync::mpsc;
@@ -33,6 +33,31 @@ mod solutions;
 mod tree_learning;
 
 type SolverResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+fn grammar_has_ite(problem: &SynthProblem<'_>) -> bool {
+    fn term_has_ite(term: &sygus_parser::ast::SyGuSTerm) -> bool {
+        match term {
+            sygus_parser::ast::SyGuSTerm::Application(id, args) => {
+                id.get_name() == "ite" || args.iter().any(term_has_ite)
+            }
+            sygus_parser::ast::SyGuSTerm::Let(bindings, body) => {
+                bindings.iter().any(|binding| term_has_ite(&binding.term)) || term_has_ite(body)
+            }
+            _ => false,
+        }
+    }
+
+    problem.cfg.iter().any(|nt| {
+        nt.1.iter().any(|rule| match rule {
+            sygus_parser::ast::SyGuSGTerm::SyGuSTerm(term) => term_has_ite(term),
+            _ => false,
+        })
+    })
+}
+
+fn prefer_classic_bv_refimpl(problem: &SynthProblem<'_>) -> bool {
+    problem.args.len() > 0 && problem.cfg.len() == 1 && !grammar_has_ite(problem)
+}
 
 fn run_cegis_with_large_stack(
     mut config: SearchConfig,
@@ -60,11 +85,12 @@ fn solve_file_inner(
     config_path: Option<&str>,
     description: String,
 ) -> SolverResult<(SynthProblem<'static>, OwnedExpr)> {
+    let view = ProblemView::from_file(file);
     deffun::ENV.clear();
-    deffun::ENV.parse_from_file(file)?;
-    let mut problem = SynthProblem::parse_from_file(file)?;
+    deffun::ENV.parse_from_view(&view)?;
+    let mut problem = SynthProblem::parse_from_view(&view)?;
     problem.description = description;
-    let pbecstr = PbeConstraint::parse_from_file(problem.name, problem.args.len(), file)?;
+    let pbecstr = PbeConstraint::parse_from_view(problem.name, problem.args.len(), &view)?;
     if let Some(spec) = NullarySpec::from_file(file, &problem)? {
         let result = exact::search_nullary(&problem, &spec)?;
         return Ok((problem, result));
@@ -81,10 +107,15 @@ fn solve_file_inner(
         let result = config.search(&problem, &pbecstr, PbeConstraint::new(problem.args.len()))?;
         Ok((problem, result))
     } else if let Some(refimpl) =
-        RefImplConstraint::parse_from_file(file, problem.name, problem.args.len())?
+        RefImplConstraint::parse_from_view(&view, problem.name, problem.args.len())?
     {
         let original_problem = problem.clone();
-        let fig = Figment::new().merge(Serialized::defaults(SearchConfig::default_refimpl()));
+        let defaults = if prefer_classic_bv_refimpl(&problem) {
+            SearchConfig::default_refimpl_classic()
+        } else {
+            SearchConfig::default_refimpl()
+        };
+        let fig = Figment::new().merge(Serialized::defaults(defaults));
         let fig = if let Some(path) = config_path {
             fig.merge(Toml::file(path))
         } else {

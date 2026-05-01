@@ -132,6 +132,9 @@ impl<'a> Solutions<'a> {
             .map(|(x, y)| (x.clone(), Bits::from_bit_iter(y.iter().cloned(), len)))
             .collect()
     }
+    pub fn best_solution(&self) -> Option<OwnedExpr> {
+        self.solved.last().map(|(expr, _)| expr.clone())
+    }
     #[inline(always)]
     pub fn tree_learning(&mut self) -> bool {
         if let Some((conds, limit)) = &self.check_tree_learning {
@@ -165,6 +168,11 @@ impl<'a> Solutions<'a> {
     pub fn get_tree(&self) -> OwnedExpr {
         let (conds, limit) = self.check_tree_learning.as_ref().unwrap();
         let guard = conds.lock();
+        if guard.is_empty() {
+            return self
+                .best_solution()
+                .expect("Expected at least one candidate before requesting a tree.");
+        }
         let bump = Bump::new();
         let tl = tree_learning::tree_learning(
             self.to_bits(),
@@ -173,6 +181,11 @@ impl<'a> Solutions<'a> {
             &bump,
             *limit,
         );
+        if !tl.solved {
+            return self
+                .best_solution()
+                .expect("Expected at least one candidate before requesting a tree.");
+        }
         tl.bvexpr()
     }
 }

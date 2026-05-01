@@ -1,11 +1,11 @@
 use std::cell::UnsafeCell;
 
 use derive_more::DebugCustom;
-use sygus_parser::ast::{SyGuSCmd, SyGuSFile};
+use sygus_parser::ast::SyGuSFile;
 
 use crate::{enumerate::expr::OwnedExpr, info};
 
-use super::{new_custom_error_span, Error, SortAliases};
+use super::{new_custom_error_span, Error, ProblemView};
 
 #[derive(Clone, DebugCustom)]
 #[debug(fmt = "define-fun {} {:?}", name, args)]
@@ -34,44 +34,47 @@ impl Environ {
     }
 
     pub fn parse_from_file(&self, file: &SyGuSFile) -> Result<(), Error> {
-        let sort_aliases = SortAliases::from_file(file);
-        for cmd in &file.cmds {
-            if let SyGuSCmd::DefineFun(name, args, ret, body) = cmd {
-                if name == "if0" || name == "im" {
-                    continue;
-                }
-                let args: Vec<(&'static str, u64)> = args
-                    .iter()
-                    .map(|x| {
-                        let name = Box::leak(x.name.clone().into_boxed_str()) as &'static str;
-                        let bits = sort_aliases.parse_sort_width(&x.sort).unwrap_or(1) as u64;
-                        (name, bits)
-                    })
-                    .collect();
-                let name = Box::leak(name.clone().into_boxed_str());
-                let ret_bits = sort_aliases.parse_sort_width(ret).ok_or_else(|| {
-                    new_custom_error_span(
-                        format!("DefineFun: unsupported return sort for {}: {}", name, ret),
-                        pest::Span::new("", 0, 0).unwrap(),
-                    )
-                })?;
-                let expr = OwnedExpr::from_term(body, args.as_slice())?;
-                info!(
-                    "DefineFun: {} {:?} -> {:?}",
-                    name,
-                    args.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-                    expr
-                );
-                if self.inner().len() <= args.len() {
-                    self.inner().resize_with(args.len() + 1, Vec::new);
-                }
-                self.inner()[args.len()].push(DefineFun {
-                    name,
-                    args: args.iter().map(|(name, _)| *name).collect(),
-                    ret_bits,
-                    expr,
-                });
+        let view = ProblemView::from_file(file);
+        self.parse_from_view(&view)
+    }
+
+    pub fn parse_from_view(&self, view: &ProblemView<'_>) -> Result<(), Error> {
+        for def in &view.define_funs {
+            if def.name == "if0" || def.name == "im" {
+                continue;
             }
+            let args: Vec<(&'static str, u64)> = def
+                .args
+                .iter()
+                .map(|x| {
+                    let name = Box::leak(x.name.clone().into_boxed_str()) as &'static str;
+                    let bits = view.sort_aliases.parse_sort_width(&x.sort).unwrap_or(1) as u64;
+                    (name, bits)
+                })
+                .collect();
+            let name = Box::leak(def.name.to_string().into_boxed_str());
+            let ret_bits = view.sort_aliases.parse_sort_width(def.ret).ok_or_else(|| {
+                new_custom_error_span(
+                    format!("DefineFun: unsupported return sort for {}: {}", name, def.ret),
+                    pest::Span::new("", 0, 0).unwrap(),
+                )
+            })?;
+            let expr = OwnedExpr::from_term(def.body, args.as_slice())?;
+            info!(
+                "DefineFun: {} {:?} -> {:?}",
+                name,
+                args.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+                expr
+            );
+            if self.inner().len() <= args.len() {
+                self.inner().resize_with(args.len() + 1, Vec::new);
+            }
+            self.inner()[args.len()].push(DefineFun {
+                name,
+                args: args.iter().map(|(name, _)| *name).collect(),
+                ret_bits,
+                expr,
+            });
         }
         Ok(())
     }

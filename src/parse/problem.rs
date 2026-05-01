@@ -1,10 +1,10 @@
 use derive_more::DebugCustom;
 use pest::Span;
-use sygus_parser::ast::{Identifier, Index, Sort, SortedVar, SyGuSCmd, SyGuSFile};
+use sygus_parser::ast::{Identifier, Index, Sort, SortedVar, SyGuSFile};
 
 use crate::enumerate::expr::OwnedExpr;
 
-use super::{cfg::Cfg, new_custom_error_span, Error, SortAliases};
+use super::{cfg::Cfg, new_custom_error_span, Error, ProblemView};
 
 #[derive(Clone, DebugCustom)]
 #[debug(fmt = "synth-fun {} {:?}", name, args)]
@@ -53,45 +53,54 @@ impl<'i> SynthProblem<'i> {
     }
 
     pub fn parse_from_file(file: &SyGuSFile) -> Result<SynthProblem<'static>, Error> {
-        let sort_aliases = SortAliases::from_file(file);
+        let view = ProblemView::from_file(file);
+        Self::parse_from_view(&view)
+    }
 
-        for cmd in &file.cmds {
-            if let SyGuSCmd::SynthFun(name, args, ret, cfg) = cmd {
-                let bits = sort_aliases.parse_sort_width(ret).ok_or_else(|| {
-                    let span = Span::new("", 0, 0).unwrap();
-                    new_custom_error_span(
-                        format!("Unknown return value: display={}, debug={:?}", ret, ret),
-                        span,
-                    )
-                })?;
+    pub fn parse_from_view(view: &ProblemView<'_>) -> Result<SynthProblem<'static>, Error> {
+        let synth = view.synth_fun.ok_or_else(|| {
+            new_custom_error_span(
+                "SynthProblem: Expecting a `synth-fun`.".into(),
+                Span::new("", 0, 0).unwrap(),
+            )
+        })?;
 
-                let arg_decls = args.clone();
-                let args: Vec<&'static str> = args
-                    .iter()
-                    .map(|x| Box::leak(x.name.clone().into_boxed_str()) as &'static str)
-                    .collect();
+        let bits = view
+            .sort_aliases
+            .parse_sort_width(synth.ret)
+            .ok_or_else(|| {
+                let span = Span::new("", 0, 0).unwrap();
+                new_custom_error_span(
+                    format!(
+                        "Unknown return value: display={}, debug={:?}",
+                        synth.ret, synth.ret
+                    ),
+                    span,
+                )
+            })?;
 
-                let cfg = cfg.as_ref().ok_or_else(|| {
-                    let span = Span::new("", 0, 0).unwrap();
-                    new_custom_error_span("SynthProblem: Expecting grammar list".into(), span)
-                })?;
-                return Ok(SynthProblem {
-                    name: Box::leak(name.clone().into_boxed_str()),
-                    args,
-                    arg_decls,
-                    cfg: Cfg::from_grammar(cfg)?,
-                    span: Span::new("", 0, 0).unwrap(),
-                    description: "".into(),
-                    chatgpt_exprs: Vec::new(),
-                    bits,
-                    ret_sort: ret.clone(),
-                });
-            }
-        }
-        Err(new_custom_error_span(
-            "SynthProblem: Expecting a `synth-fun`.".into(),
-            Span::new("", 0, 0).unwrap(),
-        ))
+        let arg_decls = synth.args.to_vec();
+        let args: Vec<&'static str> = synth
+            .args
+            .iter()
+            .map(|x| Box::leak(x.name.clone().into_boxed_str()) as &'static str)
+            .collect();
+
+        let cfg = synth.grammar.ok_or_else(|| {
+            let span = Span::new("", 0, 0).unwrap();
+            new_custom_error_span("SynthProblem: Expecting grammar list".into(), span)
+        })?;
+        Ok(SynthProblem {
+            name: Box::leak(synth.name.to_string().into_boxed_str()),
+            args,
+            arg_decls,
+            cfg: Cfg::from_grammar(cfg)?,
+            span: Span::new("", 0, 0).unwrap(),
+            description: "".into(),
+            chatgpt_exprs: Vec::new(),
+            bits,
+            ret_sort: synth.ret.clone(),
+        })
     }
 
     pub fn arg(&self, name: &str) -> Option<usize> {

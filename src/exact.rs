@@ -74,25 +74,32 @@ fn search_nullary_single_nt(
     spec: &NullarySpec,
 ) -> parse::Result<OwnedExpr> {
     let config = Config::<1>::from_problem(problem, true)?;
-    let mut by_size: Vec<Vec<Candidate>> = vec![Vec::new(), Vec::new()];
+    let mut by_size: Vec<Vec<SingleCandidate>> = vec![Vec::new(), Vec::new()];
     let mut seen = FxHashMap::<Value, usize>::default();
     let mut stats = vec![RuleStats::default(); config.len()];
+    let mut interner = SingleExprInterner::default();
+    let mut eval_cache = ExactEvalCache::default();
 
     for (rule_idx, rule) in config.iter().enumerate() {
         if !rule.is_atom() {
             continue;
         }
-        let Some(expr) = build_atom(rule) else {
+        let Some(expr) = build_atom(rule, &mut interner) else {
             continue;
         };
-        let value = expr.eval(&[]).map_err(|_| {
-            new_custom_error_span(
-                format!("Nullary exact search failed to evaluate candidate {}", expr),
-                pest::Span::new("", 0, 0).unwrap(),
-            )
-        })?;
+        let value = SingleExpr::to_owned(expr, &interner.arena)
+            .eval(&[])
+            .map_err(|_| {
+                new_custom_error_span(
+                    format!(
+                        "Nullary exact search failed to evaluate candidate {}",
+                        SingleExpr::to_owned(expr, &interner.arena)
+                    ),
+                    pest::Span::new("", 0, 0).unwrap(),
+                )
+            })?;
         match insert_single_nt_candidate_lazy(value, 1, spec, &mut seen, &mut by_size, || expr)? {
-            InsertOutcome::Found(found) => return Ok(found),
+            InsertOutcome::Found(found) => return Ok(SingleExpr::to_owned(found, &interner.arena)),
             InsertOutcome::Inserted => stats[rule_idx].novel += 1,
             InsertOutcome::Duplicate => {}
         }
@@ -116,7 +123,9 @@ fn search_nullary_single_nt(
                     let children_len = by_size[size - 1].len();
                     for idx in 0..children_len {
                         let child = &by_size[size - 1][idx];
-                        let Some(value) = eval_unary_rule(rule, &child.value, problem.bits) else {
+                        let Some(value) =
+                            eval_unary_rule(rule, &child.value, problem.bits, &mut eval_cache)
+                        else {
                             continue;
                         };
                         let child_expr = child.expr.clone();
@@ -126,9 +135,11 @@ fn search_nullary_single_nt(
                             spec,
                             &mut seen,
                             &mut by_size,
-                            || build_unary(rule, &child_expr, problem.bits).unwrap(),
+                            || build_unary(rule, child_expr, problem.bits, &mut interner).unwrap(),
                         )? {
-                            InsertOutcome::Found(found) => return Ok(found),
+                            InsertOutcome::Found(found) => {
+                                return Ok(SingleExpr::to_owned(found, &interner.arena))
+                            }
                             InsertOutcome::Inserted => stats[rule_idx].novel += 1,
                             InsertOutcome::Duplicate => {}
                         }
@@ -160,7 +171,8 @@ fn search_nullary_single_nt(
                             for rhs_idx in 0..rhs_len {
                                 let lhs = &by_size[lhs_size][lhs_idx];
                                 let rhs = &by_size[rhs_size][rhs_idx];
-                                let Some(value) = eval_binary_rule(rule, &lhs.value, &rhs.value)
+                                let Some(value) =
+                                    eval_binary_rule(rule, &lhs.value, &rhs.value, &mut eval_cache)
                                 else {
                                     continue;
                                 };
@@ -172,9 +184,14 @@ fn search_nullary_single_nt(
                                     spec,
                                     &mut seen,
                                     &mut by_size,
-                                    || build_binary(rule, &lhs_expr, &rhs_expr).unwrap(),
+                                    || {
+                                        build_binary(rule, lhs_expr, rhs_expr, &mut interner)
+                                            .unwrap()
+                                    },
                                 )? {
-                                    InsertOutcome::Found(found) => return Ok(found),
+                                    InsertOutcome::Found(found) => {
+                                        return Ok(SingleExpr::to_owned(found, &interner.arena))
+                                    }
                                     InsertOutcome::Inserted => stats[rule_idx].novel += 1,
                                     InsertOutcome::Duplicate => {}
                                 }
@@ -202,14 +219,14 @@ fn search_nullary_single_nt(
                                         let cond = &by_size[cond_size][cond_idx];
                                         let then_expr = &by_size[then_size][then_idx];
                                         let else_expr = &by_size[else_size][else_idx];
-                                        let value = op::ite(
-                                            cond.value.clone(),
-                                            then_expr.value.clone(),
-                                            else_expr.value.clone(),
-                                        );
-                                        let cond_owned = cond.expr.clone();
-                                        let then_owned = then_expr.expr.clone();
-                                        let else_owned = else_expr.expr.clone();
+                                        let value = if cond.value.is_zero() {
+                                            then_expr.value.clone()
+                                        } else {
+                                            else_expr.value.clone()
+                                        };
+                                        let cond_owned = cond.expr;
+                                        let then_owned = then_expr.expr;
+                                        let else_owned = else_expr.expr;
                                         match insert_single_nt_candidate_lazy(
                                             value,
                                             size,
@@ -217,14 +234,16 @@ fn search_nullary_single_nt(
                                             &mut seen,
                                             &mut by_size,
                                             || {
-                                                OwnedExpr::Ite(
-                                                    Box::new(cond_owned),
-                                                    Box::new(then_owned),
-                                                    Box::new(else_owned),
-                                                )
+                                                interner
+                                                    .intern_ite(cond_owned, then_owned, else_owned)
                                             },
                                         )? {
-                                            InsertOutcome::Found(found) => return Ok(found),
+                                            InsertOutcome::Found(found) => {
+                                                return Ok(SingleExpr::to_owned(
+                                                    found,
+                                                    &interner.arena,
+                                                ))
+                                            }
                                             InsertOutcome::Inserted => stats[rule_idx].novel += 1,
                                             InsertOutcome::Duplicate => {}
                                         }
@@ -246,6 +265,12 @@ fn search_nullary_single_nt(
 struct RuleStats {
     attempts: usize,
     novel: usize,
+}
+
+#[derive(Default)]
+struct ExactEvalCache {
+    fop1: FxHashMap<(usize, Value), Option<Value>>,
+    fop2: FxHashMap<(usize, Value, Value), Option<Value>>,
 }
 
 fn rule_priority(rule: &Rule<1>, stats: RuleStats) -> (usize, usize, usize) {
@@ -294,8 +319,258 @@ struct MultiNtGrammar<'a> {
 
 #[derive(Clone)]
 struct Candidate {
-    expr: OwnedExpr,
+    expr: MultiNodeId,
     value: Value,
+}
+
+type MultiNodeId = usize;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum MultiNodeKey {
+    AtomConst(Value),
+    AtomFop0(usize),
+    AtomOther(OwnedExpr),
+    Apply(usize, Vec<MultiNodeId>),
+    Ite(MultiNodeId, MultiNodeId, MultiNodeId),
+}
+
+#[derive(Clone)]
+enum MultiNode {
+    Atom(OwnedExpr),
+    Apply(usize, Vec<MultiNodeId>),
+    Ite(MultiNodeId, MultiNodeId, MultiNodeId),
+}
+
+#[derive(Default)]
+struct MultiInterner {
+    nodes: FxHashMap<MultiNodeKey, MultiNodeId>,
+    arena: Vec<MultiNode>,
+}
+
+impl MultiInterner {
+    fn alloc(&mut self, key: MultiNodeKey, node: MultiNode) -> MultiNodeId {
+        match self.nodes.entry(key) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                let id = self.arena.len();
+                self.arena.push(node);
+                entry.insert(id);
+                id
+            }
+        }
+    }
+
+    fn intern_atom(&mut self, expr: &OwnedExpr) -> MultiNodeId {
+        let key = match expr {
+            OwnedExpr::Const(v) => MultiNodeKey::AtomConst(v.clone()),
+            OwnedExpr::Fop0Dyn(id) => MultiNodeKey::AtomFop0(*id),
+            _ => MultiNodeKey::AtomOther(expr.clone()),
+        };
+        self.alloc(key, MultiNode::Atom(expr.clone()))
+    }
+
+    fn intern_apply(&mut self, fid: usize, args: Vec<MultiNodeId>) -> MultiNodeId {
+        self.alloc(
+            MultiNodeKey::Apply(fid, args.clone()),
+            MultiNode::Apply(fid, args),
+        )
+    }
+
+    fn intern_ite(
+        &mut self,
+        cond: MultiNodeId,
+        then_expr: MultiNodeId,
+        else_expr: MultiNodeId,
+    ) -> MultiNodeId {
+        self.alloc(
+            MultiNodeKey::Ite(cond, then_expr, else_expr),
+            MultiNode::Ite(cond, then_expr, else_expr),
+        )
+    }
+
+    fn to_owned(&self, id: MultiNodeId) -> OwnedExpr {
+        match &self.arena[id] {
+            MultiNode::Atom(expr) => expr.clone(),
+            MultiNode::Apply(fid, args) => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.to_owned(*arg))
+                    .collect::<Vec<_>>();
+                instantiate_defined_fun(*fid, &args)
+            }
+            MultiNode::Ite(cond, then_expr, else_expr) => OwnedExpr::Ite(
+                Box::new(self.to_owned(*cond)),
+                Box::new(self.to_owned(*then_expr)),
+                Box::new(self.to_owned(*else_expr)),
+            ),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SingleCandidate {
+    expr: SingleNodeId,
+    value: Value,
+}
+
+type SingleNodeId = usize;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum SingleExprKey {
+    AtomConst(*const Value),
+    AtomFop0(usize),
+    Unary(SingleUnaryKind, SingleNodeId),
+    Binary(SingleBinaryKind, SingleNodeId, SingleNodeId),
+    Ite(SingleNodeId, SingleNodeId, SingleNodeId),
+}
+
+#[derive(Clone)]
+enum SingleExpr {
+    Atom(OwnedExpr),
+    Unary(SingleUnaryKind, SingleNodeId),
+    Binary(SingleBinaryKind, SingleNodeId, SingleNodeId),
+    Ite(SingleNodeId, SingleNodeId, SingleNodeId),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum SingleUnaryKind {
+    Not,
+    Neg,
+    LShrC(u64, usize),
+    ShlC(u64, usize),
+    Fop1(usize),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum SingleBinaryKind {
+    Add,
+    Xor,
+    And,
+    Or,
+    Sub,
+    Mul,
+    UDiv,
+    LShr,
+    Shl,
+    SDiv,
+    URem,
+    SRem,
+    AShr,
+    Fop2(usize),
+}
+
+#[derive(Default)]
+struct SingleExprInterner {
+    nodes: FxHashMap<SingleExprKey, SingleNodeId>,
+    arena: Vec<SingleExpr>,
+}
+
+impl SingleExprInterner {
+    fn alloc(&mut self, key: SingleExprKey, expr: SingleExpr) -> SingleNodeId {
+        match self.nodes.entry(key) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                let id = self.arena.len();
+                self.arena.push(expr);
+                entry.insert(id);
+                id
+            }
+        }
+    }
+
+    fn intern_atom_const(&mut self, value: &Value) -> SingleNodeId {
+        self.alloc(
+            SingleExprKey::AtomConst(value as *const Value),
+            SingleExpr::Atom(OwnedExpr::Const(value.clone())),
+        )
+    }
+
+    fn intern_atom_fop0(&mut self, id: usize) -> SingleNodeId {
+        self.alloc(
+            SingleExprKey::AtomFop0(id),
+            SingleExpr::Atom(OwnedExpr::Fop0Dyn(id)),
+        )
+    }
+
+    fn intern_unary(&mut self, kind: SingleUnaryKind, child: SingleNodeId) -> SingleNodeId {
+        self.alloc(
+            SingleExprKey::Unary(kind, child),
+            SingleExpr::Unary(kind, child),
+        )
+    }
+
+    fn intern_binary(
+        &mut self,
+        kind: SingleBinaryKind,
+        lhs: SingleNodeId,
+        rhs: SingleNodeId,
+    ) -> SingleNodeId {
+        self.alloc(
+            SingleExprKey::Binary(kind, lhs, rhs),
+            SingleExpr::Binary(kind, lhs, rhs),
+        )
+    }
+
+    fn intern_ite(
+        &mut self,
+        cond: SingleNodeId,
+        then_expr: SingleNodeId,
+        else_expr: SingleNodeId,
+    ) -> SingleNodeId {
+        self.alloc(
+            SingleExprKey::Ite(cond, then_expr, else_expr),
+            SingleExpr::Ite(cond, then_expr, else_expr),
+        )
+    }
+}
+
+impl SingleExpr {
+    fn to_owned(id: SingleNodeId, arena: &[SingleExpr]) -> OwnedExpr {
+        match &arena[id] {
+            Self::Atom(expr) => expr.clone(),
+            Self::Unary(kind, child) => {
+                let child = Box::new(Self::to_owned(*child, arena));
+                match kind {
+                    SingleUnaryKind::Not => OwnedExpr::Not(child),
+                    SingleUnaryKind::Neg => OwnedExpr::Neg(child),
+                    SingleUnaryKind::LShrC(v, bits) => OwnedExpr::LShr(
+                        child,
+                        Box::new(OwnedExpr::Const(Value::from_u64(*v, *bits))),
+                    ),
+                    SingleUnaryKind::ShlC(v, bits) => OwnedExpr::Shl(
+                        child,
+                        Box::new(OwnedExpr::Const(Value::from_u64(*v, *bits))),
+                    ),
+                    SingleUnaryKind::Fop1(id) => OwnedExpr::Fop1Dyn(*id, child),
+                }
+            }
+            Self::Binary(kind, lhs, rhs) => {
+                let lhs = Box::new(Self::to_owned(*lhs, arena));
+                let rhs = Box::new(Self::to_owned(*rhs, arena));
+                match kind {
+                    SingleBinaryKind::Add => OwnedExpr::Add(lhs, rhs),
+                    SingleBinaryKind::Xor => OwnedExpr::Xor(lhs, rhs),
+                    SingleBinaryKind::And => OwnedExpr::And(lhs, rhs),
+                    SingleBinaryKind::Or => OwnedExpr::Or(lhs, rhs),
+                    SingleBinaryKind::Sub => OwnedExpr::Sub(lhs, rhs),
+                    SingleBinaryKind::Mul => OwnedExpr::Mul(lhs, rhs),
+                    SingleBinaryKind::UDiv => OwnedExpr::UDiv(lhs, rhs),
+                    SingleBinaryKind::LShr => OwnedExpr::LShr(lhs, rhs),
+                    SingleBinaryKind::Shl => OwnedExpr::Shl(lhs, rhs),
+                    SingleBinaryKind::SDiv => OwnedExpr::SDiv(lhs, rhs),
+                    SingleBinaryKind::URem => OwnedExpr::URem(lhs, rhs),
+                    SingleBinaryKind::SRem => OwnedExpr::SRem(lhs, rhs),
+                    SingleBinaryKind::AShr => OwnedExpr::AShr(lhs, rhs),
+                    SingleBinaryKind::Fop2(id) => OwnedExpr::Fop2Dyn(*id, lhs, rhs),
+                }
+            }
+            Self::Ite(cond, then_expr, else_expr) => OwnedExpr::Ite(
+                Box::new(Self::to_owned(*cond, arena)),
+                Box::new(Self::to_owned(*then_expr, arena)),
+                Box::new(Self::to_owned(*else_expr, arena)),
+            ),
+        }
+    }
 }
 
 fn instantiate_defined_fun(fid: usize, args: &[OwnedExpr]) -> OwnedExpr {
@@ -350,7 +625,37 @@ fn for_each_candidate_tuple<'a>(
     }
 }
 
-fn evaluate_apply_value(applied: &OwnedExpr, tuple: &[&Candidate]) -> Result<Value, ()> {
+fn evaluate_apply_value(
+    applied: &OwnedExpr,
+    tuple: &[&Candidate],
+    eval_cache: &mut ExactEvalCache,
+) -> Result<Value, ()> {
+    match (applied, tuple) {
+        (OwnedExpr::Fop1Dyn(fid, _), [arg]) => {
+            let key = (*fid, arg.value.clone());
+            return eval_cache
+                .fop1
+                .entry(key)
+                .or_insert_with(|| crate::parse::deffun::ENV.apply(*fid, 1).eval(&[arg.value.clone()]).ok())
+                .clone()
+                .ok_or(());
+        }
+        (OwnedExpr::Fop2Dyn(fid, _, _), [lhs, rhs]) => {
+            let key = (*fid, lhs.value.clone(), rhs.value.clone());
+            return eval_cache
+                .fop2
+                .entry(key)
+                .or_insert_with(|| {
+                    crate::parse::deffun::ENV
+                        .apply(*fid, 2)
+                        .eval(&[lhs.value.clone(), rhs.value.clone()])
+                        .ok()
+                })
+                .clone()
+                .ok_or(());
+        }
+        _ => {}
+    }
     let mut values = Vec::with_capacity(tuple.len());
     for candidate in tuple {
         values.push(candidate.value.clone());
@@ -366,6 +671,8 @@ fn search_nullary_multi_nt(
     let nt_count = grammar.nts.len();
     let mut by_size = vec![vec![Vec::<Candidate>::new(); 2]; nt_count];
     let mut seen = vec![FxHashMap::<Value, usize>::default(); nt_count];
+    let mut interner = MultiInterner::default();
+    let mut eval_cache = ExactEvalCache::default();
 
     for (nt_idx, (_, rules)) in grammar.nts.iter().enumerate() {
         for rule in rules {
@@ -378,6 +685,7 @@ fn search_nullary_multi_nt(
                     pest::Span::new("", 0, 0).unwrap(),
                 )
             })?;
+            let expr_id = interner.intern_atom(expr);
             if let Some(found) = insert_multi_nt_candidate_lazy(
                 nt_idx,
                 value,
@@ -386,9 +694,9 @@ fn search_nullary_multi_nt(
                 spec,
                 &mut seen,
                 &mut by_size,
-                || expr.clone(),
+                || expr_id,
             )? {
-                return Ok(found);
+                return Ok(interner.to_owned(found));
             }
         }
     }
@@ -407,7 +715,7 @@ fn search_nullary_multi_nt(
                         for idx in 0..children_len {
                             let child = &by_size[child_nt][size][idx];
                             let child_value = child.value.clone();
-                            let child_expr = child.expr.clone();
+                            let child_expr = child.expr;
                             if let Some(found) = insert_multi_nt_candidate_lazy(
                                 nt_idx,
                                 child_value,
@@ -418,7 +726,7 @@ fn search_nullary_multi_nt(
                                 &mut by_size,
                                 || child_expr,
                             )? {
-                                return Ok(found);
+                                return Ok(interner.to_owned(found));
                             }
                         }
                     }
@@ -447,7 +755,7 @@ fn search_nullary_multi_nt(
                                     .collect::<Vec<_>>();
                                 let applied = crate::parse::deffun::ENV.apply(fid, child_nts.len());
                                 let mut tuple = Vec::with_capacity(child_nts.len());
-                                let mut staged = FxHashMap::<Value, Vec<OwnedExpr>>::default();
+                                let mut staged = FxHashMap::<Value, Vec<MultiNodeId>>::default();
                                 for_each_candidate_tuple(
                                     &candidate_pools,
                                     &mut tuple,
@@ -455,16 +763,20 @@ fn search_nullary_multi_nt(
                                         if found.is_some() || pending_error.is_some() {
                                             return;
                                         }
-                                        let value = match evaluate_apply_value(&applied, tuple) {
+                                        let value = match evaluate_apply_value(
+                                            &applied,
+                                            tuple,
+                                            &mut eval_cache,
+                                        ) {
                                             Ok(value) => value,
                                             Err(()) => return,
                                         };
                                         if nt_idx == grammar.start && spec.matches(&value) {
                                             let expr_args = tuple
                                                 .iter()
-                                                .map(|candidate| candidate.expr.clone())
+                                                .map(|candidate| candidate.expr)
                                                 .collect::<Vec<_>>();
-                                            found = Some(instantiate_defined_fun(fid, &expr_args));
+                                            found = Some(interner.intern_apply(fid, expr_args));
                                             return;
                                         }
                                         if seen[nt_idx].contains_key(&value)
@@ -474,7 +786,7 @@ fn search_nullary_multi_nt(
                                         }
                                         let expr_args = tuple
                                             .iter()
-                                            .map(|candidate| candidate.expr.clone())
+                                            .map(|candidate| candidate.expr)
                                             .collect::<Vec<_>>();
                                         staged.insert(value, expr_args);
                                     },
@@ -488,7 +800,7 @@ fn search_nullary_multi_nt(
                                         spec,
                                         &mut seen,
                                         &mut by_size,
-                                        || instantiate_defined_fun(fid, &expr_args),
+                                        || interner.intern_apply(fid, expr_args),
                                     ) {
                                         Ok(Some(expr)) => found = Some(expr),
                                         Ok(None) => {}
@@ -504,7 +816,7 @@ fn search_nullary_multi_nt(
                             return Err(err);
                         }
                         if let Some(found) = found {
-                            return Ok(found);
+                            return Ok(interner.to_owned(found));
                         }
                     }
                     MultiNtRule::Ite(cond_nt, then_nt, else_nt) => {
@@ -520,26 +832,28 @@ fn search_nullary_multi_nt(
                                 let cond_len = by_size[cond_nt][cond_size].len();
                                 let then_len = by_size[then_nt][then_size].len();
                                 let else_len = by_size[else_nt][else_size].len();
-                                let mut staged =
-                                    FxHashMap::<Value, (OwnedExpr, OwnedExpr, OwnedExpr)>::default(
-                                    );
+                                let mut staged = FxHashMap::<
+                                    Value,
+                                    (MultiNodeId, MultiNodeId, MultiNodeId),
+                                >::default();
                                 for cond_idx in 0..cond_len {
                                     let cond = &by_size[cond_nt][cond_size][cond_idx];
                                     for then_idx in 0..then_len {
                                         let then_expr = &by_size[then_nt][then_size][then_idx];
                                         for else_idx in 0..else_len {
                                             let else_expr = &by_size[else_nt][else_size][else_idx];
-                                            let value = op::ite(
-                                                cond.value.clone(),
-                                                then_expr.value.clone(),
-                                                else_expr.value.clone(),
-                                            );
+                                            let value = if cond.value.is_zero() {
+                                                then_expr.value.clone()
+                                            } else {
+                                                else_expr.value.clone()
+                                            };
                                             if nt_idx == grammar.start && spec.matches(&value) {
-                                                return Ok(OwnedExpr::Ite(
-                                                    Box::new(cond.expr.clone()),
-                                                    Box::new(then_expr.expr.clone()),
-                                                    Box::new(else_expr.expr.clone()),
-                                                ));
+                                                let node = interner.intern_ite(
+                                                    cond.expr,
+                                                    then_expr.expr,
+                                                    else_expr.expr,
+                                                );
+                                                return Ok(interner.to_owned(node));
                                             }
                                             if seen[nt_idx].contains_key(&value)
                                                 || staged.contains_key(&value)
@@ -548,11 +862,7 @@ fn search_nullary_multi_nt(
                                             }
                                             staged.insert(
                                                 value,
-                                                (
-                                                    cond.expr.clone(),
-                                                    then_expr.expr.clone(),
-                                                    else_expr.expr.clone(),
-                                                ),
+                                                (cond.expr, then_expr.expr, else_expr.expr),
                                             );
                                         }
                                     }
@@ -566,15 +876,9 @@ fn search_nullary_multi_nt(
                                         spec,
                                         &mut seen,
                                         &mut by_size,
-                                        || {
-                                            OwnedExpr::Ite(
-                                                Box::new(cond_expr),
-                                                Box::new(then_expr),
-                                                Box::new(else_expr),
-                                            )
-                                        },
+                                        || interner.intern_ite(cond_expr, then_expr, else_expr),
                                     )? {
-                                        return Ok(found);
+                                        return Ok(interner.to_owned(found));
                                     }
                                 }
                             }
@@ -595,8 +899,8 @@ fn insert_multi_nt_candidate_lazy(
     spec: &NullarySpec,
     seen: &mut [FxHashMap<Value, usize>],
     by_size: &mut [Vec<Vec<Candidate>>],
-    build_expr: impl FnOnce() -> OwnedExpr,
-) -> parse::Result<Option<OwnedExpr>> {
+    build_expr: impl FnOnce() -> MultiNodeId,
+) -> parse::Result<Option<MultiNodeId>> {
     if nt_idx == grammar.start && spec.matches(&value) {
         return Ok(Some(build_expr()));
     }
@@ -762,7 +1066,7 @@ fn build_multi_nt_grammar(
 }
 
 enum InsertOutcome {
-    Found(OwnedExpr),
+    Found(SingleNodeId),
     Inserted,
     Duplicate,
 }
@@ -772,8 +1076,8 @@ fn insert_single_nt_candidate_lazy(
     size: usize,
     spec: &NullarySpec,
     seen: &mut FxHashMap<Value, usize>,
-    by_size: &mut [Vec<Candidate>],
-    build_expr: impl FnOnce() -> OwnedExpr,
+    by_size: &mut [Vec<SingleCandidate>],
+    build_expr: impl FnOnce() -> SingleNodeId,
 ) -> parse::Result<InsertOutcome> {
     if spec.matches(&value) {
         return Ok(InsertOutcome::Found(build_expr()));
@@ -782,7 +1086,7 @@ fn insert_single_nt_candidate_lazy(
         Entry::Occupied(_) => Ok(InsertOutcome::Duplicate),
         Entry::Vacant(entry) => {
             entry.insert(size);
-            by_size[size].push(Candidate {
+            by_size[size].push(SingleCandidate {
                 expr: build_expr(),
                 value,
             });
@@ -791,70 +1095,82 @@ fn insert_single_nt_candidate_lazy(
     }
 }
 
-fn build_atom(rule: &Rule<1>) -> Option<OwnedExpr> {
+fn build_atom(rule: &Rule<1>, interner: &mut SingleExprInterner) -> Option<SingleNodeId> {
     match rule {
-        Rule::Const(value) => Some(OwnedExpr::Const(value.clone())),
-        Rule::Fop0(id) => Some(OwnedExpr::Fop0Dyn(*id)),
+        Rule::Const(value) => Some(interner.intern_atom_const(value)),
+        Rule::Fop0(id) => Some(interner.intern_atom_fop0(*id)),
         Rule::Var(_) => None,
         _ => None,
     }
 }
 
-fn build_unary(rule: &Rule<1>, child: &OwnedExpr, bits: usize) -> Option<OwnedExpr> {
-    let child = Box::new(child.clone());
+fn build_unary(
+    rule: &Rule<1>,
+    child: SingleNodeId,
+    bits: usize,
+    interner: &mut SingleExprInterner,
+) -> Option<SingleNodeId> {
     match rule {
-        Rule::Not => Some(OwnedExpr::Not(child)),
-        Rule::Neg => Some(OwnedExpr::Neg(child)),
-        Rule::LShrC(v) => Some(OwnedExpr::LShr(
-            child,
-            Box::new(OwnedExpr::Const(Value::from_u64(*v, bits))),
-        )),
-        Rule::ShlC(v) => Some(OwnedExpr::Shl(
-            child,
-            Box::new(OwnedExpr::Const(Value::from_u64(*v, bits))),
-        )),
-        Rule::Fop1(id) => Some(OwnedExpr::Fop1Dyn(*id, child)),
+        Rule::Not => Some(interner.intern_unary(SingleUnaryKind::Not, child)),
+        Rule::Neg => Some(interner.intern_unary(SingleUnaryKind::Neg, child)),
+        Rule::LShrC(v) => Some(interner.intern_unary(SingleUnaryKind::LShrC(*v, bits), child)),
+        Rule::ShlC(v) => Some(interner.intern_unary(SingleUnaryKind::ShlC(*v, bits), child)),
+        Rule::Fop1(id) => Some(interner.intern_unary(SingleUnaryKind::Fop1(*id), child)),
         _ => None,
     }
 }
 
-fn build_binary(rule: &Rule<1>, lhs: &OwnedExpr, rhs: &OwnedExpr) -> Option<OwnedExpr> {
-    let lhs = Box::new(lhs.clone());
-    let rhs = Box::new(rhs.clone());
+fn build_binary(
+    rule: &Rule<1>,
+    lhs: SingleNodeId,
+    rhs: SingleNodeId,
+    interner: &mut SingleExprInterner,
+) -> Option<SingleNodeId> {
     match rule {
-        Rule::Add => Some(OwnedExpr::Add(lhs, rhs)),
-        Rule::Xor => Some(OwnedExpr::Xor(lhs, rhs)),
-        Rule::And => Some(OwnedExpr::And(lhs, rhs)),
-        Rule::Or => Some(OwnedExpr::Or(lhs, rhs)),
-        Rule::Sub => Some(OwnedExpr::Sub(lhs, rhs)),
-        Rule::Mul => Some(OwnedExpr::Mul(lhs, rhs)),
-        Rule::UDiv => Some(OwnedExpr::UDiv(lhs, rhs)),
-        Rule::LShr => Some(OwnedExpr::LShr(lhs, rhs)),
-        Rule::Shl => Some(OwnedExpr::Shl(lhs, rhs)),
-        Rule::SDiv => Some(OwnedExpr::SDiv(lhs, rhs)),
-        Rule::URem => Some(OwnedExpr::URem(lhs, rhs)),
-        Rule::SRem => Some(OwnedExpr::SRem(lhs, rhs)),
-        Rule::AShr => Some(OwnedExpr::AShr(lhs, rhs)),
-        Rule::Fop2(id) => Some(OwnedExpr::Fop2Dyn(*id, lhs, rhs)),
+        Rule::Add => Some(interner.intern_binary(SingleBinaryKind::Add, lhs, rhs)),
+        Rule::Xor => Some(interner.intern_binary(SingleBinaryKind::Xor, lhs, rhs)),
+        Rule::And => Some(interner.intern_binary(SingleBinaryKind::And, lhs, rhs)),
+        Rule::Or => Some(interner.intern_binary(SingleBinaryKind::Or, lhs, rhs)),
+        Rule::Sub => Some(interner.intern_binary(SingleBinaryKind::Sub, lhs, rhs)),
+        Rule::Mul => Some(interner.intern_binary(SingleBinaryKind::Mul, lhs, rhs)),
+        Rule::UDiv => Some(interner.intern_binary(SingleBinaryKind::UDiv, lhs, rhs)),
+        Rule::LShr => Some(interner.intern_binary(SingleBinaryKind::LShr, lhs, rhs)),
+        Rule::Shl => Some(interner.intern_binary(SingleBinaryKind::Shl, lhs, rhs)),
+        Rule::SDiv => Some(interner.intern_binary(SingleBinaryKind::SDiv, lhs, rhs)),
+        Rule::URem => Some(interner.intern_binary(SingleBinaryKind::URem, lhs, rhs)),
+        Rule::SRem => Some(interner.intern_binary(SingleBinaryKind::SRem, lhs, rhs)),
+        Rule::AShr => Some(interner.intern_binary(SingleBinaryKind::AShr, lhs, rhs)),
+        Rule::Fop2(id) => Some(interner.intern_binary(SingleBinaryKind::Fop2(*id), lhs, rhs)),
         _ => None,
     }
 }
 
-fn eval_unary_rule(rule: &Rule<1>, child: &Value, bits: usize) -> Option<Value> {
+fn eval_unary_rule(
+    rule: &Rule<1>,
+    child: &Value,
+    bits: usize,
+    eval_cache: &mut ExactEvalCache,
+) -> Option<Value> {
     match rule {
         Rule::Not => Some(op::not(child.clone())),
         Rule::Neg => Some(op::neg(child.clone())),
         Rule::LShrC(v) => Some(op::lshr(child.clone(), Value::from_u64(*v, bits))),
         Rule::ShlC(v) => Some(op::shl(child.clone(), Value::from_u64(*v, bits))),
-        Rule::Fop1(id) => crate::parse::deffun::ENV
-            .apply(*id, 1)
-            .eval(&[child.clone()])
-            .ok(),
+        Rule::Fop1(id) => eval_cache
+            .fop1
+            .entry((*id, child.clone()))
+            .or_insert_with(|| crate::parse::deffun::ENV.apply(*id, 1).eval(&[child.clone()]).ok())
+            .clone(),
         _ => None,
     }
 }
 
-fn eval_binary_rule(rule: &Rule<1>, lhs: &Value, rhs: &Value) -> Option<Value> {
+fn eval_binary_rule(
+    rule: &Rule<1>,
+    lhs: &Value,
+    rhs: &Value,
+    eval_cache: &mut ExactEvalCache,
+) -> Option<Value> {
     match rule {
         Rule::Add => Some(op::add(lhs.clone(), rhs.clone())),
         Rule::Xor => Some(op::xor(lhs.clone(), rhs.clone())),
@@ -869,10 +1185,16 @@ fn eval_binary_rule(rule: &Rule<1>, lhs: &Value, rhs: &Value) -> Option<Value> {
         Rule::URem => op::urem(lhs.clone(), rhs.clone()).ok(),
         Rule::SRem => op::srem(lhs.clone(), rhs.clone()).ok(),
         Rule::AShr => Some(op::ashr(lhs.clone(), rhs.clone())),
-        Rule::Fop2(id) => crate::parse::deffun::ENV
-            .apply(*id, 2)
-            .eval(&[lhs.clone(), rhs.clone()])
-            .ok(),
+        Rule::Fop2(id) => eval_cache
+            .fop2
+            .entry((*id, lhs.clone(), rhs.clone()))
+            .or_insert_with(|| {
+                crate::parse::deffun::ENV
+                    .apply(*id, 2)
+                    .eval(&[lhs.clone(), rhs.clone()])
+                    .ok()
+            })
+            .clone(),
         _ => None,
     }
 }

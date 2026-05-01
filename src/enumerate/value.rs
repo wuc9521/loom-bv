@@ -217,7 +217,7 @@ impl Value {
             if v & sign == 0 {
                 Self::from_u64(v >> s, bits)
             } else {
-                let fill = (!0u64) << (bits - s);
+                let fill = if s == 0 { 0 } else { (!0u64) << (bits - s) };
                 Self::from_u64((v >> s) | fill, bits)
             }
         } else {
