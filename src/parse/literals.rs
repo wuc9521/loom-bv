@@ -1,10 +1,15 @@
-use nom::{branch::alt, bytes::complete::{tag, take_while1}, combinator::map_res, sequence::preceded, IResult};
+use nom::{
+    branch::alt,
+    bytes::complete::{tag, take_while1},
+    combinator::map_res,
+    sequence::preceded,
+    IResult,
+};
 use pest::Span;
 
 use crate::enumerate::value::Value;
 
-use super::{Error, new_custom_error_span};
-
+use super::{new_custom_error_span, Error};
 
 fn u64_hex(input: &str) -> Result<u64, std::num::ParseIntError> {
     u64::from_str_radix(input, 16)
@@ -18,9 +23,15 @@ fn u64_decimal(input: &str) -> Result<u64, std::num::ParseIntError> {
 
 #[cfg(feature = "chatgpt")]
 pub fn u64_constant_python<'i>(input: &str) -> Option<u64> {
-    let res : IResult<&str, u64> = alt((
-        preceded(tag("0x"), map_res(take_while1(|x: char| x.is_digit(16)), u64_hex)),
-        preceded(tag("0b"), map_res(take_while1(|x: char| x.is_digit(2)), u64_binary)),
+    let res: IResult<&str, u64> = alt((
+        preceded(
+            tag("0x"),
+            map_res(take_while1(|x: char| x.is_digit(16)), u64_hex),
+        ),
+        preceded(
+            tag("0b"),
+            map_res(take_while1(|x: char| x.is_digit(2)), u64_binary),
+        ),
         map_res(take_while1(|x: char| x.is_digit(10)), u64_decimal),
     ))(input);
     res.ok().map(|(_, y)| y)
@@ -32,7 +43,10 @@ pub fn u64_constant<'i>(input: &str, span: Span<'i>) -> Result<u64, Error> {
     }
 
     if let Some(rest) = input.strip_prefix("#b") {
-        let bits = rest.chars().filter(|c| *c == '0' || *c == '1').collect::<String>();
+        let bits = rest
+            .chars()
+            .filter(|c| *c == '0' || *c == '1')
+            .collect::<String>();
         let sig = bits.trim_start_matches('0');
         if sig.len() > 64 {
             return Err(overflow_err(
@@ -56,10 +70,19 @@ pub fn u64_constant<'i>(input: &str, span: Span<'i>) -> Result<u64, Error> {
         }
     }
 
-    let res : IResult<&str, u64> = alt((
-        preceded(tag("#x"), map_res(take_while1(|x: char| x.is_digit(16)), u64_hex)),
-        preceded(tag("#d"), map_res(take_while1(|x: char| x.is_digit(10)), u64_decimal)),
-        preceded(tag("#b"), map_res(take_while1(|x: char| x.is_digit(2)), u64_binary)),
+    let res: IResult<&str, u64> = alt((
+        preceded(
+            tag("#x"),
+            map_res(take_while1(|x: char| x.is_digit(16)), u64_hex),
+        ),
+        preceded(
+            tag("#d"),
+            map_res(take_while1(|x: char| x.is_digit(10)), u64_decimal),
+        ),
+        preceded(
+            tag("#b"),
+            map_res(take_while1(|x: char| x.is_digit(2)), u64_binary),
+        ),
     ))(input);
     match res {
         Ok((s, a)) => {

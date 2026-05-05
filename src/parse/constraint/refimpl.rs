@@ -1,16 +1,13 @@
 use derive_more::DebugCustom;
 use sygus_parser::ast::{SortedVar, SyGuSFile, SyGuSTerm};
 
-use crate::{
-    enumerate::expr::OwnedExpr,
-    parse,
-};
+use crate::{enumerate::expr::OwnedExpr, parse};
 
-#[cfg(feature = "chatgpt")]
-use rand::{rngs::StdRng, seq::SliceRandom};
 #[cfg(feature = "chatgpt")]
 use super::PbeConstraint;
 use super::{term_app, term_eq, term_var_name};
+#[cfg(feature = "chatgpt")]
+use rand::{rngs::StdRng, seq::SliceRandom};
 
 #[derive(DebugCustom, Clone)]
 #[debug(fmt = "{:?}", ref_impl)]
@@ -34,10 +31,7 @@ impl RefImplConstraint {
         target_name: &str,
         target_arity: usize,
     ) -> Result<Option<Self>, parse::Error> {
-        fn target_var_indices(
-            args: &[SyGuSTerm],
-            target_args: &[SortedVar],
-        ) -> Option<Vec<usize>> {
+        fn target_var_indices(args: &[SyGuSTerm], target_args: &[SortedVar]) -> Option<Vec<usize>> {
             let mut indices = Vec::with_capacity(args.len());
             for arg in args {
                 let name = term_var_name(arg)?;
@@ -113,7 +107,8 @@ impl RefImplConstraint {
                     continue;
                 }
                 let expected = (0..target_decl.len()).collect::<Vec<_>>();
-                if target_var_indices(rhs_args, target_decl).as_deref() != Some(expected.as_slice()) {
+                if target_var_indices(rhs_args, target_decl).as_deref() != Some(expected.as_slice())
+                {
                     continue;
                 }
                 let Some((helper_name, helper_call_args)) = term_app(lhs) else {
@@ -131,7 +126,8 @@ impl RefImplConstraint {
                 if helper_def.name != helper_name {
                     continue;
                 }
-                let Some(env) = helper_env_from_call(helper_def.args, helper_call_args, target_decl)
+                let Some(env) =
+                    helper_env_from_call(helper_def.args, helper_call_args, target_decl)
                 else {
                     continue;
                 };

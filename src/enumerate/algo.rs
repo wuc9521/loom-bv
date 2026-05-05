@@ -190,6 +190,36 @@ impl<'a, const N: usize> Algo<'a, N> {
                             }
                         }
                     };
+                    (op2_sym_idem, $e:expr, $v:expr) => {
+                        for i in 1..(size - 1).div_ceil(2) {
+                            for (e1, v1) in self.exprs[i].iter() {
+                                for (e2, v2) in self.exprs[size - 1 - i].iter() {
+                                    let v = $v(*v1, *v2);
+                                    insert!(bump.alloc($e(e1, e2)), v);
+                                }
+                            }
+                        }
+                        if (size - 1) % 2 == 0 {
+                            for ((e1, v1), (e2, v2)) in self.exprs[(size - 1) / 2].iter().combinations() {
+                                let v = $v(*v1, *v2);
+                                insert!(bump.alloc($e(e1, e2)), v);
+                            }
+                        }
+                        if size > 3 && self.dag_size {
+                            for (e1, v1) in self.exprs[size - 2].iter() {
+                                let e1: &'a Expr<'a> = *e1;
+                                let selfmap = unsafe { you_can::borrow_unchecked(&mut self.map) };
+                                e1.for_each_subexpr(&mut |e2, v2| {
+                                    if std::ptr::eq(e1, e2) {
+                                        return Ok(());
+                                    }
+                                    let v = $v(*v1, v2);
+                                    insert!(bump.alloc($e(e1, e2)), v, selfmap, Option);
+                                    Ok(())
+                                }, &*args)?;
+                            }
+                        }
+                    };
                     (op2, $e:expr, $v:expr) => {
                         if rule.is_shift() {
                             let l = if *rule == Rule::LShr { 1 } else if *rule == Rule::Shl { 2 } else { 3 };
@@ -228,6 +258,54 @@ impl<'a, const N: usize> Algo<'a, N> {
                                 }, &*args)?;
                                 let v = $v(*v1, *v1);
                                 insert!(bump.alloc($e(e1, e1)), v);
+                            }
+                        }
+                    };
+                    (op2_idem, $e:expr, $v:expr) => {
+                        if rule.is_shift() {
+                            let l = if *rule == Rule::LShr { 1 } else if *rule == Rule::Shl { 2 } else { 3 };
+                            if size > l {
+                                for (e2, v2) in self.exprs[1].iter() {
+                                    if let Expr::Var(_) | Expr::Const(_) = e2 {
+                                        for (e1, v1) in self.exprs[size - l].iter() {
+                                            if std::ptr::eq(*e1, *e2) {
+                                                continue;
+                                            }
+                                            let v = $v(*v1, *v2);
+                                            insert!(bump.alloc($e(e1, e2)), v);
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        if size > 2 {
+                            for i in 1..(size - 2) {
+                                for (e2, v2) in self.exprs[size - 2 - i].iter() {
+                                    for (e1, v1) in self.exprs[i].iter() {
+                                        if std::ptr::eq(*e1, *e2) {
+                                            continue;
+                                        }
+                                        let v = $v(*v1, *v2);
+                                        insert!(bump.alloc($e(e1, e2)), v);
+                                    }
+                                }
+                            }
+                        }
+                        if size > 3 && self.dag_size {
+                            for (e1, v1) in self.exprs[size - 2].iter() {
+                                let e1: &'a Expr<'a> = *e1;
+                                let selfmap = unsafe { you_can::borrow_unchecked(&mut self.map) };
+                                e1.for_each_subexpr(&mut |e2, v2| {
+                                    if std::ptr::eq(e1, e2) {
+                                        return Ok(());
+                                    }
+                                    let v = $v(*v1, v2);
+                                    insert!(bump.alloc($e(e1, e2)), v, selfmap, Option);
+                                    let v = $v(v2, *v1);
+                                    insert!(bump.alloc($e(e2, e1)), v, selfmap, Option);
+                                    Ok(())
+                                }, &*args)?;
                             }
                         }
                     };

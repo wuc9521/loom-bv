@@ -12,8 +12,8 @@ use crate::enumerate::{
     Bv,
 };
 
-use super::{literal_to_value, term_call_to, term_eq};
 use super::super::{Error, ProblemView};
+use super::{literal_to_value, term_call_to, term_eq};
 
 #[derive(DebugCustom, Clone)]
 #[debug(fmt = "{:#x?} -> {:#x?}", input, output)]

@@ -16,7 +16,6 @@ use std::sync::mpsc;
 use std::{env, thread};
 
 use crate::{exact::NullarySpec, parse::SynthProblem, search::search::SearchConfig};
-
 extern crate pest;
 
 mod cegis;
@@ -91,6 +90,12 @@ fn solve_file_inner(
     problem.description = description;
     let pbecstr = PbeConstraint::parse_from_view(problem.name, problem.args.len(), &view)?;
     if let Some(spec) = NullarySpec::from_file(file, &problem)? {
+        info!(
+            "Using exact nullary search for {} (bits={}, cmds={})",
+            problem.name,
+            problem.bits,
+            file.cmds.len()
+        );
         let result = exact::search_nullary(&problem, &spec)?;
         return Ok((problem, result));
     }
@@ -195,6 +200,7 @@ pub fn solve_sygus_file(
     file: &SyGuSFile,
     config_path: Option<&str>,
     description: &str,
+    _axioms: Option<&[sygus_parser::ast::SyGuSTerm]>,
     verbose: u8,
 ) -> SolverResult<String> {
     log::set_log_level(verbose + 2);
@@ -220,10 +226,11 @@ pub fn solve_sygus_cmds(
     cmds: &[SyGuSCmd],
     config_path: Option<&str>,
     description: &str,
+    axioms: Option<&[sygus_parser::ast::SyGuSTerm]>,
     verbose: u8,
 ) -> SolverResult<String> {
     let file = SyGuSFile { cmds: cmds.to_vec() };
-    match solve_sygus_file(&file, config_path, description, verbose) {
+    match solve_sygus_file(&file, config_path, description, axioms, verbose) {
         Ok(result) => Ok(result),
         Err(err) => {
             let message = err.to_string();
@@ -236,7 +243,7 @@ pub fn solve_sygus_cmds(
             let normalized = String::from_utf8(normalized)?;
             let reparsed =
                 SyGuSFile::from_str(&normalized).map_err(|e| format!("failed to normalize SyGuS commands: {e}"))?;
-            solve_sygus_file(&reparsed, config_path, description, verbose)
+            solve_sygus_file(&reparsed, config_path, description, axioms, verbose)
         }
     }
 }

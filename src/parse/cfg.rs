@@ -13,13 +13,20 @@ pub struct NonTerminal<'i>(pub &'i str, pub Vec<SyGuSGTerm>);
 pub struct Cfg<'i>(Vec<NonTerminal<'i>>);
 
 impl<'i> Cfg<'i> {
-    pub fn from_grammar(grammar: &GrammarDef) -> Result<Cfg<'static>, Error> {
+    pub fn from_grammar(
+        grammar: &GrammarDef,
+        _axioms: Option<&super::axiom::AxiomRewriter>,
+    ) -> Result<Cfg<'static>, Error> {
         let nts = grammar
             .grouped_rule_lists
             .iter()
             .map(|rule_list| {
                 let name: &'static str = Box::leak(rule_list.symbol.clone().into_boxed_str());
-                let terms = rule_list.terms.clone();
+                let terms = rule_list
+                    .terms
+                    .iter()
+                    .cloned()
+                    .collect();
                 NonTerminal(name, terms)
             })
             .collect::<Vec<_>>();

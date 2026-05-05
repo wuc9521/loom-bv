@@ -1,25 +1,22 @@
 use std::cell::RefCell;
-use std::cell::Cell;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-
-thread_local! {
-    pub static LOGLEVEL: Cell<u8>  = Cell::new(2);
-}
+pub static LOGLEVEL: AtomicU8 = AtomicU8::new(2);
 thread_local! {
     pub static INDENT: RefCell<String> = RefCell::new(String::from(""));
 }
 
 pub fn set_log_level(level: u8) {
-    LOGLEVEL.set(level);
+    LOGLEVEL.store(level, Ordering::Relaxed);
 }
 pub fn log_level() -> u8 {
-    LOGLEVEL.get()
+    LOGLEVEL.load(Ordering::Relaxed)
 }
 
 #[macro_export]
 macro_rules! info {
     ($($fmt:expr),+) => {
-        if $crate::log::LOGLEVEL.get() >= 3 {
+        if $crate::log::LOGLEVEL.load(std::sync::atomic::Ordering::Relaxed) >= 3 {
             $crate::log::INDENT.with_borrow(|s| {
                 eprintln!("{}\u{001b}[34;1m\u{001b}[1mINFO\u{001b}[0m \u{001b}[36m{:?}\u{001b}[0m {}:{}", s, format_args!($($fmt),+), file!(), line!())
             })
@@ -30,7 +27,7 @@ macro_rules! info {
 #[macro_export]
 macro_rules! debg {
     ($($fmt:expr),+) => {
-        if $crate::log::LOGLEVEL.get() >= 4 {
+        if $crate::log::LOGLEVEL.load(std::sync::atomic::Ordering::Relaxed) >= 4 {
             $crate::log::INDENT.with_borrow(|s| {
                 eprintln!("{}\u{001b}[32mDEBG\u{001b}[0m \u{001b}[36m{:?}\u{001b}[0m {}:{}", s, format_args!($($fmt),+), file!(), line!())
             })
@@ -41,7 +38,7 @@ macro_rules! debg {
 #[macro_export]
 macro_rules! debg2 {
     ($($fmt:expr),+) => {
-        if $crate::log::LOGLEVEL.get() >= 5 {
+        if $crate::log::LOGLEVEL.load(std::sync::atomic::Ordering::Relaxed) >= 5 {
             $crate::log::INDENT.with_borrow(|s| {
                 eprintln!("{}\u{001b}[32mDEBG\u{001b}[0m \u{001b}[36m{:?}\u{001b}[0m {}:{}", s, format_args!($($fmt),+), file!(), line!())
             })
@@ -52,7 +49,7 @@ macro_rules! debg2 {
 #[macro_export]
 macro_rules! crit {
     ($($fmt:expr),+) => {
-        if $crate::log::LOGLEVEL.get() >= 1 {
+        if $crate::log::LOGLEVEL.load(std::sync::atomic::Ordering::Relaxed) >= 1 {
         $crate::log::INDENT.with_borrow(|s| {
             eprintln!("{}\u{001b}[31;1m\u{001b}[1mCRIT\u{001b}[0m \u{001b}[36m{:?}\u{001b}[0m {}:{}", s, format_args!($($fmt),+), file!(), line!())
         })
@@ -63,7 +60,7 @@ macro_rules! crit {
 #[macro_export]
 macro_rules! warn {
     ($($fmt:expr),+) => {
-        if $crate::log::LOGLEVEL.get() >= 2 {
+        if $crate::log::LOGLEVEL.load(std::sync::atomic::Ordering::Relaxed) >= 2 {
             $crate::log::INDENT.with_borrow(|s| {
                 eprintln!("{}\u{001b}[33;1m\u{001b}[1mWARN\u{001b}[0m \u{001b}[36m{:?}\u{001b}[0m {}:{}", s, format_args!($($fmt),+), file!(), line!())
             })

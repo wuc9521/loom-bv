@@ -12,6 +12,7 @@ use super::{new_custom_error_span, Error, ProblemView};
 pub struct DefineFun {
     pub name: &'static str,
     pub args: Vec<&'static str>,
+    pub arg_bits: Vec<usize>,
     pub ret_bits: usize,
     pub expr: OwnedExpr,
 }
@@ -55,7 +56,10 @@ impl Environ {
             let name = Box::leak(def.name.to_string().into_boxed_str());
             let ret_bits = view.sort_aliases.parse_sort_width(def.ret).ok_or_else(|| {
                 new_custom_error_span(
-                    format!("DefineFun: unsupported return sort for {}: {}", name, def.ret),
+                    format!(
+                        "DefineFun: unsupported return sort for {}: {}",
+                        name, def.ret
+                    ),
                     pest::Span::new("", 0, 0).unwrap(),
                 )
             })?;
@@ -72,6 +76,7 @@ impl Environ {
             self.inner()[args.len()].push(DefineFun {
                 name,
                 args: args.iter().map(|(name, _)| *name).collect(),
+                arg_bits: args.iter().map(|(_, bits)| *bits as usize).collect(),
                 ret_bits,
                 expr,
             });
@@ -92,6 +97,9 @@ impl Environ {
     }
     pub fn ret_bits(&self, id: usize, nargs: usize) -> usize {
         self.inner()[nargs][id].ret_bits
+    }
+    pub fn arg_bits(&self, id: usize, nargs: usize) -> &[usize] {
+        &self.inner()[nargs][id].arg_bits
     }
     pub fn name(&self, id: usize, nargs: usize) -> &'static str {
         &self.inner()[nargs][id].name
