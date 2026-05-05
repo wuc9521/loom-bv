@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     enumerate::{
+        algo,
         algo_multi,
+        config::Config,
         Algo as AAlgo,
     },
     info,
@@ -44,6 +46,15 @@ impl SampleConfig {
             dag_size: true,
         }
     }
+    pub const fn expr_default_ni() -> Self {
+        Self {
+            sample: 64,
+            cover_limit: 13,
+            partial_solution: true,
+            filter: FilterConfig::expr_default(),
+            dag_size: true,
+        }
+    }
     pub const fn improve_default() -> Self {
         Self {
             sample: 8,
@@ -71,16 +82,30 @@ impl SampleConfig {
         let mut filter = self
             .filter
             .state(args.clone(), &out, &bump, self.partial_solution);
-        let mut algo = algo_multi::Algo::new(problem, args, out.clone(), &bump)?;
-        let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
-        let result = !filter.solved;
-        info!(
-            "Searched for {} {} {} Expressions.",
-            algo.len(),
-            algo.count(),
-            algo.count2()
-        );
-        Ok(result)
+        if problem.cfg.len() == 1 {
+            let config = Config::from_problem(problem, self.partial_solution)?;
+            let mut algo = algo::Algo::new(config, args, out.clone(), self.dag_size, &bump);
+            let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
+            let result = !filter.solved;
+            info!(
+                "Searched for {} {} {} Expressions.",
+                algo.len(),
+                algo.count(),
+                algo.count2()
+            );
+            Ok(result)
+        } else {
+            let mut algo = algo_multi::Algo::new(problem, args, out.clone(), &bump)?;
+            let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
+            let result = !filter.solved;
+            info!(
+                "Searched for {} {} {} Expressions.",
+                algo.len(),
+                algo.count(),
+                algo.count2()
+            );
+            Ok(result)
+        }
     }
     #[inline(always)]
     pub fn search(

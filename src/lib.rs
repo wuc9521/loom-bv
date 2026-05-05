@@ -34,6 +34,30 @@ mod tree_learning;
 
 type SolverResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+fn grammar_has_ite(problem: &SynthProblem<'_>) -> bool {
+    fn term_has_ite(term: &sygus_parser::ast::SyGuSTerm) -> bool {
+        match term {
+            sygus_parser::ast::SyGuSTerm::Application(id, args) => {
+                id.get_name() == "ite" || args.iter().any(term_has_ite)
+            }
+            sygus_parser::ast::SyGuSTerm::Annotated(inner, _) => term_has_ite(inner),
+            sygus_parser::ast::SyGuSTerm::Let(bindings, body) => {
+                bindings.iter().any(|binding| term_has_ite(&binding.term)) || term_has_ite(body)
+            }
+            sygus_parser::ast::SyGuSTerm::Forall(_, body)
+            | sygus_parser::ast::SyGuSTerm::Exists(_, body) => term_has_ite(body),
+            _ => false,
+        }
+    }
+
+    problem.cfg.iter().any(|nt| {
+        nt.1.iter().any(|rule| match rule {
+            sygus_parser::ast::SyGuSGTerm::SyGuSTerm(term) => term_has_ite(term),
+            _ => false,
+        })
+    })
+}
+
 fn run_cegis_with_large_stack(
     mut config: SearchConfig,
     problem: SynthProblem<'static>,
@@ -85,7 +109,12 @@ fn solve_file_inner(
         RefImplConstraint::parse_from_view(&view, problem.name, problem.args.len())?
     {
         let original_problem = problem.clone();
-        let fig = Figment::new().merge(Serialized::defaults(SearchConfig::default_refimpl()));
+        let defaults = if grammar_has_ite(&problem) {
+            SearchConfig::default_refimpl()
+        } else {
+            SearchConfig::default_refimpl_classic()
+        };
+        let fig = Figment::new().merge(Serialized::defaults(defaults));
         let fig = if let Some(path) = config_path {
             fig.merge(Toml::file(path))
         } else {

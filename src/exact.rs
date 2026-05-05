@@ -8,10 +8,13 @@ use sygus_parser::ast::{Identifier, Literal as SyGuSLiteral, SyGuSCmd, SyGuSFile
 use crate::{
     enumerate::{
         expr::OwnedExpr,
-        grammar::{for_each_candidate_tuple, for_each_size_split, MultiConfig, MultiRule},
+        grammar::{
+            build_owned_application, for_each_candidate_tuple, for_each_size_split, MultiConfig,
+            MultiRule, TemplateExpr,
+        },
         value::Value,
     },
-    parse::{self, new_custom_error_span, SynthProblem},
+    parse::{self, deffun, new_custom_error_span, SynthProblem},
 };
 
 pub enum NullarySpec {
@@ -86,18 +89,65 @@ pub fn search_nullary(
 
 #[derive(Clone)]
 struct Candidate {
-    expr: OwnedExpr,
+    node: NodeId,
     value: Value,
+}
+
+type NodeId = usize;
+
+struct Node {
+    nt_idx: usize,
+    rule_idx: usize,
+    children: Vec<NodeId>,
+}
+
+struct ExactGrammar<'a> {
+    nts: Vec<(&'a str, Vec<ExactRule>)>,
+    start: usize,
+}
+
+#[derive(Clone)]
+enum ExactRule {
+    Alias(usize),
+    Leaf(OwnedExpr),
+    Unary {
+        fid: usize,
+        child_nt: usize,
+    },
+    Binary {
+        fid: usize,
+        lhs_nt: usize,
+        rhs_nt: usize,
+    },
+    Nary {
+        fid: usize,
+        child_nts: Vec<usize>,
+    },
+    GenericTemplate {
+        template: TemplateExpr,
+        child_nts: Vec<usize>,
+        base_size: usize,
+    },
+}
+
+#[derive(Default)]
+struct ExactEvalCache {
+    leaves: FxHashMap<OwnedExpr, Option<Value>>,
+    fop1: FxHashMap<(usize, Value), Option<Value>>,
+    fop2: FxHashMap<(usize, Value, Value), Option<Value>>,
+    fopn: FxHashMap<(usize, Vec<Value>), Option<Value>>,
 }
 
 fn search_nullary_multi_nt(
     problem: &SynthProblem<'static>,
     spec: &NullarySpec,
 ) -> parse::Result<OwnedExpr> {
-    let grammar = MultiConfig::from_problem(problem)?;
+    let grammar = compile_exact_grammar(&MultiConfig::from_problem(problem)?);
     let nt_count = grammar.nts.len();
     let mut by_size = vec![vec![Vec::<Candidate>::new()]; nt_count];
     let mut seen = vec![FxHashMap::<Value, usize>::default(); nt_count];
+    let mut nodes = Vec::<Node>::new();
+    let mut eval_cache = ExactEvalCache::default();
 
     for size in 1.. {
         for buckets in &mut by_size {
@@ -105,92 +155,282 @@ fn search_nullary_multi_nt(
         }
 
         for (nt_idx, (_, rules)) in grammar.nts.iter().enumerate() {
-            for rule in rules {
-                let MultiRule::Template {
-                    template,
-                    child_nts,
-                    base_size,
-                } = rule
-                else {
-                    continue;
-                };
-
-                if *base_size > size {
-                    continue;
-                }
-
-                let child_total = size - base_size;
-                if child_nts.is_empty() {
-                    if child_total == 0 {
-                        let expr = match template.instantiate(&[]) {
-                            Ok(expr) => expr,
-                            Err(_) => continue,
-                        };
-                        if let Some(value) = expr.eval(&[]).ok() {
+            for (rule_idx, rule) in rules.iter().enumerate() {
+                match rule {
+                    ExactRule::Alias(_) => {}
+                    ExactRule::Leaf(expr) => {
+                        if size != 1 {
+                            continue;
+                        }
+                        if let Some(value) = eval_cache
+                            .leaves
+                            .entry(expr.clone())
+                            .or_insert_with(|| expr.eval(&[]).ok())
+                            .clone()
+                        {
                             if let Some(found) = insert_multi_nt_candidate(
                                 nt_idx,
-                                Candidate { expr, value },
+                                value,
                                 size,
                                 &grammar,
                                 spec,
                                 &mut seen,
                                 &mut by_size,
+                                &mut nodes,
+                                || Node {
+                                    nt_idx,
+                                    rule_idx,
+                                    children: Vec::new(),
+                                },
                             ) {
                                 return Ok(found);
                             }
                         }
                     }
-                    continue;
-                }
-
-                if child_total < child_nts.len() {
-                    continue;
-                }
-
-                let mut staged = Vec::new();
-                let mut splits = Vec::with_capacity(child_nts.len());
-                for_each_size_split(child_total, child_nts.len(), &mut splits, &mut |sizes| {
-                    let pools = child_nts
-                        .iter()
-                        .zip(sizes.iter())
-                        .map(|(child_nt, child_size)| {
-                            by_size[*child_nt]
-                                .get(*child_size)
+                    ExactRule::Unary { fid, child_nt } => {
+                        if size < 2 {
+                            continue;
+                        }
+                        let child_size = size - 1;
+                        let children = by_size[*child_nt]
+                            .get(child_size)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[][..])
+                            .to_vec();
+                        for child in &children {
+                            let value = evaluate_fop1(*fid, &child.value, &mut eval_cache);
+                            let Ok(value) = value else {
+                                continue;
+                            };
+                            if let Some(found) = insert_multi_nt_candidate(
+                                nt_idx,
+                                value,
+                                size,
+                                &grammar,
+                                spec,
+                                &mut seen,
+                                &mut by_size,
+                                &mut nodes,
+                                || Node {
+                                    nt_idx,
+                                    rule_idx,
+                                    children: vec![child.node],
+                                },
+                            ) {
+                                return Ok(found);
+                            }
+                        }
+                    }
+                    ExactRule::Binary {
+                        fid,
+                        lhs_nt,
+                        rhs_nt,
+                    } => {
+                        if size < 3 {
+                            continue;
+                        }
+                        for lhs_size in 1..(size - 1) {
+                            let rhs_size = size - 1 - lhs_size;
+                            let lhs_pool = by_size[*lhs_nt]
+                                .get(lhs_size)
                                 .map(Vec::as_slice)
                                 .unwrap_or(&[][..])
-                        })
-                        .collect::<Vec<_>>();
-                    if pools.iter().any(|pool| pool.is_empty()) {
-                        return;
+                                .to_vec();
+                            let rhs_pool = by_size[*rhs_nt]
+                                .get(rhs_size)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[][..])
+                                .to_vec();
+                            if lhs_pool.is_empty() || rhs_pool.is_empty() {
+                                continue;
+                            }
+                            for lhs in &lhs_pool {
+                                for rhs in &rhs_pool {
+                                    let value =
+                                        evaluate_fop2(*fid, &lhs.value, &rhs.value, &mut eval_cache);
+                                    let Ok(value) = value else {
+                                        continue;
+                                    };
+                                    if let Some(found) = insert_multi_nt_candidate(
+                                        nt_idx,
+                                        value,
+                                        size,
+                                        &grammar,
+                                        spec,
+                                        &mut seen,
+                                        &mut by_size,
+                                        &mut nodes,
+                                        || Node {
+                                            nt_idx,
+                                            rule_idx,
+                                            children: vec![lhs.node, rhs.node],
+                                        },
+                                    ) {
+                                        return Ok(found);
+                                    }
+                                }
+                            }
+                        }
                     }
-                    let mut tuple = Vec::with_capacity(child_nts.len());
-                    for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
-                        let child_exprs = tuple
-                            .iter()
-                            .map(|cand| cand.expr.clone())
-                            .collect::<Vec<_>>();
-                        let expr = match template.instantiate(&child_exprs) {
-                            Ok(expr) => expr,
-                            Err(_) => return,
-                        };
-                        let Some(value) = expr.eval(&[]).ok() else {
-                            return;
-                        };
-                        staged.push(Candidate { expr, value });
-                    });
-                });
+                    ExactRule::Nary { fid, child_nts } => {
+                        if size <= child_nts.len() {
+                            continue;
+                        }
+                        let child_total = size - 1;
+                        let mut staged = Vec::new();
+                        let mut splits = Vec::with_capacity(child_nts.len());
+                        for_each_size_split(
+                            child_total,
+                            child_nts.len(),
+                            &mut splits,
+                            &mut |sizes| {
+                                let pools = child_nts
+                                    .iter()
+                                    .zip(sizes.iter())
+                                    .map(|(child_nt, child_size)| {
+                                        by_size[*child_nt]
+                                            .get(*child_size)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or(&[][..])
+                                    })
+                                    .collect::<Vec<_>>();
+                                if pools.iter().any(|pool| pool.is_empty()) {
+                                    return;
+                                }
+                                let mut tuple = Vec::with_capacity(child_nts.len());
+                                for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
+                                    let child_values = tuple
+                                        .iter()
+                                        .map(|cand| cand.value.clone())
+                                        .collect::<Vec<_>>();
+                                    let Ok(value) =
+                                        evaluate_fopn(*fid, &child_values, &mut eval_cache)
+                                    else {
+                                        return;
+                                    };
+                                    let children =
+                                        tuple.iter().map(|cand| cand.node).collect::<Vec<_>>();
+                                    staged.push((value, children));
+                                });
+                            },
+                        );
 
-                for candidate in staged {
-                    if let Some(found) = insert_multi_nt_candidate(
-                        nt_idx,
-                        candidate,
-                        size,
-                        &grammar,
-                        spec,
-                        &mut seen,
-                        &mut by_size,
-                    ) {
-                        return Ok(found);
+                        for (value, children) in staged {
+                            if let Some(found) = insert_multi_nt_candidate(
+                                nt_idx,
+                                value,
+                                size,
+                                &grammar,
+                                spec,
+                                &mut seen,
+                                &mut by_size,
+                                &mut nodes,
+                                || Node {
+                                    nt_idx,
+                                    rule_idx,
+                                    children,
+                                },
+                            ) {
+                                return Ok(found);
+                            }
+                        }
+                    }
+                    ExactRule::GenericTemplate {
+                        template,
+                        child_nts,
+                        base_size,
+                    } => {
+                        if *base_size > size {
+                            continue;
+                        }
+                        let child_total = size - base_size;
+                        if child_nts.is_empty() {
+                            if child_total == 0 {
+                                if let Ok(value) =
+                                    evaluate_template_value(template, &[], &mut eval_cache)
+                                {
+                                    if let Some(found) = insert_multi_nt_candidate(
+                                        nt_idx,
+                                        value,
+                                        size,
+                                        &grammar,
+                                        spec,
+                                        &mut seen,
+                                        &mut by_size,
+                                        &mut nodes,
+                                        || Node {
+                                            nt_idx,
+                                            rule_idx,
+                                            children: Vec::new(),
+                                        },
+                                    ) {
+                                        return Ok(found);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        if child_total < child_nts.len() {
+                            continue;
+                        }
+                        let mut staged = Vec::new();
+                        let mut splits = Vec::with_capacity(child_nts.len());
+                        for_each_size_split(
+                            child_total,
+                            child_nts.len(),
+                            &mut splits,
+                            &mut |sizes| {
+                                let pools = child_nts
+                                    .iter()
+                                    .zip(sizes.iter())
+                                    .map(|(child_nt, child_size)| {
+                                        by_size[*child_nt]
+                                            .get(*child_size)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or(&[][..])
+                                    })
+                                    .collect::<Vec<_>>();
+                                if pools.iter().any(|pool| pool.is_empty()) {
+                                    return;
+                                }
+                                let mut tuple = Vec::with_capacity(child_nts.len());
+                                for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
+                                    let child_values = tuple
+                                        .iter()
+                                        .map(|cand| cand.value.clone())
+                                        .collect::<Vec<_>>();
+                                    let Ok(value) = evaluate_template_value(
+                                        template,
+                                        &child_values,
+                                        &mut eval_cache,
+                                    ) else {
+                                        return;
+                                    };
+                                    let children =
+                                        tuple.iter().map(|cand| cand.node).collect::<Vec<_>>();
+                                    staged.push((value, children));
+                                });
+                            },
+                        );
+                        for (value, children) in staged {
+                            if let Some(found) = insert_multi_nt_candidate(
+                                nt_idx,
+                                value,
+                                size,
+                                &grammar,
+                                spec,
+                                &mut seen,
+                                &mut by_size,
+                                &mut nodes,
+                                || Node {
+                                    nt_idx,
+                                    rule_idx,
+                                    children,
+                                },
+                            ) {
+                                return Ok(found);
+                            }
+                        }
                     }
                 }
             }
@@ -200,13 +440,13 @@ fn search_nullary_multi_nt(
             let mut changed = false;
             for (nt_idx, (_, rules)) in grammar.nts.iter().enumerate() {
                 for rule in rules {
-                    let MultiRule::Alias(child_nt) = rule else {
+                    let ExactRule::Alias(child_nt) = rule else {
                         continue;
                     };
                     let before = by_size[nt_idx][size].len();
                     let staged = by_size[*child_nt][size].clone();
                     for candidate in staged {
-                        if let Some(found) = insert_multi_nt_candidate(
+                        if let Some(found) = insert_existing_candidate(
                             nt_idx,
                             candidate,
                             size,
@@ -214,6 +454,7 @@ fn search_nullary_multi_nt(
                             spec,
                             &mut seen,
                             &mut by_size,
+                            &nodes,
                         ) {
                             return Ok(found);
                         }
@@ -230,17 +471,18 @@ fn search_nullary_multi_nt(
     unreachable!("nullary enumeration should either find a solution or diverge");
 }
 
-fn insert_multi_nt_candidate(
+fn insert_existing_candidate(
     nt_idx: usize,
     candidate: Candidate,
     size: usize,
-    grammar: &MultiConfig<'_>,
+    grammar: &ExactGrammar<'_>,
     spec: &NullarySpec,
     seen: &mut [FxHashMap<Value, usize>],
     by_size: &mut [Vec<Vec<Candidate>>],
+    nodes: &[Node],
 ) -> Option<OwnedExpr> {
     if nt_idx == grammar.start && spec.matches(&candidate.value) {
-        return Some(candidate.expr);
+        return materialize_node(candidate.node, grammar, nodes);
     }
     match seen[nt_idx].entry(candidate.value.clone()) {
         Entry::Occupied(_) => None,
@@ -250,6 +492,214 @@ fn insert_multi_nt_candidate(
             None
         }
     }
+}
+
+fn insert_multi_nt_candidate(
+    nt_idx: usize,
+    value: Value,
+    size: usize,
+    grammar: &ExactGrammar<'_>,
+    spec: &NullarySpec,
+    seen: &mut [FxHashMap<Value, usize>],
+    by_size: &mut [Vec<Vec<Candidate>>],
+    nodes: &mut Vec<Node>,
+    build_node: impl FnOnce() -> Node,
+) -> Option<OwnedExpr> {
+    if nt_idx == grammar.start && spec.matches(&value) {
+        let node = intern_node(nodes, build_node());
+        return materialize_node(node, grammar, nodes);
+    }
+    match seen[nt_idx].entry(value.clone()) {
+        Entry::Occupied(_) => None,
+        Entry::Vacant(entry) => {
+            entry.insert(size);
+            let node = intern_node(nodes, build_node());
+            by_size[nt_idx][size].push(Candidate { node, value });
+            None
+        }
+    }
+}
+
+fn intern_node(nodes: &mut Vec<Node>, node: Node) -> NodeId {
+    let id = nodes.len();
+    nodes.push(node);
+    id
+}
+
+fn materialize_node(id: NodeId, grammar: &ExactGrammar<'_>, nodes: &[Node]) -> Option<OwnedExpr> {
+    let node = &nodes[id];
+    match &grammar.nts[node.nt_idx].1[node.rule_idx] {
+        ExactRule::Alias(_) => materialize_node(node.children[0], grammar, nodes),
+        ExactRule::Leaf(expr) => Some(expr.clone()),
+        ExactRule::Unary { fid, .. } => Some(OwnedExpr::Fop1Dyn(
+            *fid,
+            Box::new(materialize_node(node.children[0], grammar, nodes)?),
+        )),
+        ExactRule::Binary { fid, .. } => Some(OwnedExpr::Fop2Dyn(
+            *fid,
+            Box::new(materialize_node(node.children[0], grammar, nodes)?),
+            Box::new(materialize_node(node.children[1], grammar, nodes)?),
+        )),
+        ExactRule::Nary { fid, .. } => Some(OwnedExpr::FopDyn(
+            *fid,
+            node.children
+                .iter()
+                .map(|child| materialize_node(*child, grammar, nodes))
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        ExactRule::GenericTemplate { template, .. } => {
+            let child_exprs = node
+                .children
+                .iter()
+                .map(|child| materialize_node(*child, grammar, nodes))
+                .collect::<Option<Vec<_>>>()?;
+            template.instantiate(&child_exprs).ok()
+        }
+    }
+}
+
+fn compile_exact_grammar(grammar: &MultiConfig<'static>) -> ExactGrammar<'static> {
+    let nts = grammar
+        .nts
+        .iter()
+        .map(|(name, rules)| {
+            let compiled = rules
+                .iter()
+                .map(|rule| match rule {
+                    MultiRule::Alias(nt) => ExactRule::Alias(*nt),
+                    MultiRule::Template {
+                        template,
+                        child_nts,
+                        base_size,
+                    } => compile_exact_rule(template, child_nts, *base_size),
+                })
+                .collect();
+            (*name, compiled)
+        })
+        .collect();
+    ExactGrammar {
+        nts,
+        start: grammar.start,
+    }
+}
+
+fn compile_exact_rule(template: &TemplateExpr, child_nts: &[usize], base_size: usize) -> ExactRule {
+    if child_nts.is_empty() {
+        if let TemplateExpr::Leaf(expr) = template {
+            return ExactRule::Leaf(expr.clone());
+        }
+    }
+    let TemplateExpr::App(id, parts) = template else {
+        return ExactRule::GenericTemplate {
+            template: template.clone(),
+            child_nts: child_nts.to_vec(),
+            base_size,
+        };
+    };
+    if parts.len() != child_nts.len() {
+        return ExactRule::GenericTemplate {
+            template: template.clone(),
+            child_nts: child_nts.to_vec(),
+            base_size,
+        };
+    }
+    if !parts
+        .iter()
+        .enumerate()
+        .all(|(idx, part)| matches!(part, TemplateExpr::Slot(slot) if *slot == idx))
+    {
+        return ExactRule::GenericTemplate {
+            template: template.clone(),
+            child_nts: child_nts.to_vec(),
+            base_size,
+        };
+    }
+    let Some(fid) = deffun::ENV.lookup(id.get_name(), parts.len()) else {
+        return ExactRule::GenericTemplate {
+            template: template.clone(),
+            child_nts: child_nts.to_vec(),
+            base_size,
+        };
+    };
+    match parts.len() {
+        1 => ExactRule::Unary {
+            fid,
+            child_nt: child_nts[0],
+        },
+        2 => ExactRule::Binary {
+            fid,
+            lhs_nt: child_nts[0],
+            rhs_nt: child_nts[1],
+        },
+        _ => ExactRule::Nary {
+            fid,
+            child_nts: child_nts.to_vec(),
+        },
+    }
+}
+
+fn evaluate_template_value(
+    template: &TemplateExpr,
+    args: &[Value],
+    cache: &mut ExactEvalCache,
+) -> Result<Value, ()> {
+    match template {
+        TemplateExpr::Slot(i) => Ok(args[*i].clone()),
+        TemplateExpr::Leaf(expr) => cache
+            .leaves
+            .entry(expr.clone())
+            .or_insert_with(|| expr.eval(&[]).ok())
+            .clone()
+            .ok_or(()),
+        TemplateExpr::App(id, parts) => {
+            let values = parts
+                .iter()
+                .map(|part| evaluate_template_value(part, args, cache))
+                .collect::<Result<Vec<_>, _>>()?;
+            let const_args = values
+                .iter()
+                .cloned()
+                .map(OwnedExpr::Const)
+                .collect::<Vec<_>>();
+            build_owned_application(id, &const_args)
+                .ok()
+                .and_then(|expr| expr.eval(&[]).ok())
+                .ok_or(())
+        }
+    }
+}
+
+fn evaluate_fop1(fid: usize, arg: &Value, cache: &mut ExactEvalCache) -> Result<Value, ()> {
+    cache
+        .fop1
+        .entry((fid, arg.clone()))
+        .or_insert_with(|| deffun::ENV.apply(fid, 1).eval(std::slice::from_ref(arg)).ok())
+        .clone()
+        .ok_or(())
+}
+
+fn evaluate_fop2(
+    fid: usize,
+    lhs: &Value,
+    rhs: &Value,
+    cache: &mut ExactEvalCache,
+) -> Result<Value, ()> {
+    let args = [lhs.clone(), rhs.clone()];
+    cache
+        .fop2
+        .entry((fid, lhs.clone(), rhs.clone()))
+        .or_insert_with(|| deffun::ENV.apply(fid, 2).eval(&args).ok())
+        .clone()
+        .ok_or(())
+}
+
+fn evaluate_fopn(fid: usize, args: &[Value], cache: &mut ExactEvalCache) -> Result<Value, ()> {
+    cache
+        .fopn
+        .entry((fid, args.to_vec()))
+        .or_insert_with(|| deffun::ENV.apply(fid, args.len()).eval(args).ok())
+        .clone()
+        .ok_or(())
 }
 
 fn parse_target_define_fun(file: &SyGuSFile, target_name: &str) -> parse::Result<Option<Value>> {
