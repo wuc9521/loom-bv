@@ -6,9 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     enumerate::{
-        algo::Algo,
-        algo2, algo3, algo4, algo_multi,
-        config::Config,
+        algo_multi,
         Algo as AAlgo,
     },
     info,
@@ -24,10 +22,7 @@ pub struct SampleConfig {
     pub cover_limit: usize,
     pub partial_solution: bool,
     pub dag_size: bool,
-    pub atom_diversity_order: bool,
-    pub atom_shift: bool,
     pub filter: FilterConfig,
-    pub mem_size_limit: usize,
 }
 
 impl SampleConfig {
@@ -38,9 +33,6 @@ impl SampleConfig {
             partial_solution: true,
             filter: FilterConfig::cond_default(),
             dag_size: true,
-            mem_size_limit: usize::MAX,
-            atom_diversity_order: false,
-            atom_shift: true,
         }
     }
     pub const fn expr_default() -> Self {
@@ -50,21 +42,6 @@ impl SampleConfig {
             partial_solution: true,
             filter: FilterConfig::expr_default(),
             dag_size: true,
-            mem_size_limit: usize::MAX,
-            atom_diversity_order: false,
-            atom_shift: true,
-        }
-    }
-    pub const fn expr_default_ni() -> Self {
-        Self {
-            sample: 64,
-            cover_limit: 13,
-            partial_solution: true,
-            filter: FilterConfig::expr_default(),
-            dag_size: true,
-            mem_size_limit: usize::MAX,
-            atom_diversity_order: false,
-            atom_shift: true,
         }
     }
     pub const fn improve_default() -> Self {
@@ -74,9 +51,6 @@ impl SampleConfig {
             partial_solution: true,
             filter: FilterConfig::improve_default(),
             dag_size: true,
-            mem_size_limit: usize::MAX,
-            atom_diversity_order: false,
-            atom_shift: true,
         }
     }
 
@@ -97,93 +71,16 @@ impl SampleConfig {
         let mut filter = self
             .filter
             .state(args.clone(), &out, &bump, self.partial_solution);
-        if problem.cfg.len() > 1 {
-            let mut algo = algo_multi::Algo::new(problem, args, out.clone(), &bump)?;
-            let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
-            let result = !filter.solved;
-            info!(
-                "Searched for {} {} {} Expressions.",
-                algo.len(),
-                algo.count(),
-                algo.count2()
-            );
-            return Ok(result);
-        }
-        let config = Config::from_problem(problem, self.partial_solution)?;
-        // let consts = config
-        //     .iter()
-        //     .flat_map(|x| {
-        //         if let Rule::Const(c) = x {
-        //             Some(c)
-        //         } else {
-        //             None
-        //         }
-        //     })
-        //     .collect_vec();
-        // if self.atom_shift {
-        //     config.0 = config.0.iter().flat_map(|x| {
-        //         match x {
-        //             Rule::Shl => consts.iter().map(|x| Rule::ShlC(**x)).collect_vec(),
-        //             Rule::LShr => consts.iter().map(|x| Rule::LShrC(**x)).collect_vec(),
-        //             Rule::AShr => consts.iter().map(|x| Rule::AShrC(**x)).collect_vec(),
-        //             _ => vec![x.clone()],
-        //         }
-        //     }).collect_vec();
-        // }
-
-        if self.mem_size_limit == usize::MAX {
-            let mut algo = Algo::new(config, args, out.clone(), self.dag_size, &bump);
-            let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
-            let result = !filter.solved;
-            info!(
-                "Searched for {} {} {} Expressions.",
-                algo.len(),
-                algo.count(),
-                algo.count2()
-            );
-            Ok(result)
-        } else if self.atom_diversity_order {
-            if self.atom_shift {
-                let mut algo = algo4::Algo::new(
-                    config,
-                    args,
-                    out.clone(),
-                    self.dag_size,
-                    &bump,
-                    self.mem_size_limit,
-                );
-                let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
-                let result = !filter.solved;
-                info!("Searched for {} Expressions.", algo.count());
-                Ok(result)
-            } else {
-                let mut algo = algo3::Algo::new(
-                    config,
-                    args,
-                    out.clone(),
-                    self.dag_size,
-                    &bump,
-                    self.mem_size_limit,
-                );
-                let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
-                let result = !filter.solved;
-                info!("Searched for {} Expressions.", algo.count());
-                Ok(result)
-            }
-        } else {
-            let mut algo = algo2::Algo::new(
-                config,
-                args,
-                out.clone(),
-                self.dag_size,
-                &bump,
-                self.mem_size_limit,
-            );
-            let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
-            let result = !filter.solved;
-            info!("Searched for {} Expressions.", algo.count());
-            Ok(result)
-        }
+        let mut algo = algo_multi::Algo::new(problem, args, out.clone(), &bump)?;
+        let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
+        let result = !filter.solved;
+        info!(
+            "Searched for {} {} {} Expressions.",
+            algo.len(),
+            algo.count(),
+            algo.count2()
+        );
+        Ok(result)
     }
     #[inline(always)]
     pub fn search(
