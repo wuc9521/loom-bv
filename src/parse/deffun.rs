@@ -65,9 +65,9 @@ impl Environ {
             })?;
             let expr = OwnedExpr::from_term(def.body, args.as_slice())?;
             info!(
-                "DefineFun: {} {:?} -> {:?}",
+                "DefineFun: {} {} -> {}",
                 name,
-                args.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+                args.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "),
                 expr
             );
             if self.inner().len() <= args.len() {

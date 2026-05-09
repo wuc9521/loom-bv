@@ -2,28 +2,24 @@ use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeMap;
 
+mod eval;
+mod grammar;
+mod relevance;
+mod spec;
+
 use num_bigint::BigUint;
 use num_traits::One;
-use pest::Span;
 use rustc_hash::FxHashMap;
-use sygus_parser::ast::{Identifier, Literal as SyGuSLiteral, SyGuSCmd, SyGuSFile, SyGuSTerm};
+use sygus_parser::ast::SyGuSFile;
 
 use crate::{
     enumerate::{
         expr::OwnedExpr,
-        grammar::{
-            build_owned_application, for_each_candidate_tuple, for_each_size_split, MultiConfig,
-            MultiRule, TemplateExpr,
-        },
+        grammar::{for_each_candidate_tuple, for_each_size_split, MultiConfig, TemplateExpr},
         value::Value,
     },
     info,
-    parse::{
-        self,
-        deffun,
-        new_custom_error_span,
-        SynthProblem,
-    },
+    parse::{self, deffun, SynthProblem},
 };
 
 pub enum NullarySpec {
@@ -47,11 +43,11 @@ impl NullarySpec {
         if !problem.args.is_empty() {
             return Ok(None);
         }
-        if let Some(value) = parse_target_define_fun(file, problem.name)? {
+        if let Some(value) = spec::parse_target_define_fun(file, problem.name)? {
             return Ok(Some(Self::Exact(value)));
         }
         if let Some((known_bits, structural)) =
-            parse_bit_constraints(file, problem.name, problem.bits)?
+            spec::parse_bit_constraints(file, problem.name, problem.bits)?
         {
             return Ok(Some(Self::BitConstraints {
                 bits: problem.bits,
@@ -93,7 +89,7 @@ pub fn search_nullary(
     problem: &SynthProblem<'static>,
     spec: &NullarySpec,
 ) -> parse::Result<OwnedExpr> {
-    let grammar = compile_exact_grammar(&MultiConfig::from_problem(problem)?);
+    let grammar = grammar::compile_exact_grammar(&MultiConfig::from_problem(problem)?);
     search_nullary_multi_nt(&grammar, spec, problem.bits)
 }
 
@@ -198,11 +194,6 @@ struct GoalObligation {
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ProjectionKey(Vec<u64>);
 
-#[derive(Clone)]
-struct BitDep {
-    per_arg: Vec<Vec<usize>>,
-}
-
 enum SeenMode {
     Exact(Vec<FxHashMap<Value, usize>>),
     Projected {
@@ -247,7 +238,10 @@ impl GoalObligation {
                 structural,
                 ..
             } => Self {
-                known_bits: known_bits.iter().map(|(bit, value)| (*bit, *value)).collect(),
+                known_bits: known_bits
+                    .iter()
+                    .map(|(bit, value)| (*bit, *value))
+                    .collect(),
                 structural: structural.clone(),
             },
         }
@@ -304,42 +298,13 @@ impl GoalObligation {
     }
 }
 
-impl BitDep {
-    fn empty(nargs: usize) -> Self {
-        Self {
-            per_arg: (0..nargs).map(|_| Vec::new()).collect(),
-        }
-    }
-
-    fn single_slot(nargs: usize, arg_idx: usize, bit: usize) -> Self {
-        let mut dep = Self::empty(nargs);
-        dep.per_arg[arg_idx].push(bit);
-        dep
-    }
-
-    fn union(&self, other: &Self) -> Self {
-        let mut per_arg = Vec::with_capacity(self.per_arg.len());
-        for (lhs, rhs) in self.per_arg.iter().zip(other.per_arg.iter()) {
-            let mut merged = lhs.clone();
-            for bit in rhs {
-                if !merged.contains(bit) {
-                    merged.push(*bit);
-                }
-            }
-            merged.sort_unstable();
-            per_arg.push(merged);
-        }
-        Self { per_arg }
-    }
-}
-
 fn search_nullary_multi_nt(
     grammar: &ExactGrammar<'static>,
     spec: &NullarySpec,
     synth_bits: usize,
 ) -> parse::Result<OwnedExpr> {
     let goal = GoalObligation::from_spec(spec);
-    let seen_relevant_bits = compute_relevant_bits_for_spec(grammar, spec);
+    let seen_relevant_bits = relevance::compute_relevant_bits_for_spec(grammar, spec);
     let mut leaf_rules = 0usize;
     let mut alias_rules = 0usize;
     let mut unary_rules = 0usize;
@@ -382,7 +347,7 @@ fn search_nullary_multi_nt(
         let total_full = grammar
             .nts
             .iter()
-            .map(|(_, rules)| nt_output_bits(rules))
+            .map(|(_, rules)| relevance::nt_output_bits(rules))
             .sum::<usize>();
         info!(
             "exact-nullary projected-seen nts={} kept_bits={} total_bits={}",
@@ -445,28 +410,20 @@ fn search_nullary_multi_nt(
                             continue;
                         }
                         let child_size = size - 1;
-                        if by_size[*child_nt]
-                            .get(child_size)
-                            .is_none_or(Vec::is_empty)
-                        {
+                        if by_size[*child_nt].get(child_size).is_none_or(Vec::is_empty) {
                             continue;
                         }
-                            let mut children = by_size[*child_nt]
-                                .get(child_size)
-                                .map(Vec::as_slice)
-                                .unwrap_or(&[][..])
-                                .to_vec();
+                        let mut children = by_size[*child_nt]
+                            .get(child_size)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[][..])
+                            .to_vec();
                         if use_goal_ordering {
-                            filter_and_sort_unary_children(
-                                *fid,
-                                &mut children,
-                                &goal,
-                                synth_bits,
-                            );
+                            filter_and_sort_unary_children(*fid, &mut children, &goal, synth_bits);
                         }
                         for child in &children {
                             eval_attempted += 1;
-                            let value = evaluate_fop1(*fid, &child.value, &mut eval_cache);
+                            let value = eval::evaluate_fop1(*fid, &child.value, &mut eval_cache);
                             let Ok(value) = value else {
                                 eval_failed += 1;
                                 continue;
@@ -500,12 +457,8 @@ fn search_nullary_multi_nt(
                         }
                         for lhs_size in 1..(size - 1) {
                             let rhs_size = size - 1 - lhs_size;
-                            if by_size[*lhs_nt]
-                                .get(lhs_size)
-                                .is_none_or(Vec::is_empty)
-                                || by_size[*rhs_nt]
-                                    .get(rhs_size)
-                                    .is_none_or(Vec::is_empty)
+                            if by_size[*lhs_nt].get(lhs_size).is_none_or(Vec::is_empty)
+                                || by_size[*rhs_nt].get(rhs_size).is_none_or(Vec::is_empty)
                             {
                                 continue;
                             }
@@ -540,17 +493,12 @@ fn search_nullary_multi_nt(
                             }
                             if use_goal_ordering {
                                 for (lhs_idx, rhs_idx) in
-                                    filter_and_rank_binary_pairs(
-                                        *fid,
-                                        &lhs_pool,
-                                        &rhs_pool,
-                                        &goal,
-                                    )
+                                    filter_and_rank_binary_pairs(*fid, &lhs_pool, &rhs_pool, &goal)
                                 {
                                     let lhs = &lhs_pool[lhs_idx];
                                     let rhs = &rhs_pool[rhs_idx];
                                     eval_attempted += 1;
-                                    let value = evaluate_fop2(
+                                    let value = eval::evaluate_fop2(
                                         *fid,
                                         &lhs.value,
                                         &rhs.value,
@@ -582,7 +530,7 @@ fn search_nullary_multi_nt(
                                 for lhs in &lhs_pool {
                                     for rhs in &rhs_pool {
                                         eval_attempted += 1;
-                                        let value = evaluate_fop2(
+                                        let value = eval::evaluate_fop2(
                                             *fid,
                                             &lhs.value,
                                             &rhs.value,
@@ -647,7 +595,7 @@ fn search_nullary_multi_nt(
                                         .collect::<Vec<_>>();
                                     eval_attempted += 1;
                                     let Ok(value) =
-                                        evaluate_fopn(*fid, &child_values, &mut eval_cache)
+                                        eval::evaluate_fopn(*fid, &child_values, &mut eval_cache)
                                     else {
                                         eval_failed += 1;
                                         return;
@@ -695,7 +643,7 @@ fn search_nullary_multi_nt(
                         if child_nts.is_empty() {
                             if child_total == 0 {
                                 if let Ok(value) =
-                                    evaluate_template_value(template, &[], &mut eval_cache)
+                                    eval::evaluate_template_value(template, &[], &mut eval_cache)
                                 {
                                     eval_attempted += 1;
                                     if let Some(found) = insert_multi_nt_candidate(
@@ -752,7 +700,7 @@ fn search_nullary_multi_nt(
                                         .map(|cand| cand.value.clone())
                                         .collect::<Vec<_>>();
                                     eval_attempted += 1;
-                                    let Ok(value) = evaluate_template_value(
+                                    let Ok(value) = eval::evaluate_template_value(
                                         template,
                                         &child_values,
                                         &mut eval_cache,
@@ -830,8 +778,7 @@ fn search_nullary_multi_nt(
             inserted_this_size += by_size[nt][size].len();
             if nt == grammar.start && use_goal_ordering {
                 for candidate in &by_size[nt][size] {
-                    let score =
-                        cached_goal_score(&candidate.value, &goal, &mut goal_score_cache);
+                    let score = cached_goal_score(&candidate.value, &goal, &mut goal_score_cache);
                     if score > best_goal_score {
                         best_goal_score = score;
                     }
@@ -849,9 +796,7 @@ fn search_nullary_multi_nt(
         );
         info!(
             "exact-nullary eval size={} attempted={} failed={}",
-            size,
-            eval_attempted,
-            eval_failed
+            size, eval_attempted, eval_failed
         );
     }
 
@@ -932,12 +877,7 @@ fn filter_and_rank_binary_pairs(
         }
     }
     ranked.sort_by_key(|(rank, child_score, lhs_idx, rhs_idx)| {
-        (
-            Reverse(*rank),
-            Reverse(*child_score),
-            *lhs_idx,
-            *rhs_idx,
-        )
+        (Reverse(*rank), Reverse(*child_score), *lhs_idx, *rhs_idx)
     });
     ranked
         .into_iter()
@@ -972,7 +912,10 @@ fn rule_goal_rank_exact(
     nargs: usize,
     goal: &GoalObligation,
 ) -> Option<usize> {
-    let abs_args = args.iter().map(|arg| AbsValue::exact(arg)).collect::<Vec<_>>();
+    let abs_args = args
+        .iter()
+        .map(|arg| AbsValue::exact(arg))
+        .collect::<Vec<_>>();
     let abs = eval_fop_abs(fid, nargs, &abs_args);
     goal.abstract_rank(&abs)
 }
@@ -983,7 +926,12 @@ fn eval_fop_abs(fid: usize, nargs: usize, args: &[AbsValue]) -> AbsValue {
     eval_owned_abs(body, args, fallback_bits, 0)
 }
 
-fn eval_owned_abs(expr: &OwnedExpr, vars: &[AbsValue], fallback_bits: usize, depth: usize) -> AbsValue {
+fn eval_owned_abs(
+    expr: &OwnedExpr,
+    vars: &[AbsValue],
+    fallback_bits: usize,
+    depth: usize,
+) -> AbsValue {
     if depth > 64 {
         return AbsValue::top(fallback_bits.max(1));
     }
@@ -1243,828 +1191,6 @@ fn materialize_node(id: NodeId, grammar: &ExactGrammar<'_>, nodes: &[Node]) -> O
             template.instantiate(&child_exprs).ok()
         }
     }
-}
-
-fn compile_exact_grammar(grammar: &MultiConfig<'static>) -> ExactGrammar<'static> {
-    let nts = grammar
-        .nts
-        .iter()
-        .map(|(name, rules)| {
-            let compiled = rules
-                .iter()
-                .map(|rule| match rule {
-                    MultiRule::Alias(nt) => ExactRule::Alias(*nt),
-                    MultiRule::Template {
-                        template,
-                        child_nts,
-                        base_size,
-                        ..
-                    } => compile_exact_rule(template, child_nts, *base_size),
-                })
-                .collect();
-            (*name, compiled)
-        })
-        .collect();
-    ExactGrammar {
-        nts,
-        start: grammar.start,
-    }
-}
-
-fn compute_relevant_bits_for_spec(
-    grammar: &ExactGrammar<'_>,
-    spec: &NullarySpec,
-) -> Option<Vec<Vec<usize>>> {
-    let NullarySpec::BitConstraints {
-        bits,
-        known_bits,
-        structural,
-    } = spec
-    else {
-        return None;
-    };
-    if !structural.is_empty() {
-        return None;
-    }
-    if known_bits.is_empty() {
-        return None;
-    }
-    let nt_bits = grammar
-        .nts
-        .iter()
-        .map(|(_, rules)| nt_output_bits(rules))
-        .collect::<Vec<_>>();
-    if nt_bits.get(grammar.start).copied() != Some(*bits) {
-        return None;
-    }
-    let mut dep_cache = FxHashMap::<(usize, usize), Option<Vec<BitDep>>>::default();
-    let mut relevant = nt_bits
-        .iter()
-        .map(|bits| vec![false; *bits])
-        .collect::<Vec<_>>();
-    for bit in known_bits.keys() {
-        if *bit < relevant[grammar.start].len() {
-            relevant[grammar.start][*bit] = true;
-        }
-    }
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for (nt_idx, (_, rules)) in grammar.nts.iter().enumerate() {
-            let parent_relevant = relevant[nt_idx]
-                .iter()
-                .enumerate()
-                .filter_map(|(bit, is_rel)| is_rel.then_some(bit))
-                .collect::<Vec<_>>();
-            if parent_relevant.is_empty() {
-                continue;
-            }
-            for rule in rules {
-                match rule {
-                    ExactRule::Alias(child_nt) => {
-                        for bit in &parent_relevant {
-                            if *bit < relevant[*child_nt].len() && !relevant[*child_nt][*bit] {
-                                relevant[*child_nt][*bit] = true;
-                                changed = true;
-                            }
-                        }
-                    }
-                    ExactRule::Leaf(_) => {}
-                    ExactRule::Unary { fid, child_nt } => {
-                        let Some(summary) =
-                            get_deffun_dep_summary(*fid, 1, &mut dep_cache)
-                        else {
-                            return None;
-                        };
-                        propagate_relevant_bits(
-                            &parent_relevant,
-                            &summary,
-                            0,
-                            &mut relevant[*child_nt],
-                            &mut changed,
-                        );
-                    }
-                    ExactRule::Binary {
-                        fid,
-                        lhs_nt,
-                        rhs_nt,
-                    } => {
-                        let Some(summary) =
-                            get_deffun_dep_summary(*fid, 2, &mut dep_cache)
-                        else {
-                            return None;
-                        };
-                        propagate_relevant_bits(
-                            &parent_relevant,
-                            &summary,
-                            0,
-                            &mut relevant[*lhs_nt],
-                            &mut changed,
-                        );
-                        propagate_relevant_bits(
-                            &parent_relevant,
-                            &summary,
-                            1,
-                            &mut relevant[*rhs_nt],
-                            &mut changed,
-                        );
-                    }
-                    ExactRule::Nary { fid, child_nts } => {
-                        let Some(summary) =
-                            get_deffun_dep_summary(*fid, child_nts.len(), &mut dep_cache)
-                        else {
-                            return None;
-                        };
-                        for (arg_idx, child_nt) in child_nts.iter().enumerate() {
-                            propagate_relevant_bits(
-                                &parent_relevant,
-                                &summary,
-                                arg_idx,
-                                &mut relevant[*child_nt],
-                                &mut changed,
-                            );
-                        }
-                    }
-                    ExactRule::GenericTemplate { template, child_nts, .. } => {
-                        let Some(summary) = get_template_dep_summary(
-                            template,
-                            &child_nts
-                                .iter()
-                                .map(|child_nt| nt_bits[*child_nt])
-                                .collect::<Vec<_>>(),
-                            &mut dep_cache,
-                        ) else {
-                            return None;
-                        };
-                        for (arg_idx, child_nt) in child_nts.iter().enumerate() {
-                            propagate_relevant_bits(
-                                &parent_relevant,
-                                &summary,
-                                arg_idx,
-                                &mut relevant[*child_nt],
-                                &mut changed,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let relevant_bits = relevant
-        .into_iter()
-        .map(|bits| {
-            bits.into_iter()
-                .enumerate()
-                .filter_map(|(idx, relevant)| relevant.then_some(idx))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let reduced_any = relevant_bits
-        .iter()
-        .zip(nt_bits.iter())
-        .any(|(rel, bits)| rel.len() < *bits);
-    reduced_any.then_some(relevant_bits)
-}
-
-fn propagate_relevant_bits(
-    parent_relevant: &[usize],
-    summary: &[BitDep],
-    arg_idx: usize,
-    child_relevant: &mut [bool],
-    changed: &mut bool,
-) {
-    for bit in parent_relevant {
-        let Some(dep) = summary.get(*bit) else {
-            continue;
-        };
-        let Some(arg_deps) = dep.per_arg.get(arg_idx) else {
-            continue;
-        };
-        for child_bit in arg_deps {
-            if *child_bit < child_relevant.len() && !child_relevant[*child_bit] {
-                child_relevant[*child_bit] = true;
-                *changed = true;
-            }
-        }
-    }
-}
-
-fn nt_output_bits(rules: &[ExactRule]) -> usize {
-    for rule in rules {
-        match rule {
-            ExactRule::Alias(_) => {}
-            ExactRule::Leaf(expr) => return owned_expr_width(expr),
-            ExactRule::Unary { fid, .. } => return deffun::ENV.ret_bits(*fid, 1),
-            ExactRule::Binary { fid, .. } => return deffun::ENV.ret_bits(*fid, 2),
-            ExactRule::Nary { fid, child_nts } => return deffun::ENV.ret_bits(*fid, child_nts.len()),
-            ExactRule::GenericTemplate { template, .. } => {
-                return template_output_bits(template)
-            }
-        }
-    }
-    1
-}
-
-fn template_output_bits(template: &TemplateExpr) -> usize {
-    match template {
-        TemplateExpr::Slot(_) => 1,
-        TemplateExpr::Leaf(expr) => owned_expr_width(expr),
-        TemplateExpr::App(id, parts) => deffun::ENV
-            .lookup(id.get_name(), parts.len())
-            .map(|fid| deffun::ENV.ret_bits(fid, parts.len()))
-            .unwrap_or(1),
-    }
-}
-
-fn get_deffun_dep_summary(
-    fid: usize,
-    nargs: usize,
-    cache: &mut FxHashMap<(usize, usize), Option<Vec<BitDep>>>,
-) -> Option<Vec<BitDep>> {
-    if let Some(summary) = cache.get(&(fid, nargs)) {
-        return summary.clone();
-    }
-    let arg_bits = deffun::ENV.arg_bits(fid, nargs).to_vec();
-    let summary = compute_expr_dep_summary(deffun::ENV.apply(fid, nargs), &arg_bits, cache);
-    cache.insert((fid, nargs), summary.clone());
-    summary
-}
-
-fn get_template_dep_summary(
-    template: &TemplateExpr,
-    slot_bits: &[usize],
-    cache: &mut FxHashMap<(usize, usize), Option<Vec<BitDep>>>,
-) -> Option<Vec<BitDep>> {
-    compute_template_dep_summary(template, slot_bits, cache)
-}
-
-fn compute_template_dep_summary(
-    template: &TemplateExpr,
-    slot_bits: &[usize],
-    cache: &mut FxHashMap<(usize, usize), Option<Vec<BitDep>>>,
-) -> Option<Vec<BitDep>> {
-    match template {
-        TemplateExpr::Slot(slot) => {
-            let bits = *slot_bits.get(*slot)?;
-            Some(
-                (0..bits)
-                    .map(|bit| BitDep::single_slot(slot_bits.len(), *slot, bit))
-                    .collect(),
-            )
-        }
-        TemplateExpr::Leaf(expr) => compute_expr_dep_summary(expr, slot_bits, cache),
-        TemplateExpr::App(id, parts) => {
-            let fid = deffun::ENV.lookup(id.get_name(), parts.len())?;
-            let f_summary = get_deffun_dep_summary(fid, parts.len(), cache)?;
-            let part_summaries = parts
-                .iter()
-                .map(|part| compute_template_dep_summary(part, slot_bits, cache))
-                .collect::<Option<Vec<_>>>()?;
-            compose_dep_summaries(&f_summary, &part_summaries, slot_bits.len())
-        }
-    }
-}
-
-fn compute_expr_dep_summary(
-    expr: &OwnedExpr,
-    arg_bits: &[usize],
-    cache: &mut FxHashMap<(usize, usize), Option<Vec<BitDep>>>,
-) -> Option<Vec<BitDep>> {
-    match expr {
-        OwnedExpr::Const(value) => Some((0..value.bits()).map(|_| BitDep::empty(arg_bits.len())).collect()),
-        OwnedExpr::Var(idx) => {
-            let bits = *arg_bits.get(*idx)?;
-            Some(
-                (0..bits)
-                    .map(|bit| BitDep::single_slot(arg_bits.len(), *idx, bit))
-                    .collect(),
-            )
-        }
-        OwnedExpr::Extract(inner, hi, lo) => {
-            let deps = compute_expr_dep_summary(inner, arg_bits, cache)?;
-            Some(deps.get(*lo as usize..=*hi as usize)?.to_vec())
-        }
-        OwnedExpr::Concat(high, low) => {
-            let mut res = compute_expr_dep_summary(low, arg_bits, cache)?;
-            res.extend(compute_expr_dep_summary(high, arg_bits, cache)?);
-            Some(res)
-        }
-        OwnedExpr::Not(inner) | OwnedExpr::Neg(inner) => compute_expr_dep_summary(inner, arg_bits, cache),
-        OwnedExpr::And(lhs, rhs)
-        | OwnedExpr::Or(lhs, rhs)
-        | OwnedExpr::Xor(lhs, rhs) => {
-            let lhs_deps = compute_expr_dep_summary(lhs, arg_bits, cache)?;
-            let rhs_deps = compute_expr_dep_summary(rhs, arg_bits, cache)?;
-            union_pointwise_deps(&lhs_deps, &rhs_deps)
-        }
-        OwnedExpr::Ite(cond, then_expr, else_expr) => {
-            let cond_deps = compute_expr_dep_summary(cond, arg_bits, cache)?;
-            if cond_deps.len() != 1 {
-                return None;
-            }
-            let then_deps = compute_expr_dep_summary(then_expr, arg_bits, cache)?;
-            let else_deps = compute_expr_dep_summary(else_expr, arg_bits, cache)?;
-            if then_deps.len() != else_deps.len() {
-                return None;
-            }
-            Some(
-                then_deps
-                    .into_iter()
-                    .zip(else_deps)
-                    .map(|(a, b)| a.union(&b).union(&cond_deps[0]))
-                    .collect(),
-            )
-        }
-        OwnedExpr::Fop0Dyn(fid) => get_deffun_dep_summary(*fid, 0, cache),
-        OwnedExpr::Fop1Dyn(fid, arg) => {
-            let f_summary = get_deffun_dep_summary(*fid, 1, cache)?;
-            let arg_summary = compute_expr_dep_summary(arg, arg_bits, cache)?;
-            compose_dep_summaries(&f_summary, &[arg_summary], arg_bits.len())
-        }
-        OwnedExpr::Fop2Dyn(fid, lhs, rhs) => {
-            let f_summary = get_deffun_dep_summary(*fid, 2, cache)?;
-            let lhs_summary = compute_expr_dep_summary(lhs, arg_bits, cache)?;
-            let rhs_summary = compute_expr_dep_summary(rhs, arg_bits, cache)?;
-            compose_dep_summaries(&f_summary, &[lhs_summary, rhs_summary], arg_bits.len())
-        }
-        OwnedExpr::FopDyn(fid, args) => {
-            let f_summary = get_deffun_dep_summary(*fid, args.len(), cache)?;
-            let arg_summaries = args
-                .iter()
-                .map(|arg| compute_expr_dep_summary(arg, arg_bits, cache))
-                .collect::<Option<Vec<_>>>()?;
-            compose_dep_summaries(&f_summary, &arg_summaries, arg_bits.len())
-        }
-        other => Some(top_dep_summary(owned_expr_width(other), arg_bits)),
-    }
-}
-
-fn union_pointwise_deps(lhs: &[BitDep], rhs: &[BitDep]) -> Option<Vec<BitDep>> {
-    if lhs.len() != rhs.len() {
-        return None;
-    }
-    Some(
-        lhs.iter()
-            .zip(rhs.iter())
-            .map(|(a, b)| a.union(b))
-            .collect(),
-    )
-}
-
-fn compose_dep_summaries(
-    outer: &[BitDep],
-    inner: &[Vec<BitDep>],
-    nargs: usize,
-) -> Option<Vec<BitDep>> {
-    let mut result = Vec::with_capacity(outer.len());
-    for out_dep in outer {
-        let mut combined = BitDep::empty(nargs);
-        for (arg_idx, bits) in out_dep.per_arg.iter().enumerate() {
-            let arg_summary = inner.get(arg_idx)?;
-            for bit in bits {
-                let bit_dep = arg_summary.get(*bit)?;
-                combined = combined.union(bit_dep);
-            }
-        }
-        result.push(combined);
-    }
-    Some(result)
-}
-
-fn top_dep_summary(width: usize, arg_bits: &[usize]) -> Vec<BitDep> {
-    let full = BitDep {
-        per_arg: arg_bits
-            .iter()
-            .map(|bits| (0..*bits).collect::<Vec<_>>())
-            .collect(),
-    };
-    (0..width).map(|_| full.clone()).collect()
-}
-
-fn compile_exact_rule(template: &TemplateExpr, child_nts: &[usize], base_size: usize) -> ExactRule {
-    if child_nts.is_empty() {
-        if let TemplateExpr::Leaf(expr) = template {
-            return ExactRule::Leaf(expr.clone());
-        }
-    }
-    let TemplateExpr::App(id, parts) = template else {
-        return ExactRule::GenericTemplate {
-            template: template.clone(),
-            child_nts: child_nts.to_vec(),
-            base_size,
-        };
-    };
-    if parts.len() != child_nts.len() {
-        return ExactRule::GenericTemplate {
-            template: template.clone(),
-            child_nts: child_nts.to_vec(),
-            base_size,
-        };
-    }
-    if !parts
-        .iter()
-        .enumerate()
-        .all(|(idx, part)| matches!(part, TemplateExpr::Slot(slot) if *slot == idx))
-    {
-        return ExactRule::GenericTemplate {
-            template: template.clone(),
-            child_nts: child_nts.to_vec(),
-            base_size,
-        };
-    }
-    let Some(fid) = deffun::ENV.lookup(id.get_name(), parts.len()) else {
-        return ExactRule::GenericTemplate {
-            template: template.clone(),
-            child_nts: child_nts.to_vec(),
-            base_size,
-        };
-    };
-    match parts.len() {
-        1 => ExactRule::Unary {
-            fid,
-            child_nt: child_nts[0],
-        },
-        2 => ExactRule::Binary {
-            fid,
-            lhs_nt: child_nts[0],
-            rhs_nt: child_nts[1],
-        },
-        _ => ExactRule::Nary {
-            fid,
-            child_nts: child_nts.to_vec(),
-        },
-    }
-}
-
-fn evaluate_template_value(
-    template: &TemplateExpr,
-    args: &[Value],
-    cache: &mut ExactEvalCache,
-) -> Result<Value, ()> {
-    match template {
-        TemplateExpr::Slot(i) => Ok(args[*i].clone()),
-        TemplateExpr::Leaf(expr) => cache
-            .leaves
-            .entry(expr.clone())
-            .or_insert_with(|| expr.eval(&[]).ok())
-            .clone()
-            .ok_or(()),
-        TemplateExpr::App(id, parts) => {
-            let values = parts
-                .iter()
-                .map(|part| evaluate_template_value(part, args, cache))
-                .collect::<Result<Vec<_>, _>>()?;
-            let const_args = values
-                .iter()
-                .cloned()
-                .map(OwnedExpr::Const)
-                .collect::<Vec<_>>();
-            build_owned_application(id, &const_args)
-                .ok()
-                .and_then(|expr| expr.eval(&[]).ok())
-                .ok_or(())
-        }
-    }
-}
-
-fn evaluate_fop1(fid: usize, arg: &Value, cache: &mut ExactEvalCache) -> Result<Value, ()> {
-    cache
-        .fop1
-        .entry((fid, arg.clone()))
-        .or_insert_with(|| {
-            deffun::ENV
-                .apply(fid, 1)
-                .eval(std::slice::from_ref(arg))
-                .ok()
-        })
-        .clone()
-        .ok_or(())
-}
-
-fn evaluate_fop2(
-    fid: usize,
-    lhs: &Value,
-    rhs: &Value,
-    cache: &mut ExactEvalCache,
-) -> Result<Value, ()> {
-    let args = [lhs.clone(), rhs.clone()];
-    cache
-        .fop2
-        .entry((fid, lhs.clone(), rhs.clone()))
-        .or_insert_with(|| deffun::ENV.apply(fid, 2).eval(&args).ok())
-        .clone()
-        .ok_or(())
-}
-
-fn evaluate_fopn(fid: usize, args: &[Value], cache: &mut ExactEvalCache) -> Result<Value, ()> {
-    cache
-        .fopn
-        .entry((fid, args.to_vec()))
-        .or_insert_with(|| deffun::ENV.apply(fid, args.len()).eval(args).ok())
-        .clone()
-        .ok_or(())
-}
-
-fn parse_target_define_fun(file: &SyGuSFile, target_name: &str) -> parse::Result<Option<Value>> {
-    for cmd in &file.cmds {
-        if let SyGuSCmd::DefineFun(name, args, _, body) = cmd {
-            if name == target_name && args.is_empty() {
-                let expr = OwnedExpr::from_term(body, &[])?;
-                let value = expr.eval(&[]).map_err(|_| {
-                    new_custom_error_span(
-                        format!("failed to evaluate nullary define-fun {}", target_name),
-                        empty_span(),
-                    )
-                })?;
-                return Ok(Some(value));
-            }
-        }
-    }
-    Ok(None)
-}
-
-fn constraint_mentions_target(term: &SyGuSTerm, target_name: &str) -> bool {
-    match term {
-        SyGuSTerm::Identifier(id) => id.get_name() == target_name,
-        SyGuSTerm::Annotated(inner, _) => constraint_mentions_target(inner, target_name),
-        SyGuSTerm::Application(_, args) => args
-            .iter()
-            .any(|a| constraint_mentions_target(a, target_name)),
-        SyGuSTerm::Let(bindings, body) => {
-            bindings
-                .iter()
-                .any(|b| constraint_mentions_target(&b.term, target_name))
-                || constraint_mentions_target(body, target_name)
-        }
-        SyGuSTerm::Forall(_, body) | SyGuSTerm::Exists(_, body) => {
-            constraint_mentions_target(body, target_name)
-        }
-        _ => false,
-    }
-}
-
-fn validate_structural_shape(term: &SyGuSTerm, target: &str) -> parse::Result<()> {
-    match term {
-        SyGuSTerm::Annotated(inner, _) => validate_structural_shape(inner, target),
-        SyGuSTerm::Literal(SyGuSLiteral::Bool(_)) => Ok(()),
-        SyGuSTerm::Literal(SyGuSLiteral::Numeral(n)) if *n == 0 || *n == 1 => Ok(()),
-        SyGuSTerm::Literal(SyGuSLiteral::BinConst(s)) => {
-            let bits: String = s.chars().filter(|c| *c == '0' || *c == '1').collect();
-            if bits.is_empty() {
-                Err(new_custom_error_span(
-                    "structural constraints: expected #b... bitvector literal".into(),
-                    empty_span(),
-                ))
-            } else {
-                Ok(())
-            }
-        }
-        SyGuSTerm::Literal(_) => Err(new_custom_error_span(
-            "structural constraints: unsupported literal".into(),
-            empty_span(),
-        )),
-        SyGuSTerm::Identifier(id) => {
-            let n = id.get_name();
-            if n == target || n.eq_ignore_ascii_case("true") || n.eq_ignore_ascii_case("false") {
-                Ok(())
-            } else {
-                Err(new_custom_error_span(
-                    format!("structural constraints: unsupported identifier `{n}`"),
-                    empty_span(),
-                ))
-            }
-        }
-        SyGuSTerm::Application(id, args) => match id.get_name() {
-            "not" if args.len() == 1 => validate_structural_shape(&args[0], target),
-            "and" | "or" => args
-                .iter()
-                .try_for_each(|a| validate_structural_shape(a, target)),
-            "=" if args.len() == 2 => {
-                validate_structural_shape(&args[0], target)?;
-                validate_structural_shape(&args[1], target)?;
-                Ok(())
-            }
-            _ if extract_on_phi_range(term, target).is_some() => Ok(()),
-            _ => Err(new_custom_error_span(
-                format!(
-                    "structural constraints: unsupported operator `{}`",
-                    id.get_name()
-                ),
-                empty_span(),
-            )),
-        },
-        _ => Err(new_custom_error_span(
-            "structural constraints: unsupported SyGuS term shape".into(),
-            empty_span(),
-        )),
-    }
-}
-
-/// Map SyGuS boolean constants to the 1-bit encoding used by [`OwnedExpr::from_term`]
-/// (`and` / `or` / `not` / `ite`): zero means true, non-zero means false.
-fn rewrite_constraint_literals_for_owned_eval(term: &SyGuSTerm) -> SyGuSTerm {
-    fn xor_b0_b0() -> SyGuSTerm {
-        SyGuSTerm::Application(
-            Identifier::Symbol("xor".into()),
-            vec![
-                SyGuSTerm::Literal(SyGuSLiteral::BinConst("0".into())),
-                SyGuSTerm::Literal(SyGuSLiteral::BinConst("0".into())),
-            ],
-        )
-    }
-    fn xor_b0_b1() -> SyGuSTerm {
-        SyGuSTerm::Application(
-            Identifier::Symbol("xor".into()),
-            vec![
-                SyGuSTerm::Literal(SyGuSLiteral::BinConst("0".into())),
-                SyGuSTerm::Literal(SyGuSLiteral::BinConst("1".into())),
-            ],
-        )
-    }
-    match term {
-        SyGuSTerm::Identifier(id) if id.get_name().eq_ignore_ascii_case("true") => xor_b0_b0(),
-        SyGuSTerm::Identifier(id) if id.get_name().eq_ignore_ascii_case("false") => xor_b0_b1(),
-        SyGuSTerm::Literal(SyGuSLiteral::Bool(true)) => xor_b0_b0(),
-        SyGuSTerm::Literal(SyGuSLiteral::Bool(false)) => xor_b0_b1(),
-        SyGuSTerm::Literal(SyGuSLiteral::Numeral(0)) => xor_b0_b1(),
-        SyGuSTerm::Literal(SyGuSLiteral::Numeral(1)) => xor_b0_b0(),
-        SyGuSTerm::Annotated(inner, attrs) => SyGuSTerm::Annotated(
-            Box::new(rewrite_constraint_literals_for_owned_eval(inner)),
-            attrs.clone(),
-        ),
-        SyGuSTerm::Application(id, args) => SyGuSTerm::Application(
-            id.clone(),
-            args.iter()
-                .map(rewrite_constraint_literals_for_owned_eval)
-                .collect(),
-        ),
-        SyGuSTerm::Exists(_, _) | SyGuSTerm::Forall(_, _) | SyGuSTerm::Let(_, _) => term.clone(),
-        _ => term.clone(),
-    }
-}
-
-fn index_numeral(idx: &sygus_parser::ast::Index) -> Option<usize> {
-    match idx {
-        sygus_parser::ast::Index::Numeral(v) => Some(*v),
-        sygus_parser::ast::Index::Symbol(_) => None,
-    }
-}
-
-fn extract_indices_from_identifier(id: &Identifier) -> Option<(usize, usize)> {
-    match id {
-        Identifier::Indexed(sym, idxs) if sym == "extract" && idxs.len() >= 2 => {
-            match (index_numeral(&idxs[0]), index_numeral(&idxs[1])) {
-                (Some(hi), Some(lo)) => Some((hi, lo)),
-                _ => None,
-            }
-        }
-        Identifier::Indexed(sym, idxs) if sym == "_" && idxs.len() >= 3 => {
-            match (&idxs[0], index_numeral(&idxs[1]), index_numeral(&idxs[2])) {
-                (sygus_parser::ast::Index::Symbol(op), Some(hi), Some(lo)) if op == "extract" => {
-                    Some((hi, lo))
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-    .or_else(|| {
-        let text = id.to_string();
-        let parts = text
-            .trim_matches(|c| c == '(' || c == ')')
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        match parts.as_slice() {
-            ["_", "extract", hi, lo] => match (hi.parse::<usize>(), lo.parse::<usize>()) {
-                (Ok(hi), Ok(lo)) => Some((hi, lo)),
-                _ => None,
-            },
-            ["extract", hi, lo] => match (hi.parse::<usize>(), lo.parse::<usize>()) {
-                (Ok(hi), Ok(lo)) => Some((hi, lo)),
-                _ => None,
-            },
-            _ => None,
-        }
-    })
-}
-
-fn extract_on_phi_range(term: &SyGuSTerm, target: &str) -> Option<(usize, usize)> {
-    match term {
-        SyGuSTerm::Annotated(inner, _) => extract_on_phi_range(inner, target),
-        SyGuSTerm::Application(id, args) if args.len() == 1 => {
-            if !matches!(&args[0], SyGuSTerm::Identifier(var) if var.get_name() == target) {
-                return None;
-            }
-            extract_indices_from_identifier(id)
-        }
-        _ => None,
-    }
-}
-
-fn parse_bit_constraints(
-    file: &SyGuSFile,
-    target_name: &str,
-    target_bits: usize,
-) -> parse::Result<Option<(BTreeMap<usize, bool>, Vec<OwnedExpr>)>> {
-    let mut known_bits = BTreeMap::<usize, bool>::new();
-    let mut structural = Vec::new();
-    let synth_env = [(target_name, target_bits as u64)];
-    let mut found_any = false;
-
-    for cmd in &file.cmds {
-        if let SyGuSCmd::Constraint(c) = cmd {
-            if let Some((bit, value)) = parse_bit_constraint(c, target_name) {
-                if bit >= target_bits {
-                    continue;
-                }
-                found_any = true;
-                if let Some(old) = known_bits.get(&bit).copied() {
-                    if old != value {
-                        return Err(new_custom_error_span(
-                            format!("Conflicting constraints on bit {} of {}", bit, target_name),
-                            empty_span(),
-                        ));
-                    }
-                } else {
-                    known_bits.insert(bit, value);
-                }
-            } else if constraint_mentions_target(c, target_name) {
-                validate_structural_shape(c, target_name)?;
-                let rewritten = rewrite_constraint_literals_for_owned_eval(c);
-                structural.push(OwnedExpr::from_term(&rewritten, &synth_env)?);
-                found_any = true;
-            }
-        } else if let SyGuSCmd::Assume(c) = cmd {
-            if constraint_mentions_target(c, target_name) {
-                validate_structural_shape(c, target_name)?;
-                let rewritten = rewrite_constraint_literals_for_owned_eval(c);
-                structural.push(OwnedExpr::from_term(&rewritten, &synth_env)?);
-                found_any = true;
-            }
-        }
-    }
-
-    Ok(found_any.then_some((known_bits, structural)))
-}
-
-fn parse_bit_constraint(term: &SyGuSTerm, target_name: &str) -> Option<(usize, bool)> {
-    if let SyGuSTerm::Annotated(inner, _) = term {
-        return parse_bit_constraint(inner, target_name);
-    }
-    let SyGuSTerm::Application(eq, args) = term else {
-        return None;
-    };
-    if eq.get_name() != "=" || args.len() != 2 {
-        return None;
-    }
-    extract_bit_of_target(&args[0], target_name)
-        .zip(bit_literal(&args[1]))
-        .or_else(|| extract_bit_of_target(&args[1], target_name).zip(bit_literal(&args[0])))
-}
-
-fn bit_literal(term: &SyGuSTerm) -> Option<bool> {
-    match term {
-        SyGuSTerm::Annotated(inner, _) => bit_literal(inner),
-        SyGuSTerm::Identifier(id) => {
-            let name = id.get_name();
-            if name.eq_ignore_ascii_case("true") {
-                Some(true)
-            } else if name.eq_ignore_ascii_case("false") {
-                Some(false)
-            } else {
-                let bits: String = name.chars().filter(|c| *c == '0' || *c == '1').collect();
-                if bits.is_empty() {
-                    None
-                } else {
-                    Some(bits.chars().last().unwrap() == '1')
-                }
-            }
-        }
-        SyGuSTerm::Literal(SyGuSLiteral::Bool(v)) => Some(*v),
-        SyGuSTerm::Literal(SyGuSLiteral::Numeral(v)) => match *v {
-            0 => Some(false),
-            1 => Some(true),
-            _ => None,
-        },
-        SyGuSTerm::Literal(SyGuSLiteral::BinConst(v)) => {
-            let bits: String = v.chars().filter(|c| *c == '0' || *c == '1').collect();
-            if bits.is_empty() {
-                None
-            } else {
-                Some(bits.chars().last().unwrap() == '1')
-            }
-        }
-        _ => None,
-    }
-}
-
-fn extract_bit_of_target(term: &SyGuSTerm, target_name: &str) -> Option<usize> {
-    let (hi, lo) = extract_on_phi_range(term, target_name)?;
-    (hi == lo).then_some(hi)
-}
-
-fn empty_span() -> Span<'static> {
-    Span::new("", 0, 0).expect("empty span should be valid")
 }
 
 #[cfg(test)]
