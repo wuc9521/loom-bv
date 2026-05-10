@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 mod eval;
 mod grammar;
@@ -89,7 +90,18 @@ pub fn search_nullary(
     problem: &SynthProblem<'static>,
     spec: &NullarySpec,
 ) -> parse::Result<OwnedExpr> {
-    let grammar = grammar::compile_exact_grammar(&MultiConfig::from_problem(problem)?);
+    let cfg_start = Instant::now();
+    let multi = MultiConfig::from_problem(problem)?;
+    info!(
+        "exact-nullary setup multi-config completed in {:?}",
+        cfg_start.elapsed()
+    );
+    let grammar_start = Instant::now();
+    let grammar = grammar::compile_exact_grammar(&multi);
+    info!(
+        "exact-nullary setup exact-grammar completed in {:?}",
+        grammar_start.elapsed()
+    );
     search_nullary_multi_nt(&grammar, spec, problem.bits)
 }
 
@@ -137,6 +149,61 @@ struct ExactEvalCache {
     fop1: FxHashMap<(usize, Value), Option<Value>>,
     fop2: FxHashMap<(usize, Value, Value), Option<Value>>,
     fopn: FxHashMap<(usize, Vec<Value>), Option<Value>>,
+    profile: FxHashMap<(usize, usize), EvalProfile>,
+}
+
+#[derive(Clone, Default)]
+struct EvalProfile {
+    calls: usize,
+    hits: usize,
+    misses: usize,
+    total: Duration,
+    miss_total: Duration,
+}
+
+impl ExactEvalCache {
+    fn record_eval(&mut self, arity: usize, fid: usize, hit: bool, elapsed: Duration) {
+        let profile = self.profile.entry((arity, fid)).or_default();
+        profile.calls += 1;
+        profile.total += elapsed;
+        if hit {
+            profile.hits += 1;
+        } else {
+            profile.misses += 1;
+            profile.miss_total += elapsed;
+        }
+    }
+
+    fn top_profiles(&self, limit: usize) -> Vec<String> {
+        let mut entries = self
+            .profile
+            .iter()
+            .map(|((arity, fid), profile)| (*arity, *fid, profile.clone()))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(_, _, profile)| Reverse(profile.total));
+        entries
+            .into_iter()
+            .take(limit)
+            .map(|(arity, fid, profile)| {
+                let avg_us = if profile.calls == 0 {
+                    0
+                } else {
+                    profile.total.as_micros() / profile.calls as u128
+                };
+                format!(
+                    "{}[{}]: calls={}, hits={}, misses={}, total={:?}, miss_total={:?}, avg={}us",
+                    deffun::ENV.name(fid, arity),
+                    arity,
+                    profile.calls,
+                    profile.hits,
+                    profile.misses,
+                    profile.total,
+                    profile.miss_total,
+                    avg_us
+                )
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone)]
@@ -304,7 +371,12 @@ fn search_nullary_multi_nt(
     synth_bits: usize,
 ) -> parse::Result<OwnedExpr> {
     let goal = GoalObligation::from_spec(spec);
+    let relevance_start = Instant::now();
     let seen_relevant_bits = relevance::compute_relevant_bits_for_spec(grammar, spec);
+    info!(
+        "exact-nullary setup relevance completed in {:?}",
+        relevance_start.elapsed()
+    );
     let mut leaf_rules = 0usize;
     let mut alias_rules = 0usize;
     let mut unary_rules = 0usize;
@@ -363,8 +435,10 @@ fn search_nullary_multi_nt(
     // the nullary solver on plain bottom-up exact enumeration order.
     let use_goal_ordering = false;
     let mut best_goal_score = 0usize;
+    let mut last_progress_log = Instant::now();
 
     for size in 1.. {
+        let size_start = Instant::now();
         let mut inserted_this_size = 0usize;
         let mut eval_attempted = 0usize;
         let mut eval_failed = 0usize;
@@ -444,6 +518,19 @@ fn search_nullary_multi_nt(
                                 },
                             ) {
                                 return Ok(found);
+                            }
+                            if last_progress_log.elapsed() >= Duration::from_secs(5) {
+                                info!(
+                                    "exact-nullary progress size={} phase=unary attempted={} inserted={} elapsed={:?}",
+                                    size,
+                                    eval_attempted,
+                                    inserted_this_size,
+                                    size_start.elapsed()
+                                );
+                                for line in eval_cache.top_profiles(4) {
+                                    info!("exact-nullary hot {}", line);
+                                }
+                                last_progress_log = Instant::now();
                             }
                         }
                     }
@@ -525,6 +612,19 @@ fn search_nullary_multi_nt(
                                     ) {
                                         return Ok(found);
                                     }
+                                    if last_progress_log.elapsed() >= Duration::from_secs(5) {
+                                        info!(
+                                            "exact-nullary progress size={} phase=binary attempted={} inserted={} elapsed={:?}",
+                                            size,
+                                            eval_attempted,
+                                            inserted_this_size,
+                                            size_start.elapsed()
+                                        );
+                                        for line in eval_cache.top_profiles(4) {
+                                            info!("exact-nullary hot {}", line);
+                                        }
+                                        last_progress_log = Instant::now();
+                                    }
                                 }
                             } else {
                                 for lhs in &lhs_pool {
@@ -556,6 +656,21 @@ fn search_nullary_multi_nt(
                                             },
                                         ) {
                                             return Ok(found);
+                                        }
+                                        if last_progress_log.elapsed()
+                                            >= Duration::from_secs(5)
+                                        {
+                                            info!(
+                                                "exact-nullary progress size={} phase=binary attempted={} inserted={} elapsed={:?}",
+                                                size,
+                                                eval_attempted,
+                                                inserted_this_size,
+                                                size_start.elapsed()
+                                            );
+                                            for line in eval_cache.top_profiles(4) {
+                                                info!("exact-nullary hot {}", line);
+                                            }
+                                            last_progress_log = Instant::now();
                                         }
                                     }
                                 }
@@ -603,6 +718,19 @@ fn search_nullary_multi_nt(
                                     let children =
                                         tuple.iter().map(|cand| cand.node).collect::<Vec<_>>();
                                     staged.push((value, children));
+                                    if last_progress_log.elapsed() >= Duration::from_secs(5) {
+                                        info!(
+                                            "exact-nullary progress size={} phase=nary attempted={} inserted={} elapsed={:?}",
+                                            size,
+                                            eval_attempted,
+                                            inserted_this_size,
+                                            size_start.elapsed()
+                                        );
+                                        for line in eval_cache.top_profiles(4) {
+                                            info!("exact-nullary hot {}", line);
+                                        }
+                                        last_progress_log = Instant::now();
+                                    }
                                 });
                             },
                         );
@@ -711,6 +839,19 @@ fn search_nullary_multi_nt(
                                     let children =
                                         tuple.iter().map(|cand| cand.node).collect::<Vec<_>>();
                                     staged.push((value, children));
+                                    if last_progress_log.elapsed() >= Duration::from_secs(5) {
+                                        info!(
+                                            "exact-nullary progress size={} phase=generic attempted={} inserted={} elapsed={:?}",
+                                            size,
+                                            eval_attempted,
+                                            inserted_this_size,
+                                            size_start.elapsed()
+                                        );
+                                        for line in eval_cache.top_profiles(4) {
+                                            info!("exact-nullary hot {}", line);
+                                        }
+                                        last_progress_log = Instant::now();
+                                    }
                                 });
                             },
                         );
@@ -786,18 +927,22 @@ fn search_nullary_multi_nt(
             }
         }
         info!(
-            "exact-nullary size={} inserted={} seen_start={} seen_total={} best_goal={}/{}",
+            "exact-nullary size={} inserted={} seen_start={} seen_total={} best_goal={}/{} elapsed={:?}",
             size,
             inserted_this_size,
             seen.bucket_len(grammar.start),
             seen.total_len(),
             best_goal_score,
-            goal.known_bits.len()
+            goal.known_bits.len(),
+            size_start.elapsed()
         );
         info!(
             "exact-nullary eval size={} attempted={} failed={}",
             size, eval_attempted, eval_failed
         );
+        for line in eval_cache.top_profiles(4) {
+            info!("exact-nullary hot {}", line);
+        }
     }
 
     unreachable!("nullary enumeration should either find a solution or diverge");

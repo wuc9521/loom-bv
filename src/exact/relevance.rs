@@ -7,39 +7,91 @@ use crate::{
 
 use super::{owned_expr_width, ExactGrammar, ExactRule, NullarySpec};
 
+#[derive(Clone, Default)]
+struct BitSet {
+    words: Vec<u64>,
+}
+
+impl BitSet {
+    fn new(bits: usize) -> Self {
+        Self {
+            words: vec![0; bits.div_ceil(64)],
+        }
+    }
+
+    fn full(bits: usize) -> Self {
+        let mut set = Self::new(bits);
+        let full_words = bits / 64;
+        for word in &mut set.words[..full_words] {
+            *word = u64::MAX;
+        }
+        let rem = bits % 64;
+        if rem != 0 {
+            set.words[full_words] = (1u64 << rem) - 1;
+        }
+        set
+    }
+
+    fn insert(&mut self, bit: usize) {
+        let word = bit / 64;
+        if word < self.words.len() {
+            self.words[word] |= 1u64 << (bit % 64);
+        }
+    }
+
+    fn union_inplace(&mut self, other: &Self) {
+        for (lhs, rhs) in self.words.iter_mut().zip(other.words.iter()) {
+            *lhs |= *rhs;
+        }
+    }
+
+    fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
+        self.words.iter().enumerate().flat_map(|(word_idx, word)| {
+            let mut word = *word;
+            std::iter::from_fn(move || {
+                if word == 0 {
+                    return None;
+                }
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1;
+                Some(word_idx * 64 + bit)
+            })
+        })
+    }
+}
+
 #[derive(Clone)]
 struct BitDep {
-    per_arg: Vec<Vec<usize>>,
+    per_arg: Vec<BitSet>,
 }
 
 impl BitDep {
-    fn empty(nargs: usize) -> Self {
+    fn empty(arg_bits: &[usize]) -> Self {
         Self {
-            per_arg: (0..nargs).map(|_| Vec::new()).collect(),
+            per_arg: arg_bits.iter().map(|bits| BitSet::new(*bits)).collect(),
         }
     }
 
-    fn single_slot(nargs: usize, arg_idx: usize, bit: usize) -> Self {
-        let mut dep = Self::empty(nargs);
-        dep.per_arg[arg_idx].push(bit);
+    fn full(arg_bits: &[usize]) -> Self {
+        Self {
+            per_arg: arg_bits.iter().map(|bits| BitSet::full(*bits)).collect(),
+        }
+    }
+
+    fn single_slot(arg_bits: &[usize], arg_idx: usize, bit: usize) -> Self {
+        let mut dep = Self::empty(arg_bits);
+        dep.per_arg[arg_idx].insert(bit);
         dep
     }
 
-    fn union(&self, other: &Self) -> Self {
-        let mut per_arg = Vec::with_capacity(self.per_arg.len());
-        for (lhs, rhs) in self.per_arg.iter().zip(other.per_arg.iter()) {
-            let mut merged = lhs.clone();
-            for bit in rhs {
-                if !merged.contains(bit) {
-                    merged.push(*bit);
-                }
-            }
-            merged.sort_unstable();
-            per_arg.push(merged);
+    fn union_inplace(&mut self, other: &Self) {
+        for (lhs, rhs) in self.per_arg.iter_mut().zip(other.per_arg.iter()) {
+            lhs.union_inplace(rhs);
         }
-        Self { per_arg }
     }
 }
+
+type DepCache = FxHashMap<(usize, usize, usize), Option<BitDep>>;
 
 pub fn compute_relevant_bits_for_spec(
     grammar: &ExactGrammar<'_>,
@@ -53,12 +105,10 @@ pub fn compute_relevant_bits_for_spec(
     else {
         return None;
     };
-    if !structural.is_empty() {
+    if !structural.is_empty() || known_bits.is_empty() {
         return None;
     }
-    if known_bits.is_empty() {
-        return None;
-    }
+
     let nt_bits = grammar
         .nts
         .iter()
@@ -67,7 +117,8 @@ pub fn compute_relevant_bits_for_spec(
     if nt_bits.get(grammar.start).copied() != Some(*bits) {
         return None;
     }
-    let mut dep_cache = FxHashMap::<(usize, usize), Option<Vec<BitDep>>>::default();
+
+    let mut dep_cache = DepCache::default();
     let mut relevant = nt_bits
         .iter()
         .map(|bits| vec![false; *bits])
@@ -77,6 +128,7 @@ pub fn compute_relevant_bits_for_spec(
             relevant[grammar.start][*bit] = true;
         }
     }
+
     let mut changed = true;
     while changed {
         changed = false;
@@ -101,54 +153,58 @@ pub fn compute_relevant_bits_for_spec(
                     }
                     ExactRule::Leaf(_) => {}
                     ExactRule::Unary { fid, child_nt } => {
-                        let Some(summary) = get_deffun_dep_summary(*fid, 1, &mut dep_cache) else {
-                            return None;
-                        };
-                        propagate_relevant_bits(
-                            &parent_relevant,
-                            &summary,
-                            0,
-                            &mut relevant[*child_nt],
-                            &mut changed,
-                        );
+                        for bit in &parent_relevant {
+                            let Some(dep) = get_deffun_dep_bit(*fid, 1, *bit, &mut dep_cache)
+                            else {
+                                return None;
+                            };
+                            propagate_dep(
+                                &dep,
+                                0,
+                                &mut relevant[*child_nt],
+                                &mut changed,
+                            );
+                        }
                     }
                     ExactRule::Binary {
                         fid,
                         lhs_nt,
                         rhs_nt,
                     } => {
-                        let Some(summary) = get_deffun_dep_summary(*fid, 2, &mut dep_cache) else {
-                            return None;
-                        };
-                        propagate_relevant_bits(
-                            &parent_relevant,
-                            &summary,
-                            0,
-                            &mut relevant[*lhs_nt],
-                            &mut changed,
-                        );
-                        propagate_relevant_bits(
-                            &parent_relevant,
-                            &summary,
-                            1,
-                            &mut relevant[*rhs_nt],
-                            &mut changed,
-                        );
-                    }
-                    ExactRule::Nary { fid, child_nts } => {
-                        let Some(summary) =
-                            get_deffun_dep_summary(*fid, child_nts.len(), &mut dep_cache)
-                        else {
-                            return None;
-                        };
-                        for (arg_idx, child_nt) in child_nts.iter().enumerate() {
-                            propagate_relevant_bits(
-                                &parent_relevant,
-                                &summary,
-                                arg_idx,
-                                &mut relevant[*child_nt],
+                        for bit in &parent_relevant {
+                            let Some(dep) = get_deffun_dep_bit(*fid, 2, *bit, &mut dep_cache)
+                            else {
+                                return None;
+                            };
+                            propagate_dep(
+                                &dep,
+                                0,
+                                &mut relevant[*lhs_nt],
                                 &mut changed,
                             );
+                            propagate_dep(
+                                &dep,
+                                1,
+                                &mut relevant[*rhs_nt],
+                                &mut changed,
+                            );
+                        }
+                    }
+                    ExactRule::Nary { fid, child_nts } => {
+                        for bit in &parent_relevant {
+                            let Some(dep) =
+                                get_deffun_dep_bit(*fid, child_nts.len(), *bit, &mut dep_cache)
+                            else {
+                                return None;
+                            };
+                            for (arg_idx, child_nt) in child_nts.iter().enumerate() {
+                                propagate_dep(
+                                    &dep,
+                                    arg_idx,
+                                    &mut relevant[*child_nt],
+                                    &mut changed,
+                                );
+                            }
                         }
                     }
                     ExactRule::GenericTemplate {
@@ -156,30 +212,31 @@ pub fn compute_relevant_bits_for_spec(
                         child_nts,
                         ..
                     } => {
-                        let Some(summary) = get_template_dep_summary(
-                            template,
-                            &child_nts
-                                .iter()
-                                .map(|child_nt| nt_bits[*child_nt])
-                                .collect::<Vec<_>>(),
-                            &mut dep_cache,
-                        ) else {
-                            return None;
-                        };
-                        for (arg_idx, child_nt) in child_nts.iter().enumerate() {
-                            propagate_relevant_bits(
-                                &parent_relevant,
-                                &summary,
-                                arg_idx,
-                                &mut relevant[*child_nt],
-                                &mut changed,
-                            );
+                        let slot_bits = child_nts
+                            .iter()
+                            .map(|child_nt| nt_bits[*child_nt])
+                            .collect::<Vec<_>>();
+                        for bit in &parent_relevant {
+                            let Some(dep) =
+                                compute_template_dep_bit(template, &slot_bits, *bit, &mut dep_cache)
+                            else {
+                                return None;
+                            };
+                            for (arg_idx, child_nt) in child_nts.iter().enumerate() {
+                                propagate_dep(
+                                    &dep,
+                                    arg_idx,
+                                    &mut relevant[*child_nt],
+                                    &mut changed,
+                                );
+                            }
                         }
                     }
                 }
             }
         }
     }
+
     let relevant_bits = relevant
         .into_iter()
         .map(|bits| {
@@ -196,25 +253,14 @@ pub fn compute_relevant_bits_for_spec(
     reduced_any.then_some(relevant_bits)
 }
 
-fn propagate_relevant_bits(
-    parent_relevant: &[usize],
-    summary: &[BitDep],
-    arg_idx: usize,
-    child_relevant: &mut [bool],
-    changed: &mut bool,
-) {
-    for bit in parent_relevant {
-        let Some(dep) = summary.get(*bit) else {
-            continue;
-        };
-        let Some(arg_deps) = dep.per_arg.get(arg_idx) else {
-            continue;
-        };
-        for child_bit in arg_deps {
-            if *child_bit < child_relevant.len() && !child_relevant[*child_bit] {
-                child_relevant[*child_bit] = true;
-                *changed = true;
-            }
+fn propagate_dep(dep: &BitDep, arg_idx: usize, child_relevant: &mut [bool], changed: &mut bool) {
+    let Some(bits) = dep.per_arg.get(arg_idx) else {
+        return;
+    };
+    for child_bit in bits.iter_ones() {
+        if child_bit < child_relevant.len() && !child_relevant[child_bit] {
+            child_relevant[child_bit] = true;
+            *changed = true;
         }
     }
 }
@@ -246,207 +292,173 @@ fn template_output_bits(template: &TemplateExpr) -> usize {
     }
 }
 
-fn get_deffun_dep_summary(
+fn get_deffun_dep_bit(
     fid: usize,
     nargs: usize,
-    cache: &mut FxHashMap<(usize, usize), Option<Vec<BitDep>>>,
-) -> Option<Vec<BitDep>> {
-    if let Some(summary) = cache.get(&(fid, nargs)) {
-        return summary.clone();
+    bit: usize,
+    cache: &mut DepCache,
+) -> Option<BitDep> {
+    if let Some(dep) = cache.get(&(fid, nargs, bit)) {
+        return dep.clone();
     }
     let arg_bits = deffun::ENV.arg_bits(fid, nargs).to_vec();
-    let summary = compute_expr_dep_summary(deffun::ENV.apply(fid, nargs), &arg_bits, cache);
-    cache.insert((fid, nargs), summary.clone());
-    summary
+    let dep = compute_expr_dep_bit(deffun::ENV.apply(fid, nargs), &arg_bits, bit, cache);
+    cache.insert((fid, nargs, bit), dep.clone());
+    dep
 }
 
-fn get_template_dep_summary(
+fn compute_template_dep_bit(
     template: &TemplateExpr,
     slot_bits: &[usize],
-    cache: &mut FxHashMap<(usize, usize), Option<Vec<BitDep>>>,
-) -> Option<Vec<BitDep>> {
-    compute_template_dep_summary(template, slot_bits, cache)
-}
-
-fn compute_template_dep_summary(
-    template: &TemplateExpr,
-    slot_bits: &[usize],
-    cache: &mut FxHashMap<(usize, usize), Option<Vec<BitDep>>>,
-) -> Option<Vec<BitDep>> {
+    bit: usize,
+    cache: &mut DepCache,
+) -> Option<BitDep> {
     match template {
         TemplateExpr::Slot(slot) => {
             let bits = *slot_bits.get(*slot)?;
-            Some(
-                (0..bits)
-                    .map(|bit| BitDep::single_slot(slot_bits.len(), *slot, bit))
-                    .collect(),
-            )
+            (bit < bits).then(|| BitDep::single_slot(slot_bits, *slot, bit))
         }
-        TemplateExpr::Leaf(expr) => compute_expr_dep_summary(expr, slot_bits, cache),
+        TemplateExpr::Leaf(expr) => compute_expr_dep_bit(expr, slot_bits, bit, cache),
         TemplateExpr::App(id, parts) => {
             let fid = deffun::ENV.lookup(id.get_name(), parts.len())?;
-            let f_summary = get_deffun_dep_summary(fid, parts.len(), cache)?;
-            let part_summaries = parts
-                .iter()
-                .map(|part| compute_template_dep_summary(part, slot_bits, cache))
-                .collect::<Option<Vec<_>>>()?;
-            compose_dep_summaries(&f_summary, &part_summaries, slot_bits.len())
+            let outer = get_deffun_dep_bit(fid, parts.len(), bit, cache)?;
+            let mut combined = BitDep::empty(slot_bits);
+            for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
+                let part = parts.get(arg_idx)?;
+                for inner_bit in bits.iter_ones() {
+                    let dep = compute_template_dep_bit(part, slot_bits, inner_bit, cache)?;
+                    combined.union_inplace(&dep);
+                }
+            }
+            Some(combined)
         }
     }
 }
 
-fn compute_expr_dep_summary(
+fn compute_expr_dep_bit(
     expr: &OwnedExpr,
     arg_bits: &[usize],
-    cache: &mut FxHashMap<(usize, usize), Option<Vec<BitDep>>>,
-) -> Option<Vec<BitDep>> {
+    bit: usize,
+    cache: &mut DepCache,
+) -> Option<BitDep> {
     match expr {
-        OwnedExpr::Const(value) => Some(
-            (0..value.bits())
-                .map(|_| BitDep::empty(arg_bits.len()))
-                .collect(),
-        ),
+        OwnedExpr::Const(value) => (bit < value.bits()).then(|| BitDep::empty(arg_bits)),
         OwnedExpr::Var(idx) => {
             let bits = *arg_bits.get(*idx)?;
-            Some(
-                (0..bits)
-                    .map(|bit| BitDep::single_slot(arg_bits.len(), *idx, bit))
-                    .collect(),
-            )
+            (bit < bits).then(|| BitDep::single_slot(arg_bits, *idx, bit))
         }
-        OwnedExpr::Let(_, value, body) => {
-            let value_summary = compute_expr_dep_summary(value, arg_bits, cache)?;
-            let mut extended_arg_bits = arg_bits.to_vec();
-            extended_arg_bits.push(owned_expr_width(value));
-            let body_summary = compute_expr_dep_summary(body, &extended_arg_bits, cache)?;
-            let bound_idx = arg_bits.len();
-            Some(
-                body_summary
-                    .into_iter()
-                    .map(|dep| {
-                        let mut composed = BitDep::empty(arg_bits.len());
-                        for (slot_idx, bits) in dep.per_arg.iter().enumerate() {
-                            if slot_idx < bound_idx {
-                                composed.per_arg[slot_idx].extend(bits.iter().copied());
-                            } else if slot_idx == bound_idx {
-                                for bit in bits {
-                                    let Some(value_dep) = value_summary.get(*bit) else {
-                                        continue;
-                                    };
-                                    for (arg_idx, arg_bits) in value_dep.per_arg.iter().enumerate()
-                                    {
-                                        composed.per_arg[arg_idx]
-                                            .extend(arg_bits.iter().copied());
-                                    }
-                                }
-                            }
-                        }
-                        for arg_bits in &mut composed.per_arg {
-                            arg_bits.sort_unstable();
-                            arg_bits.dedup();
-                        }
-                        composed
-                    })
-                    .collect(),
-            )
-        }
+        OwnedExpr::Let(_, _, _) => compute_let_dep_bit(expr, arg_bits, bit, cache),
         OwnedExpr::Extract(inner, hi, lo) => {
-            let deps = compute_expr_dep_summary(inner, arg_bits, cache)?;
-            Some(deps.get(*lo as usize..=*hi as usize)?.to_vec())
+            let width = (*hi - *lo + 1) as usize;
+            if bit >= width {
+                return None;
+            }
+            compute_expr_dep_bit(inner, arg_bits, *lo as usize + bit, cache)
         }
         OwnedExpr::Concat(high, low) => {
-            let mut res = compute_expr_dep_summary(low, arg_bits, cache)?;
-            res.extend(compute_expr_dep_summary(high, arg_bits, cache)?);
-            Some(res)
+            let low_bits = owned_expr_width(low);
+            if bit < low_bits {
+                compute_expr_dep_bit(low, arg_bits, bit, cache)
+            } else {
+                compute_expr_dep_bit(high, arg_bits, bit - low_bits, cache)
+            }
         }
-        OwnedExpr::Not(inner) | OwnedExpr::Neg(inner) => {
-            compute_expr_dep_summary(inner, arg_bits, cache)
-        }
+        OwnedExpr::Not(inner) => compute_expr_dep_bit(inner, arg_bits, bit, cache),
         OwnedExpr::And(lhs, rhs) | OwnedExpr::Or(lhs, rhs) | OwnedExpr::Xor(lhs, rhs) => {
-            let lhs_deps = compute_expr_dep_summary(lhs, arg_bits, cache)?;
-            let rhs_deps = compute_expr_dep_summary(rhs, arg_bits, cache)?;
-            union_pointwise_deps(&lhs_deps, &rhs_deps)
+            let mut dep = compute_expr_dep_bit(lhs, arg_bits, bit, cache)?;
+            let rhs_dep = compute_expr_dep_bit(rhs, arg_bits, bit, cache)?;
+            dep.union_inplace(&rhs_dep);
+            Some(dep)
         }
         OwnedExpr::Ite(cond, then_expr, else_expr) => {
-            let cond_deps = compute_expr_dep_summary(cond, arg_bits, cache)?;
-            if cond_deps.len() != 1 {
-                return None;
-            }
-            let then_deps = compute_expr_dep_summary(then_expr, arg_bits, cache)?;
-            let else_deps = compute_expr_dep_summary(else_expr, arg_bits, cache)?;
-            if then_deps.len() != else_deps.len() {
-                return None;
-            }
-            Some(
-                then_deps
-                    .into_iter()
-                    .zip(else_deps)
-                    .map(|(a, b)| a.union(&b).union(&cond_deps[0]))
-                    .collect(),
-            )
+            let mut dep = compute_expr_dep_bit(cond, arg_bits, 0, cache)?;
+            dep.union_inplace(&compute_expr_dep_bit(then_expr, arg_bits, bit, cache)?);
+            dep.union_inplace(&compute_expr_dep_bit(else_expr, arg_bits, bit, cache)?);
+            Some(dep)
         }
-        OwnedExpr::Fop0Dyn(fid) => get_deffun_dep_summary(*fid, 0, cache),
+        OwnedExpr::Fop0Dyn(fid) => get_deffun_dep_bit(*fid, 0, bit, cache),
         OwnedExpr::Fop1Dyn(fid, arg) => {
-            let f_summary = get_deffun_dep_summary(*fid, 1, cache)?;
-            let arg_summary = compute_expr_dep_summary(arg, arg_bits, cache)?;
-            compose_dep_summaries(&f_summary, &[arg_summary], arg_bits.len())
+            let outer = get_deffun_dep_bit(*fid, 1, bit, cache)?;
+            let mut combined = BitDep::empty(arg_bits);
+            for inner_bit in outer.per_arg[0].iter_ones() {
+                combined.union_inplace(&compute_expr_dep_bit(arg, arg_bits, inner_bit, cache)?);
+            }
+            Some(combined)
         }
         OwnedExpr::Fop2Dyn(fid, lhs, rhs) => {
-            let f_summary = get_deffun_dep_summary(*fid, 2, cache)?;
-            let lhs_summary = compute_expr_dep_summary(lhs, arg_bits, cache)?;
-            let rhs_summary = compute_expr_dep_summary(rhs, arg_bits, cache)?;
-            compose_dep_summaries(&f_summary, &[lhs_summary, rhs_summary], arg_bits.len())
+            let outer = get_deffun_dep_bit(*fid, 2, bit, cache)?;
+            let mut combined = BitDep::empty(arg_bits);
+            for inner_bit in outer.per_arg[0].iter_ones() {
+                combined.union_inplace(&compute_expr_dep_bit(lhs, arg_bits, inner_bit, cache)?);
+            }
+            for inner_bit in outer.per_arg[1].iter_ones() {
+                combined.union_inplace(&compute_expr_dep_bit(rhs, arg_bits, inner_bit, cache)?);
+            }
+            Some(combined)
         }
         OwnedExpr::FopDyn(fid, args) => {
-            let f_summary = get_deffun_dep_summary(*fid, args.len(), cache)?;
-            let arg_summaries = args
-                .iter()
-                .map(|arg| compute_expr_dep_summary(arg, arg_bits, cache))
-                .collect::<Option<Vec<_>>>()?;
-            compose_dep_summaries(&f_summary, &arg_summaries, arg_bits.len())
+            let outer = get_deffun_dep_bit(*fid, args.len(), bit, cache)?;
+            let mut combined = BitDep::empty(arg_bits);
+            for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
+                let arg = args.get(arg_idx)?;
+                for inner_bit in bits.iter_ones() {
+                    combined.union_inplace(&compute_expr_dep_bit(arg, arg_bits, inner_bit, cache)?);
+                }
+            }
+            Some(combined)
         }
-        other => Some(top_dep_summary(owned_expr_width(other), arg_bits)),
+        other => {
+            let width = owned_expr_width(other);
+            (bit < width).then(|| BitDep::full(arg_bits))
+        }
     }
 }
 
-fn union_pointwise_deps(lhs: &[BitDep], rhs: &[BitDep]) -> Option<Vec<BitDep>> {
-    if lhs.len() != rhs.len() {
+fn compute_let_dep_bit(
+    expr: &OwnedExpr,
+    arg_bits: &[usize],
+    bit: usize,
+    cache: &mut DepCache,
+) -> Option<BitDep> {
+    let base_nargs = arg_bits.len();
+    let mut values = Vec::new();
+    let mut extended_arg_bits = arg_bits.to_vec();
+    let mut current = expr;
+
+    while let OwnedExpr::Let(_, value, body) = current {
+        values.push(value.as_ref());
+        extended_arg_bits.push(owned_expr_width(value));
+        current = body;
+    }
+
+    let mut dep = compute_expr_dep_bit(current, &extended_arg_bits, bit, cache)?;
+    for (binding_idx, value) in values.into_iter().enumerate().rev() {
+        let slot_idx = base_nargs + binding_idx;
+        dep = collapse_bound_slot(dep, slot_idx, value, &extended_arg_bits, cache)?;
+        extended_arg_bits.pop();
+    }
+    Some(dep)
+}
+
+fn collapse_bound_slot(
+    dep: BitDep,
+    slot_idx: usize,
+    value: &OwnedExpr,
+    scope_bits: &[usize],
+    cache: &mut DepCache,
+) -> Option<BitDep> {
+    if dep.per_arg.len() != slot_idx + 1 {
         return None;
     }
-    Some(
-        lhs.iter()
-            .zip(rhs.iter())
-            .map(|(a, b)| a.union(b))
-            .collect(),
-    )
-}
-
-fn compose_dep_summaries(
-    outer: &[BitDep],
-    inner: &[Vec<BitDep>],
-    nargs: usize,
-) -> Option<Vec<BitDep>> {
-    let mut result = Vec::with_capacity(outer.len());
-    for out_dep in outer {
-        let mut combined = BitDep::empty(nargs);
-        for (arg_idx, bits) in out_dep.per_arg.iter().enumerate() {
-            let arg_summary = inner.get(arg_idx)?;
-            for bit in bits {
-                let bit_dep = arg_summary.get(*bit)?;
-                combined = combined.union(bit_dep);
+    let mut combined = BitDep::empty(scope_bits);
+    for (arg_idx, bits) in dep.per_arg.iter().enumerate() {
+        if arg_idx < slot_idx {
+            combined.per_arg[arg_idx].union_inplace(bits);
+        } else {
+            for bit in bits.iter_ones() {
+                combined.union_inplace(&compute_expr_dep_bit(value, scope_bits, bit, cache)?);
             }
         }
-        result.push(combined);
     }
-    Some(result)
-}
-
-fn top_dep_summary(width: usize, arg_bits: &[usize]) -> Vec<BitDep> {
-    let full = BitDep {
-        per_arg: arg_bits
-            .iter()
-            .map(|bits| (0..*bits).collect::<Vec<_>>())
-            .collect(),
-    };
-    (0..width).map(|_| full.clone()).collect()
+    Some(combined)
 }
