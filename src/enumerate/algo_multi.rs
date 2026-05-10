@@ -293,6 +293,20 @@ impl<'a, const N: usize> Algo<'a, N> {
         Some(match expr {
             OwnedExpr::Var(i) => vars.get(*i).copied().unwrap_or_else(AbsSummary::top),
             OwnedExpr::Const(v) => AbsSummary::exact(Bv([v.as_u64_lossy(); N].into())),
+            OwnedExpr::Let(_, _, _) => {
+                let mut scoped = vars.to_vec();
+                let mut current = expr;
+                loop {
+                    match current {
+                        OwnedExpr::Let(_, value, body) => {
+                            let bound = self.eval_owned_abs(value, &scoped, depth + 1)?;
+                            scoped.push(bound);
+                            current = body;
+                        }
+                        other => break self.eval_owned_abs(other, &scoped, depth + 1)?,
+                    }
+                }
+            }
             OwnedExpr::Not(a) => {
                 let a = self.eval_owned_abs(a, vars, depth + 1)?;
                 AbsSummary {
@@ -446,6 +460,7 @@ fn owned_expr_bit_width(expr: &OwnedExpr) -> usize {
         OwnedExpr::FopDyn(id, args) => crate::parse::deffun::ENV.ret_bits(*id, args.len()),
         OwnedExpr::Const(v) => v.bits(),
         OwnedExpr::Var(_) => 64,
+        OwnedExpr::Let(_, _, body) => owned_expr_bit_width(body),
         OwnedExpr::Not(a) | OwnedExpr::Neg(a) | OwnedExpr::Fop1Dyn(_, a) => owned_expr_bit_width(a),
         OwnedExpr::Add(a, _)
         | OwnedExpr::Xor(a, _)

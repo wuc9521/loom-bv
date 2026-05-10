@@ -7,6 +7,16 @@ use crate::{enumerate::expr::OwnedExpr, info};
 
 use super::{new_custom_error_span, Error, ProblemView};
 
+fn summarize_expr(expr: &OwnedExpr, limit: usize) -> String {
+    let rendered = expr.to_string();
+    let total = rendered.chars().count();
+    if total <= limit {
+        return rendered;
+    }
+    let prefix = rendered.chars().take(limit).collect::<String>();
+    format!("{prefix}... <{} chars total>", total)
+}
+
 #[derive(Clone, DebugCustom)]
 #[debug(fmt = "define-fun {} {:?}", name, args)]
 pub struct DefineFun {
@@ -68,7 +78,7 @@ impl Environ {
                 "DefineFun: {} {} -> {}",
                 name,
                 args.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "),
-                expr
+                summarize_expr(&expr, 160)
             );
             if self.inner().len() <= args.len() {
                 self.inner().resize_with(args.len() + 1, Vec::new);

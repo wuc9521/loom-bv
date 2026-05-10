@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::{One, Signed, ToPrimitive, Zero};
@@ -6,7 +7,7 @@ use num_traits::{One, Signed, ToPrimitive, Zero};
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Value {
     Small { bits: usize, raw: u64 },
-    Big { bits: usize, raw: BigUint },
+    Big { bits: usize, raw: Arc<BigUint> },
 }
 
 impl Value {
@@ -19,28 +20,32 @@ impl Value {
     pub fn from_u64(raw: u64, bits: usize) -> Self {
         if bits <= 64 {
             let mask = mask_u64(bits);
+            let raw = raw & mask;
             Value::Small {
                 bits,
-                raw: raw & mask,
+                raw,
             }
         } else {
+            let raw = truncate_big(BigUint::from(raw), bits);
             Value::Big {
                 bits,
-                raw: truncate_big(BigUint::from(raw), bits),
+                raw: Arc::new(raw),
             }
         }
     }
 
     pub fn from_biguint(raw: BigUint, bits: usize) -> Self {
         if bits <= 64 {
+            let raw = (raw & BigUint::from(mask_u64(bits))).to_u64().unwrap_or(0);
             Value::Small {
                 bits,
-                raw: (raw & BigUint::from(mask_u64(bits))).to_u64().unwrap_or(0),
+                raw,
             }
         } else {
+            let raw = truncate_big(raw, bits);
             Value::Big {
                 bits,
-                raw: truncate_big(raw, bits),
+                raw: Arc::new(raw),
             }
         }
     }
@@ -52,21 +57,21 @@ impl Value {
     pub fn is_zero(&self) -> bool {
         match self {
             Value::Small { raw, .. } => *raw == 0,
-            Value::Big { raw, .. } => raw.is_zero(),
+            Value::Big { raw, .. } => raw.as_ref().is_zero(),
         }
     }
 
     pub fn as_u64_lossy(&self) -> u64 {
         match self {
             Value::Small { raw, .. } => *raw,
-            Value::Big { raw, .. } => raw.to_u64().unwrap_or(0),
+            Value::Big { raw, .. } => raw.as_ref().to_u64().unwrap_or(0),
         }
     }
 
     pub fn to_biguint(&self) -> BigUint {
         match self {
             Value::Small { raw, .. } => BigUint::from(*raw),
-            Value::Big { raw, .. } => raw.clone(),
+            Value::Big { raw, .. } => raw.as_ref().clone(),
         }
     }
 
@@ -79,7 +84,8 @@ impl Value {
             Value::Big { raw, .. } => {
                 let limb = bit / 64;
                 let offset = bit % 64;
-                raw.iter_u64_digits()
+                raw.as_ref()
+                    .iter_u64_digits()
                     .nth(limb)
                     .map(|digit| ((digit >> offset) & 1) == 1)
                     .unwrap_or(false)
@@ -87,12 +93,54 @@ impl Value {
         }
     }
 
+    pub fn project_bits(&self, bits: &[usize]) -> Vec<u64> {
+        let mut words = Vec::with_capacity(bits.len().div_ceil(64));
+        let mut current = 0u64;
+        match self {
+            Value::Small { raw, bits: width } => {
+                for (idx, bit) in bits.iter().enumerate() {
+                    if *bit < *width && (((*raw >> *bit) & 1) == 1) {
+                        current |= 1u64 << (idx % 64);
+                    }
+                    if idx % 64 == 63 {
+                        words.push(current);
+                        current = 0;
+                    }
+                }
+            }
+            Value::Big { raw, bits: width } => {
+                let digits = raw.as_ref().to_u64_digits();
+                for (idx, bit) in bits.iter().enumerate() {
+                    if *bit < *width {
+                        let limb = *bit / 64;
+                        let offset = *bit % 64;
+                        if digits
+                            .get(limb)
+                            .map(|digit| ((digit >> offset) & 1) == 1)
+                            .unwrap_or(false)
+                        {
+                            current |= 1u64 << (idx % 64);
+                        }
+                    }
+                    if idx % 64 == 63 {
+                        words.push(current);
+                        current = 0;
+                    }
+                }
+            }
+        }
+        if !bits.is_empty() && bits.len() % 64 != 0 {
+            words.push(current);
+        }
+        words
+    }
+
     pub fn to_smt_hex(&self) -> String {
         let bits = self.bits();
         let hex_len = bits.div_ceil(4).max(1);
         let v = match self {
             Value::Small { raw, .. } => format!("{:x}", raw),
-            Value::Big { raw, .. } => format!("{:x}", raw),
+            Value::Big { raw, .. } => format!("{:x}", raw.as_ref()),
         };
         let padded = if v.len() >= hex_len {
             v

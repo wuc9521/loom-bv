@@ -1,4 +1,3 @@
-
 #[macro_export]
 macro_rules! enum_expr {
     () => {
@@ -148,6 +147,9 @@ macro_rules! enum_ownedexpr {
             #[debug(fmt = "(ite {:?} {:?} {:?})", _0, _1, _2)]
             #[display(fmt = "(ite (= {} #x0000000000000000) {} {})", _0, _1, _2)]
             Ite(Box<OwnedExpr>, Box<OwnedExpr>, Box<OwnedExpr>),
+            #[debug(fmt = "{}", "crate::enumerate::expr::format_owned_let(_0, _1, _2)")]
+            #[display(fmt = "{}", "crate::enumerate::expr::format_owned_let(_0, _1, _2)")]
+            Let(String, Box<OwnedExpr>, Box<OwnedExpr>),
             #[debug(fmt = "v{:?}", _0)]
             #[display(fmt = "v{:?}", _0)]
             Var(usize),

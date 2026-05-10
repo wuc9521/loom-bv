@@ -314,6 +314,42 @@ fn compute_expr_dep_summary(
                     .collect(),
             )
         }
+        OwnedExpr::Let(_, value, body) => {
+            let value_summary = compute_expr_dep_summary(value, arg_bits, cache)?;
+            let mut extended_arg_bits = arg_bits.to_vec();
+            extended_arg_bits.push(owned_expr_width(value));
+            let body_summary = compute_expr_dep_summary(body, &extended_arg_bits, cache)?;
+            let bound_idx = arg_bits.len();
+            Some(
+                body_summary
+                    .into_iter()
+                    .map(|dep| {
+                        let mut composed = BitDep::empty(arg_bits.len());
+                        for (slot_idx, bits) in dep.per_arg.iter().enumerate() {
+                            if slot_idx < bound_idx {
+                                composed.per_arg[slot_idx].extend(bits.iter().copied());
+                            } else if slot_idx == bound_idx {
+                                for bit in bits {
+                                    let Some(value_dep) = value_summary.get(*bit) else {
+                                        continue;
+                                    };
+                                    for (arg_idx, arg_bits) in value_dep.per_arg.iter().enumerate()
+                                    {
+                                        composed.per_arg[arg_idx]
+                                            .extend(arg_bits.iter().copied());
+                                    }
+                                }
+                            }
+                        }
+                        for arg_bits in &mut composed.per_arg {
+                            arg_bits.sort_unstable();
+                            arg_bits.dedup();
+                        }
+                        composed
+                    })
+                    .collect(),
+            )
+        }
         OwnedExpr::Extract(inner, hi, lo) => {
             let deps = compute_expr_dep_summary(inner, arg_bits, cache)?;
             Some(deps.get(*lo as usize..=*hi as usize)?.to_vec())

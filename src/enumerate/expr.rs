@@ -23,6 +23,12 @@ pub struct DivideByZero;
 
 fn value_extract(value: Value, hi: u64, lo: u64) -> Value {
     let width = (hi - lo + 1) as usize;
+    if width == 1 {
+        return Value::from_u64(value.bit(lo as usize) as u64, 1);
+    }
+    if value.bits() <= 64 {
+        return Value::from_u64(value.as_u64_lossy() >> lo, width);
+    }
     let shifted = value.to_biguint() >> (lo as usize);
     let mask = (num_bigint::BigUint::from(1u8) << width) - num_bigint::BigUint::from(1u8);
     Value::from_biguint(shifted & mask, width)
@@ -90,6 +96,7 @@ fn owned_expr_width(expr: &OwnedExpr) -> usize {
         OwnedExpr::FopDyn(id, args) => deffun::ENV.ret_bits(*id, args.len()),
         OwnedExpr::Const(v) => v.bits(),
         OwnedExpr::Var(_) => 64,
+        OwnedExpr::Let(_, _, body) => owned_expr_width(body),
         OwnedExpr::Not(a)
         | OwnedExpr::Neg(a)
         | OwnedExpr::Fop1Dyn(_, a) => owned_expr_width(a),
@@ -109,6 +116,10 @@ fn owned_expr_width(expr: &OwnedExpr) -> usize {
         | OwnedExpr::SRem(a, _) => owned_expr_width(a),
         OwnedExpr::Ite(_, a, _) => owned_expr_width(a),
     }
+}
+
+pub fn format_owned_let(name: &str, value: &OwnedExpr, body: &OwnedExpr) -> String {
+    format!("(let (({} {})) {})", name, value, body)
 }
 
 pub fn format_owned_dyn_app(fid: usize, args: &[OwnedExpr]) -> String {
@@ -251,6 +262,9 @@ impl<'a> Expr<'a> {
         }
         if let OwnedExpr::Const(c) = expr {
             return bump.alloc(Expr::Const(c.clone()));
+        }
+        if let OwnedExpr::Let(_, _, _) = expr {
+            panic!("borrowed Expr conversion does not support let-bound OwnedExpr");
         }
         if let OwnedExpr::Ite(a, b, c) = expr {
             return bump.alloc(Expr::Ite(
@@ -590,9 +604,26 @@ impl OwnedExpr {
                     empty_span(),
                 ))
             }
-            SyGuSTerm::Exists(_, _) | SyGuSTerm::Forall(_, _) | SyGuSTerm::Let(_, _) => Err(
-                new_custom_error_span(format!("Unrecongnized Expression: {}", term), empty_span()),
-            ),
+            SyGuSTerm::Let(bindings, body) => {
+                let mut extended_env = env.to_vec();
+                let mut lowered = Vec::with_capacity(bindings.len());
+                for binding in bindings {
+                    let value = Self::from_term(&binding.term, &extended_env)?;
+                    let width = owned_expr_width(&value) as u64;
+                    let leaked = Box::leak(binding.name.clone().into_boxed_str()) as &'static str;
+                    extended_env.push((leaked, width));
+                    lowered.push((binding.name.clone(), value));
+                }
+                let mut expr = Self::from_term(body, &extended_env)?;
+                for (name, value) in lowered.into_iter().rev() {
+                    expr = Self::Let(name, Box::new(value), Box::new(expr));
+                }
+                Ok(expr)
+            }
+            SyGuSTerm::Exists(_, _) | SyGuSTerm::Forall(_, _) => Err(new_custom_error_span(
+                format!("Unrecongnized Expression: {}", term),
+                empty_span(),
+            )),
         }
     }
 
@@ -625,6 +656,9 @@ impl OwnedExpr {
         if let OwnedExpr::Const(_) = self {
             return 1;
         }
+        if let OwnedExpr::Let(_, value, body) = self {
+            return 1 + value.size() + body.size();
+        }
         if let OwnedExpr::Ite(a, b, c) = self {
             return 1 + a.size() + b.size() + c.size();
         }
@@ -642,10 +676,15 @@ impl OwnedExpr {
     }
 
     pub fn to_sygus(&self, arg_names: &[&str]) -> String {
+        let scoped = arg_names.iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
+        self.to_sygus_with_env(&scoped)
+    }
+
+    fn to_sygus_with_env(&self, names: &[String]) -> String {
         macro_rules! foreach_op {
             (1, $op:ident) => {
                 if let OwnedExpr::$op(a) = self {
-                    return format!("({} {})", smt_name_of!($op), a.to_sygus(arg_names));
+                    return format!("({} {})", smt_name_of!($op), a.to_sygus_with_env(names));
                 }
             };
             (2, $op:ident) => {
@@ -653,23 +692,27 @@ impl OwnedExpr {
                     return format!(
                         "({} {} {})",
                         smt_name_of!($op),
-                        a.to_sygus(arg_names),
-                        b.to_sygus(arg_names)
+                        a.to_sygus_with_env(names),
+                        b.to_sygus_with_env(names)
                     );
                 }
             };
         }
         if let OwnedExpr::Var(i) = self {
-            return arg_names
+            return names
                 .get(*i)
                 .map(|name| (*name).to_string())
                 .unwrap_or_else(|| format!("v{i}"));
         }
         if let OwnedExpr::Concat(a, b) = self {
-            return format!("(concat {} {})", a.to_sygus(arg_names), b.to_sygus(arg_names));
+            return format!(
+                "(concat {} {})",
+                a.to_sygus_with_env(names),
+                b.to_sygus_with_env(names)
+            );
         }
         if let OwnedExpr::Extract(a, hi, lo) = self {
-            return format!("((_ extract {} {}) {})", hi, lo, a.to_sygus(arg_names));
+            return format!("((_ extract {} {}) {})", hi, lo, a.to_sygus_with_env(names));
         }
         if let OwnedExpr::Fop0Dyn(id) = self {
             return deffun::ENV.name(*id, 0).to_string();
@@ -677,31 +720,41 @@ impl OwnedExpr {
         if let OwnedExpr::Const(c) = self {
             return c.to_string();
         }
+        if let OwnedExpr::Let(name, value, body) = self {
+            let mut scoped = names.to_vec();
+            scoped.push(name.clone());
+            return format!(
+                "(let (({} {})) {})",
+                name,
+                value.to_sygus_with_env(names),
+                body.to_sygus_with_env(&scoped)
+            );
+        }
         if let OwnedExpr::Ite(a, b, c) = self {
             return format!(
                 "(ite (= {} #x0000000000000000) {} {})",
-                a.to_sygus(arg_names),
-                b.to_sygus(arg_names),
-                c.to_sygus(arg_names)
+                a.to_sygus_with_env(names),
+                b.to_sygus_with_env(names),
+                c.to_sygus_with_env(names)
             );
         }
         if let OwnedExpr::FopDyn(id, args) = self {
             let rendered_args = args
                 .iter()
-                .map(|arg| arg.to_sygus(arg_names))
+                .map(|arg| arg.to_sygus_with_env(names))
                 .collect::<Vec<_>>()
                 .join(" ");
             return format!("({} {})", deffun::ENV.name(*id, args.len()), rendered_args);
         }
         if let OwnedExpr::Fop1Dyn(id, a) = self {
-            return format!("({} {})", deffun::ENV.name(*id, 1), a.to_sygus(arg_names));
+            return format!("({} {})", deffun::ENV.name(*id, 1), a.to_sygus_with_env(names));
         }
         if let OwnedExpr::Fop2Dyn(id, a, b) = self {
             return format!(
                 "({} {} {})",
                 deffun::ENV.name(*id, 2),
-                a.to_sygus(arg_names),
-                b.to_sygus(arg_names)
+                a.to_sygus_with_env(names),
+                b.to_sygus_with_env(names)
             );
         }
         all_ops!(arity);
@@ -786,6 +839,36 @@ mod tests {
 }
 
 impl OwnedExpr {
+    fn eval_let_chain(&self, args: &[Value]) -> Result<Value, DivideByZero> {
+        let mut scoped = args.to_vec();
+        let mut current = self;
+        loop {
+            match current {
+                OwnedExpr::Let(_, value, body) => {
+                    let bound = value.eval(&scoped)?;
+                    scoped.push(bound);
+                    current = body;
+                }
+                other => return other.eval(&scoped),
+            }
+        }
+    }
+
+    fn eval_bv_let_chain<const N: usize>(&self, args: &[Bv<N>]) -> Bv<N> {
+        let mut scoped = args.to_vec();
+        let mut current = self;
+        loop {
+            match current {
+                OwnedExpr::Let(_, value, body) => {
+                    let bound = value.eval_bv(&scoped);
+                    scoped.push(bound);
+                    current = body;
+                }
+                other => return other.eval_bv(&scoped),
+            }
+        }
+    }
+
     pub fn eval(&self, args: &[Value]) -> Result<Value, DivideByZero> {
         macro_rules! foreach_op {
             (1, false, $op: ident) => {
@@ -818,6 +901,9 @@ impl OwnedExpr {
         }
         if let OwnedExpr::Const(a) = self {
             return Ok(a.clone());
+        }
+        if let OwnedExpr::Let(_, _, _) = self {
+            return self.eval_let_chain(args);
         }
         if let OwnedExpr::FopDyn(id, exprs) = self {
             let values = exprs
@@ -867,6 +953,9 @@ impl OwnedExpr {
         }
         if let OwnedExpr::Const(a) = self {
             return Bv([a.as_u64_lossy(); N].into());
+        }
+        if let OwnedExpr::Let(_, _, _) = self {
+            return self.eval_bv_let_chain(args);
         }
         if let OwnedExpr::FopDyn(id, exprs) = self {
             let values = exprs.iter().map(|expr| expr.eval_bv(args)).collect::<Vec<_>>();

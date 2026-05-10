@@ -941,6 +941,20 @@ fn eval_owned_abs(
             .cloned()
             .unwrap_or_else(|| AbsValue::top(fallback_bits.max(1))),
         OwnedExpr::Const(v) => AbsValue::exact(v),
+        OwnedExpr::Let(_, _, _) => {
+            let mut scoped = vars.to_vec();
+            let mut current = expr;
+            loop {
+                match current {
+                    OwnedExpr::Let(_, value, body) => {
+                        let bound = eval_owned_abs(value, &scoped, fallback_bits, depth + 1);
+                        scoped.push(bound);
+                        current = body;
+                    }
+                    other => return eval_owned_abs(other, &scoped, fallback_bits, depth + 1),
+                }
+            }
+        }
         OwnedExpr::Not(a) | OwnedExpr::Neg(a) => {
             let child = eval_owned_abs(a, vars, fallback_bits, depth + 1);
             AbsValue {
@@ -1036,6 +1050,7 @@ fn owned_expr_width(expr: &OwnedExpr) -> usize {
         OwnedExpr::FopDyn(id, args) => deffun::ENV.ret_bits(*id, args.len()),
         OwnedExpr::Const(v) => v.bits(),
         OwnedExpr::Var(_) => 64,
+        OwnedExpr::Let(_, _, body) => owned_expr_width(body),
         OwnedExpr::Not(a) | OwnedExpr::Neg(a) | OwnedExpr::Fop1Dyn(_, a) => owned_expr_width(a),
         OwnedExpr::Add(a, _)
         | OwnedExpr::Xor(a, _)
@@ -1057,6 +1072,12 @@ fn owned_expr_width(expr: &OwnedExpr) -> usize {
 
 fn extract_value(value: Value, hi: u64, lo: u64) -> Value {
     let width = (hi - lo + 1) as usize;
+    if width == 1 {
+        return Value::from_u64(value.bit(lo as usize) as u64, 1);
+    }
+    if value.bits() <= 64 {
+        return Value::from_u64(value.as_u64_lossy() >> lo, width);
+    }
     let shifted = value.to_biguint() >> (lo as usize);
     let mask = (BigUint::one() << width) - BigUint::one();
     Value::from_biguint(shifted & mask, width)
@@ -1138,21 +1159,7 @@ fn seen_contains_or_insert(seen: &mut SeenMode, nt_idx: usize, value: &Value, si
 }
 
 fn project_value(value: &Value, bits: &[usize]) -> ProjectionKey {
-    let mut words = Vec::with_capacity(bits.len().div_ceil(64));
-    let mut current = 0u64;
-    for (idx, bit) in bits.iter().enumerate() {
-        if value.bit(*bit) {
-            current |= 1u64 << (idx % 64);
-        }
-        if idx % 64 == 63 {
-            words.push(current);
-            current = 0;
-        }
-    }
-    if !bits.len().is_multiple_of(64) {
-        words.push(current);
-    }
-    ProjectionKey(words)
+    ProjectionKey(value.project_bits(bits))
 }
 
 fn intern_node(nodes: &mut Vec<Node>, node: Node) -> NodeId {
