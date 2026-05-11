@@ -146,9 +146,6 @@ enum ExactRule {
 #[derive(Default)]
 struct ExactEvalCache {
     leaves: FxHashMap<OwnedExpr, Option<Value>>,
-    fop1: FxHashMap<(usize, Value), Option<Value>>,
-    fop2: FxHashMap<(usize, Value, Value), Option<Value>>,
-    fopn: FxHashMap<(usize, Vec<Value>), Option<Value>>,
     profile: FxHashMap<(usize, usize), EvalProfile>,
 }
 
