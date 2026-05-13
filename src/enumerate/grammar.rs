@@ -32,6 +32,17 @@ impl TemplateExpr {
             }
         }
     }
+
+    pub fn output_bits(&self) -> usize {
+        match self {
+            TemplateExpr::Slot(_) => 1,
+            TemplateExpr::Leaf(expr) => expr.width(),
+            TemplateExpr::App(id, parts) => deffun::ENV
+                .lookup(id.get_name(), parts.len())
+                .map(|fid| deffun::ENV.ret_bits(fid, parts.len()))
+                .unwrap_or(1),
+        }
+    }
 }
 
 #[derive(Clone)]

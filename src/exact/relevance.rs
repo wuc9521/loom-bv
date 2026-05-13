@@ -5,7 +5,7 @@ use crate::{
     parse::deffun,
 };
 
-use super::{owned_expr_width, ExactGrammar, ExactRule, NullarySpec};
+use super::{ExactGrammar, ExactRule, NullarySpec};
 
 #[derive(Clone, Default)]
 struct BitSet {
@@ -158,12 +158,7 @@ pub fn compute_relevant_bits_for_spec(
                             else {
                                 return None;
                             };
-                            propagate_dep(
-                                &dep,
-                                0,
-                                &mut relevant[*child_nt],
-                                &mut changed,
-                            );
+                            propagate_dep(&dep, 0, &mut relevant[*child_nt], &mut changed);
                         }
                     }
                     ExactRule::Binary {
@@ -176,18 +171,8 @@ pub fn compute_relevant_bits_for_spec(
                             else {
                                 return None;
                             };
-                            propagate_dep(
-                                &dep,
-                                0,
-                                &mut relevant[*lhs_nt],
-                                &mut changed,
-                            );
-                            propagate_dep(
-                                &dep,
-                                1,
-                                &mut relevant[*rhs_nt],
-                                &mut changed,
-                            );
+                            propagate_dep(&dep, 0, &mut relevant[*lhs_nt], &mut changed);
+                            propagate_dep(&dep, 1, &mut relevant[*rhs_nt], &mut changed);
                         }
                     }
                     ExactRule::Nary { fid, child_nts } => {
@@ -217,9 +202,12 @@ pub fn compute_relevant_bits_for_spec(
                             .map(|child_nt| nt_bits[*child_nt])
                             .collect::<Vec<_>>();
                         for bit in &parent_relevant {
-                            let Some(dep) =
-                                compute_template_dep_bit(template, &slot_bits, *bit, &mut dep_cache)
-                            else {
+                            let Some(dep) = compute_template_dep_bit(
+                                template,
+                                &slot_bits,
+                                *bit,
+                                &mut dep_cache,
+                            ) else {
                                 return None;
                             };
                             for (arg_idx, child_nt) in child_nts.iter().enumerate() {
@@ -269,27 +257,16 @@ pub fn nt_output_bits(rules: &[ExactRule]) -> usize {
     for rule in rules {
         match rule {
             ExactRule::Alias(_) => {}
-            ExactRule::Leaf(expr) => return owned_expr_width(expr),
+            ExactRule::Leaf(expr) => return expr.width(),
             ExactRule::Unary { fid, .. } => return deffun::ENV.ret_bits(*fid, 1),
             ExactRule::Binary { fid, .. } => return deffun::ENV.ret_bits(*fid, 2),
             ExactRule::Nary { fid, child_nts } => {
                 return deffun::ENV.ret_bits(*fid, child_nts.len())
             }
-            ExactRule::GenericTemplate { template, .. } => return template_output_bits(template),
+            ExactRule::GenericTemplate { template, .. } => return template.output_bits(),
         }
     }
     1
-}
-
-fn template_output_bits(template: &TemplateExpr) -> usize {
-    match template {
-        TemplateExpr::Slot(_) => 1,
-        TemplateExpr::Leaf(expr) => owned_expr_width(expr),
-        TemplateExpr::App(id, parts) => deffun::ENV
-            .lookup(id.get_name(), parts.len())
-            .map(|fid| deffun::ENV.ret_bits(fid, parts.len()))
-            .unwrap_or(1),
-    }
 }
 
 fn get_deffun_dep_bit(
@@ -356,7 +333,7 @@ fn compute_expr_dep_bit(
             compute_expr_dep_bit(inner, arg_bits, *lo as usize + bit, cache)
         }
         OwnedExpr::Concat(high, low) => {
-            let low_bits = owned_expr_width(low);
+            let low_bits = low.width();
             if bit < low_bits {
                 compute_expr_dep_bit(low, arg_bits, bit, cache)
             } else {
@@ -408,7 +385,7 @@ fn compute_expr_dep_bit(
             Some(combined)
         }
         other => {
-            let width = owned_expr_width(other);
+            let width = other.width();
             (bit < width).then(|| BitDep::full(arg_bits))
         }
     }
@@ -427,7 +404,7 @@ fn compute_let_dep_bit(
 
     while let OwnedExpr::Let(_, value, body) = current {
         values.push(value.as_ref());
-        extended_arg_bits.push(owned_expr_width(value));
+        extended_arg_bits.push(value.width());
         current = body;
     }
 

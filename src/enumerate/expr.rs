@@ -21,26 +21,6 @@ enum_expr!();
 #[error("divided by zero")]
 pub struct DivideByZero;
 
-fn value_extract(value: Value, hi: u64, lo: u64) -> Value {
-    let width = (hi - lo + 1) as usize;
-    if width == 1 {
-        return Value::from_u64(value.bit(lo as usize) as u64, 1);
-    }
-    if value.bits() <= 64 {
-        return Value::from_u64(value.as_u64_lossy() >> lo, width);
-    }
-    let shifted = value.to_biguint() >> (lo as usize);
-    let mask = (num_bigint::BigUint::from(1u8) << width) - num_bigint::BigUint::from(1u8);
-    Value::from_biguint(shifted & mask, width)
-}
-
-fn value_concat(lhs: Value, rhs: Value) -> Value {
-    let rhs_bits = rhs.bits();
-    let total_bits = lhs.bits() + rhs_bits;
-    let raw = (lhs.to_biguint() << rhs_bits) | rhs.to_biguint();
-    Value::from_biguint(raw, total_bits)
-}
-
 fn bv_extract<const N: usize>(value: Bv<N>, hi: u64, lo: u64) -> Bv<N> {
     let width = hi - lo + 1;
     let mask = if width >= 64 {
@@ -88,36 +68,6 @@ fn expr_width(expr: &Expr<'_>) -> usize {
     }
 }
 
-fn owned_expr_width(expr: &OwnedExpr) -> usize {
-    match expr {
-        OwnedExpr::Concat(a, b) => owned_expr_width(a) + owned_expr_width(b),
-        OwnedExpr::Extract(_, hi, lo) => (hi - lo + 1) as usize,
-        OwnedExpr::Fop0Dyn(id) => deffun::ENV.ret_bits(*id, 0),
-        OwnedExpr::FopDyn(id, args) => deffun::ENV.ret_bits(*id, args.len()),
-        OwnedExpr::Const(v) => v.bits(),
-        OwnedExpr::Var(_) => 64,
-        OwnedExpr::Let(_, _, body) => owned_expr_width(body),
-        OwnedExpr::Not(a)
-        | OwnedExpr::Neg(a)
-        | OwnedExpr::Fop1Dyn(_, a) => owned_expr_width(a),
-        OwnedExpr::Add(a, _)
-        | OwnedExpr::Xor(a, _)
-        | OwnedExpr::And(a, _)
-        | OwnedExpr::Or(a, _)
-        | OwnedExpr::Mul(a, _)
-        | OwnedExpr::Sub(a, _)
-        | OwnedExpr::Fop2Dyn(_, a, _)
-        | OwnedExpr::LShr(a, _)
-        | OwnedExpr::AShr(a, _)
-        | OwnedExpr::Shl(a, _)
-        | OwnedExpr::UDiv(a, _)
-        | OwnedExpr::URem(a, _)
-        | OwnedExpr::SDiv(a, _)
-        | OwnedExpr::SRem(a, _) => owned_expr_width(a),
-        OwnedExpr::Ite(_, a, _) => owned_expr_width(a),
-    }
-}
-
 pub fn format_owned_let(name: &str, value: &OwnedExpr, body: &OwnedExpr) -> String {
     format!("(let (({} {})) {})", name, value, body)
 }
@@ -154,10 +104,13 @@ impl<'a> Expr<'a> {
             return Ok(args[*a].clone());
         }
         if let Expr::Concat(a, b) = self {
-            return Ok(value_concat(a.eval(args)?, b.eval(args)?));
+            let lhs = a.eval(args)?;
+            let rhs = b.eval(args)?;
+            return Ok(lhs.concat(&rhs));
         }
         if let Expr::Extract(a, hi, lo) = self {
-            return Ok(value_extract(a.eval(args)?, *hi, *lo));
+            let value = a.eval(args)?;
+            return Ok(value.extract(*hi, *lo));
         }
         if let Expr::Fop0Dyn(id) = self {
             return deffun::ENV.apply(*id, 0).eval(&[]);
@@ -609,7 +562,7 @@ impl OwnedExpr {
                 let mut lowered = Vec::with_capacity(bindings.len());
                 for binding in bindings {
                     let value = Self::from_term(&binding.term, &extended_env)?;
-                    let width = owned_expr_width(&value) as u64;
+                    let width = value.width() as u64;
                     let leaked = Box::leak(binding.name.clone().into_boxed_str()) as &'static str;
                     extended_env.push((leaked, width));
                     lowered.push((binding.name.clone(), value));
@@ -839,6 +792,34 @@ mod tests {
 }
 
 impl OwnedExpr {
+    pub fn width(&self) -> usize {
+        match self {
+            OwnedExpr::Concat(a, b) => a.width() + b.width(),
+            OwnedExpr::Extract(_, hi, lo) => (hi - lo + 1) as usize,
+            OwnedExpr::Fop0Dyn(id) => deffun::ENV.ret_bits(*id, 0),
+            OwnedExpr::FopDyn(id, args) => deffun::ENV.ret_bits(*id, args.len()),
+            OwnedExpr::Const(v) => v.bits(),
+            OwnedExpr::Var(_) => 64,
+            OwnedExpr::Let(_, _, body) => body.width(),
+            OwnedExpr::Not(a) | OwnedExpr::Neg(a) | OwnedExpr::Fop1Dyn(_, a) => a.width(),
+            OwnedExpr::Add(a, _)
+            | OwnedExpr::Xor(a, _)
+            | OwnedExpr::And(a, _)
+            | OwnedExpr::Or(a, _)
+            | OwnedExpr::Mul(a, _)
+            | OwnedExpr::Sub(a, _)
+            | OwnedExpr::Fop2Dyn(_, a, _)
+            | OwnedExpr::LShr(a, _)
+            | OwnedExpr::AShr(a, _)
+            | OwnedExpr::Shl(a, _)
+            | OwnedExpr::UDiv(a, _)
+            | OwnedExpr::URem(a, _)
+            | OwnedExpr::SDiv(a, _)
+            | OwnedExpr::SRem(a, _) => a.width(),
+            OwnedExpr::Ite(_, a, _) => a.width(),
+        }
+    }
+
     fn eval_let_chain(&self, args: &[Value]) -> Result<Value, DivideByZero> {
         let mut scoped = args.to_vec();
         let mut current = self;
@@ -891,10 +872,13 @@ impl OwnedExpr {
             return Ok(args[*a].clone());
         }
         if let OwnedExpr::Concat(a, b) = self {
-            return Ok(value_concat(a.eval(args)?, b.eval(args)?));
+            let lhs = a.eval(args)?;
+            let rhs = b.eval(args)?;
+            return Ok(lhs.concat(&rhs));
         }
         if let OwnedExpr::Extract(a, hi, lo) = self {
-            return Ok(value_extract(a.eval(args)?, *hi, *lo));
+            let value = a.eval(args)?;
+            return Ok(value.extract(*hi, *lo));
         }
         if let OwnedExpr::Fop0Dyn(id) = self {
             return deffun::ENV.apply(*id, 0).eval(&[]);
@@ -943,7 +927,7 @@ impl OwnedExpr {
             return args[*a];
         }
         if let OwnedExpr::Concat(a, b) = self {
-            return bv_concat(a.eval_bv(args), b.eval_bv(args), owned_expr_width(b));
+            return bv_concat(a.eval_bv(args), b.eval_bv(args), b.width());
         }
         if let OwnedExpr::Extract(a, hi, lo) = self {
             return bv_extract(a.eval_bv(args), *hi, *lo);

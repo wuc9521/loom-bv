@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use crate::enumerate::{expr::OwnedExpr, grammar::build_owned_application, value::Value};
 
 use super::{ExactEvalCache, TemplateExpr};
@@ -35,32 +33,23 @@ pub fn evaluate_template_value(
     }
 }
 
-pub fn evaluate_fop1(fid: usize, arg: &Value, cache: &mut ExactEvalCache) -> Result<Value, ()> {
-    let start = Instant::now();
+pub fn evaluate_fop1(fid: usize, arg: &Value) -> Result<Value, ()> {
     let value = crate::parse::deffun::ENV
         .eval_defined(fid, 1, std::slice::from_ref(arg))
         .ok();
-    cache.record_eval(1, fid, false, start.elapsed());
     value.ok_or(())
 }
 
-pub fn evaluate_fop2(
-    fid: usize,
-    lhs: &Value,
-    rhs: &Value,
-    cache: &mut ExactEvalCache,
-) -> Result<Value, ()> {
-    let start = Instant::now();
+pub fn evaluate_fop2(fid: usize, lhs: &Value, rhs: &Value) -> Result<Value, ()> {
     let args = [lhs.clone(), rhs.clone()];
     let value = crate::parse::deffun::ENV.eval_defined(fid, 2, &args).ok();
-    cache.record_eval(2, fid, false, start.elapsed());
     value.ok_or(())
 }
 
-pub fn evaluate_fopn(fid: usize, args: &[Value], cache: &mut ExactEvalCache) -> Result<Value, ()> {
-    let start = Instant::now();
+pub fn evaluate_fopn(fid: usize, args: &[Value]) -> Result<Value, ()> {
     let arity = args.len();
-    let value = crate::parse::deffun::ENV.eval_defined(fid, arity, args).ok();
-    cache.record_eval(arity, fid, false, start.elapsed());
+    let value = crate::parse::deffun::ENV
+        .eval_defined(fid, arity, args)
+        .ok();
     value.ok_or(())
 }

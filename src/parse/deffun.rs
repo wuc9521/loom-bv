@@ -115,10 +115,10 @@ impl DefineFunPlan {
                     let value = match instr {
                         PlanInstr::Const(value) => value.clone(),
                         PlanInstr::Concat { lhs, rhs } => {
-                            value_concat(slots[*lhs].clone(), slots[*rhs].clone())
+                            slots[*lhs].concat(&slots[*rhs])
                         }
                         PlanInstr::Extract { src, hi, lo } => {
-                            value_extract(slots[*src].clone(), *hi, *lo)
+                            slots[*src].extract(*hi, *lo)
                         }
                         PlanInstr::Not { src } => op::not(slots[*src].clone()),
                         PlanInstr::Neg { src } => op::neg(slots[*src].clone()),
@@ -242,56 +242,6 @@ fn eval_bool_atom(atom: &BoolAtom, args: &[Value], temps: &[bool]) -> bool {
     }
 }
 
-fn value_extract(value: Value, hi: u64, lo: u64) -> Value {
-    let width = (hi - lo + 1) as usize;
-    if width == 1 {
-        return Value::from_u64(value.bit(lo as usize) as u64, 1);
-    }
-    if value.bits() <= 64 {
-        return Value::from_u64(value.as_u64_lossy() >> lo, width);
-    }
-    let shifted = value.to_biguint() >> (lo as usize);
-    let mask = (num_bigint::BigUint::from(1u8) << width) - num_bigint::BigUint::from(1u8);
-    Value::from_biguint(shifted & mask, width)
-}
-
-fn value_concat(lhs: Value, rhs: Value) -> Value {
-    let rhs_bits = rhs.bits();
-    let total_bits = lhs.bits() + rhs_bits;
-    let raw = (lhs.to_biguint() << rhs_bits) | rhs.to_biguint();
-    Value::from_biguint(raw, total_bits)
-}
-
-fn owned_expr_width(expr: &OwnedExpr) -> usize {
-    match expr {
-        OwnedExpr::Concat(a, b) => owned_expr_width(a) + owned_expr_width(b),
-        OwnedExpr::Extract(_, hi, lo) => (hi - lo + 1) as usize,
-        OwnedExpr::Fop0Dyn(id) => ENV.ret_bits(*id, 0),
-        OwnedExpr::FopDyn(id, args) => ENV.ret_bits(*id, args.len()),
-        OwnedExpr::Const(v) => v.bits(),
-        OwnedExpr::Var(_) => 64,
-        OwnedExpr::Let(_, _, body) => owned_expr_width(body),
-        OwnedExpr::Not(a)
-        | OwnedExpr::Neg(a)
-        | OwnedExpr::Fop1Dyn(_, a) => owned_expr_width(a),
-        OwnedExpr::Add(a, _)
-        | OwnedExpr::Xor(a, _)
-        | OwnedExpr::And(a, _)
-        | OwnedExpr::Or(a, _)
-        | OwnedExpr::Mul(a, _)
-        | OwnedExpr::Sub(a, _)
-        | OwnedExpr::Fop2Dyn(_, a, _)
-        | OwnedExpr::LShr(a, _)
-        | OwnedExpr::AShr(a, _)
-        | OwnedExpr::Shl(a, _)
-        | OwnedExpr::UDiv(a, _)
-        | OwnedExpr::URem(a, _)
-        | OwnedExpr::SDiv(a, _)
-        | OwnedExpr::SRem(a, _) => owned_expr_width(a),
-        OwnedExpr::Ite(_, a, _) => owned_expr_width(a),
-    }
-}
-
 fn value_from_words(words: Vec<u64>, bits: usize) -> Value {
     if bits <= 64 {
         Value::from_u64(words.first().copied().unwrap_or(0), bits)
@@ -360,7 +310,7 @@ fn flatten_concat_bits<'a>(expr: &'a OwnedExpr, out: &mut Vec<&'a OwnedExpr>) ->
             }
             flatten_concat_bits(high, out)
         }
-        _ if owned_expr_width(expr) == 1 => {
+        _ if expr.width() == 1 => {
             out.push(expr);
             true
         }
@@ -372,7 +322,7 @@ fn try_compile_bit_circuit(expr: &OwnedExpr, nargs: usize, ret_bits: usize) -> O
     let mut bindings = Vec::new();
     let mut current = expr;
     while let OwnedExpr::Let(_, value, body) = current {
-        if owned_expr_width(value) != 1 {
+        if value.width() != 1 {
             return None;
         }
         let node = compile_bool_node(value, nargs)?;
@@ -398,7 +348,7 @@ fn try_compile_bit_circuit(expr: &OwnedExpr, nargs: usize, ret_bits: usize) -> O
 }
 
 fn compile_plan(expr: &OwnedExpr, nargs: usize) -> DefineFunPlan {
-    let ret_bits = owned_expr_width(expr);
+    let ret_bits = expr.width();
     if let Some(plan) = try_compile_bit_circuit(expr, nargs, ret_bits) {
         return DefineFunPlan::BitCircuit(plan);
     }

@@ -93,6 +93,35 @@ impl Value {
         }
     }
 
+    pub fn extract(&self, hi: u64, lo: u64) -> Self {
+        let width = (hi - lo + 1) as usize;
+        if width == 1 {
+            return Self::from_u64(self.bit(lo as usize) as u64, 1);
+        }
+        match self {
+            Value::Small { raw, .. } => Self::extract_small(*raw, width, lo),
+            Value::Big { raw, .. } => Self::extract_big(raw.as_ref(), width, lo),
+        }
+    }
+
+    pub fn concat(&self, rhs: &Self) -> Self {
+        match (self, rhs) {
+            (
+                Value::Small {
+                    bits: lhs_bits,
+                    raw: lhs,
+                },
+                Value::Small {
+                    bits: rhs_bits,
+                    raw: rhs,
+                },
+            ) if lhs_bits + rhs_bits <= 64 => {
+                Value::from_u64((lhs << rhs_bits) | rhs, lhs_bits + rhs_bits)
+            }
+            _ => Self::concat_big(self, rhs),
+        }
+    }
+
     pub fn project_bits(&self, bits: &[usize]) -> Vec<u64> {
         let mut words = Vec::with_capacity(bits.len().div_ceil(64));
         let mut current = 0u64;
@@ -354,6 +383,24 @@ impl Value {
         }
         let as_unsigned = rem.to_biguint().unwrap_or_else(BigUint::zero);
         Self::from_biguint(as_unsigned, bits)
+    }
+
+    #[inline]
+    fn extract_small(raw: u64, width: usize, lo: u64) -> Self {
+        Self::from_u64(raw >> lo, width)
+    }
+
+    fn extract_big(raw: &BigUint, width: usize, lo: u64) -> Self {
+        let shifted = raw >> (lo as usize);
+        let mask = (BigUint::one() << width) - BigUint::one();
+        Self::from_biguint(shifted & mask, width)
+    }
+
+    fn concat_big(lhs: &Self, rhs: &Self) -> Self {
+        let rhs_bits = rhs.bits();
+        let total_bits = lhs.bits() + rhs_bits;
+        let raw = (lhs.to_biguint() << rhs_bits) | rhs.to_biguint();
+        Self::from_biguint(raw, total_bits)
     }
 }
 

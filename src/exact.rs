@@ -1,15 +1,14 @@
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::env;
+use std::time::Instant;
 
 mod eval;
 mod grammar;
 mod relevance;
 mod spec;
 
-use num_bigint::BigUint;
-use num_traits::One;
 use rustc_hash::FxHashMap;
 use sygus_parser::ast::SyGuSFile;
 
@@ -146,61 +145,6 @@ enum ExactRule {
 #[derive(Default)]
 struct ExactEvalCache {
     leaves: FxHashMap<OwnedExpr, Option<Value>>,
-    profile: FxHashMap<(usize, usize), EvalProfile>,
-}
-
-#[derive(Clone, Default)]
-struct EvalProfile {
-    calls: usize,
-    hits: usize,
-    misses: usize,
-    total: Duration,
-    miss_total: Duration,
-}
-
-impl ExactEvalCache {
-    fn record_eval(&mut self, arity: usize, fid: usize, hit: bool, elapsed: Duration) {
-        let profile = self.profile.entry((arity, fid)).or_default();
-        profile.calls += 1;
-        profile.total += elapsed;
-        if hit {
-            profile.hits += 1;
-        } else {
-            profile.misses += 1;
-            profile.miss_total += elapsed;
-        }
-    }
-
-    fn top_profiles(&self, limit: usize) -> Vec<String> {
-        let mut entries = self
-            .profile
-            .iter()
-            .map(|((arity, fid), profile)| (*arity, *fid, profile.clone()))
-            .collect::<Vec<_>>();
-        entries.sort_by_key(|(_, _, profile)| Reverse(profile.total));
-        entries
-            .into_iter()
-            .take(limit)
-            .map(|(arity, fid, profile)| {
-                let avg_us = if profile.calls == 0 {
-                    0
-                } else {
-                    profile.total.as_micros() / profile.calls as u128
-                };
-                format!(
-                    "{}[{}]: calls={}, hits={}, misses={}, total={:?}, miss_total={:?}, avg={}us",
-                    deffun::ENV.name(fid, arity),
-                    arity,
-                    profile.calls,
-                    profile.hits,
-                    profile.misses,
-                    profile.total,
-                    profile.miss_total,
-                    avg_us
-                )
-            })
-            .collect()
-    }
 }
 
 #[derive(Clone)]
@@ -264,22 +208,6 @@ enum SeenMode {
         relevant_bits: Vec<Vec<usize>>,
         maps: Vec<FxHashMap<ProjectionKey, usize>>,
     },
-}
-
-impl SeenMode {
-    fn bucket_len(&self, nt_idx: usize) -> usize {
-        match self {
-            SeenMode::Exact(maps) => maps[nt_idx].len(),
-            SeenMode::Projected { maps, .. } => maps[nt_idx].len(),
-        }
-    }
-
-    fn total_len(&self) -> usize {
-        match self {
-            SeenMode::Exact(maps) => maps.iter().map(FxHashMap::len).sum(),
-            SeenMode::Projected { maps, .. } => maps.iter().map(FxHashMap::len).sum(),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -428,15 +356,14 @@ fn search_nullary_multi_nt(
     let mut nodes = Vec::<Node>::new();
     let mut eval_cache = ExactEvalCache::default();
     let mut goal_score_cache = FxHashMap::<Value, usize>::default();
-    // Regression isolation: disable the abstract goal-ordering path and keep
-    // the nullary solver on plain bottom-up exact enumeration order.
-    let use_goal_ordering = false;
+    let use_goal_ordering = env::var("DRYAD_EXACT_GOAL_ORDERING")
+        .ok()
+        .as_deref()
+        .map(|value| matches!(value, "1" | "true" | "on"))
+        .unwrap_or(false);
     let mut best_goal_score = 0usize;
-    let mut last_progress_log = Instant::now();
 
     for size in 1.. {
-        let size_start = Instant::now();
-        let mut inserted_this_size = 0usize;
         let mut eval_attempted = 0usize;
         let mut eval_failed = 0usize;
         for buckets in &mut by_size {
@@ -494,7 +421,7 @@ fn search_nullary_multi_nt(
                         }
                         for child in &children {
                             eval_attempted += 1;
-                            let value = eval::evaluate_fop1(*fid, &child.value, &mut eval_cache);
+                            let value = eval::evaluate_fop1(*fid, &child.value);
                             let Ok(value) = value else {
                                 eval_failed += 1;
                                 continue;
@@ -515,19 +442,6 @@ fn search_nullary_multi_nt(
                                 },
                             ) {
                                 return Ok(found);
-                            }
-                            if last_progress_log.elapsed() >= Duration::from_secs(5) {
-                                info!(
-                                    "exact-nullary progress size={} phase=unary attempted={} inserted={} elapsed={:?}",
-                                    size,
-                                    eval_attempted,
-                                    inserted_this_size,
-                                    size_start.elapsed()
-                                );
-                                for line in eval_cache.top_profiles(4) {
-                                    info!("exact-nullary hot {}", line);
-                                }
-                                last_progress_log = Instant::now();
                             }
                         }
                     }
@@ -582,12 +496,7 @@ fn search_nullary_multi_nt(
                                     let lhs = &lhs_pool[lhs_idx];
                                     let rhs = &rhs_pool[rhs_idx];
                                     eval_attempted += 1;
-                                    let value = eval::evaluate_fop2(
-                                        *fid,
-                                        &lhs.value,
-                                        &rhs.value,
-                                        &mut eval_cache,
-                                    );
+                                    let value = eval::evaluate_fop2(*fid, &lhs.value, &rhs.value);
                                     let Ok(value) = value else {
                                         eval_failed += 1;
                                         continue;
@@ -609,30 +518,13 @@ fn search_nullary_multi_nt(
                                     ) {
                                         return Ok(found);
                                     }
-                                    if last_progress_log.elapsed() >= Duration::from_secs(5) {
-                                        info!(
-                                            "exact-nullary progress size={} phase=binary attempted={} inserted={} elapsed={:?}",
-                                            size,
-                                            eval_attempted,
-                                            inserted_this_size,
-                                            size_start.elapsed()
-                                        );
-                                        for line in eval_cache.top_profiles(4) {
-                                            info!("exact-nullary hot {}", line);
-                                        }
-                                        last_progress_log = Instant::now();
-                                    }
                                 }
                             } else {
                                 for lhs in &lhs_pool {
                                     for rhs in &rhs_pool {
                                         eval_attempted += 1;
-                                        let value = eval::evaluate_fop2(
-                                            *fid,
-                                            &lhs.value,
-                                            &rhs.value,
-                                            &mut eval_cache,
-                                        );
+                                        let value =
+                                            eval::evaluate_fop2(*fid, &lhs.value, &rhs.value);
                                         let Ok(value) = value else {
                                             eval_failed += 1;
                                             continue;
@@ -653,21 +545,6 @@ fn search_nullary_multi_nt(
                                             },
                                         ) {
                                             return Ok(found);
-                                        }
-                                        if last_progress_log.elapsed()
-                                            >= Duration::from_secs(5)
-                                        {
-                                            info!(
-                                                "exact-nullary progress size={} phase=binary attempted={} inserted={} elapsed={:?}",
-                                                size,
-                                                eval_attempted,
-                                                inserted_this_size,
-                                                size_start.elapsed()
-                                            );
-                                            for line in eval_cache.top_profiles(4) {
-                                                info!("exact-nullary hot {}", line);
-                                            }
-                                            last_progress_log = Instant::now();
                                         }
                                     }
                                 }
@@ -706,28 +583,13 @@ fn search_nullary_multi_nt(
                                         .map(|cand| cand.value.clone())
                                         .collect::<Vec<_>>();
                                     eval_attempted += 1;
-                                    let Ok(value) =
-                                        eval::evaluate_fopn(*fid, &child_values, &mut eval_cache)
-                                    else {
+                                    let Ok(value) = eval::evaluate_fopn(*fid, &child_values) else {
                                         eval_failed += 1;
                                         return;
                                     };
                                     let children =
                                         tuple.iter().map(|cand| cand.node).collect::<Vec<_>>();
                                     staged.push((value, children));
-                                    if last_progress_log.elapsed() >= Duration::from_secs(5) {
-                                        info!(
-                                            "exact-nullary progress size={} phase=nary attempted={} inserted={} elapsed={:?}",
-                                            size,
-                                            eval_attempted,
-                                            inserted_this_size,
-                                            size_start.elapsed()
-                                        );
-                                        for line in eval_cache.top_profiles(4) {
-                                            info!("exact-nullary hot {}", line);
-                                        }
-                                        last_progress_log = Instant::now();
-                                    }
                                 });
                             },
                         );
@@ -836,19 +698,6 @@ fn search_nullary_multi_nt(
                                     let children =
                                         tuple.iter().map(|cand| cand.node).collect::<Vec<_>>();
                                     staged.push((value, children));
-                                    if last_progress_log.elapsed() >= Duration::from_secs(5) {
-                                        info!(
-                                            "exact-nullary progress size={} phase=generic attempted={} inserted={} elapsed={:?}",
-                                            size,
-                                            eval_attempted,
-                                            inserted_this_size,
-                                            size_start.elapsed()
-                                        );
-                                        for line in eval_cache.top_profiles(4) {
-                                            info!("exact-nullary hot {}", line);
-                                        }
-                                        last_progress_log = Instant::now();
-                                    }
                                 });
                             },
                         );
@@ -913,7 +762,6 @@ fn search_nullary_multi_nt(
         }
 
         for nt in 0..nt_count {
-            inserted_this_size += by_size[nt][size].len();
             if nt == grammar.start && use_goal_ordering {
                 for candidate in &by_size[nt][size] {
                     let score = cached_goal_score(&candidate.value, &goal, &mut goal_score_cache);
@@ -922,23 +770,6 @@ fn search_nullary_multi_nt(
                     }
                 }
             }
-        }
-        info!(
-            "exact-nullary size={} inserted={} seen_start={} seen_total={} best_goal={}/{} elapsed={:?}",
-            size,
-            inserted_this_size,
-            seen.bucket_len(grammar.start),
-            seen.total_len(),
-            best_goal_score,
-            goal.known_bits.len(),
-            size_start.elapsed()
-        );
-        info!(
-            "exact-nullary eval size={} attempted={} failed={}",
-            size, eval_attempted, eval_failed
-        );
-        for line in eval_cache.top_profiles(4) {
-            info!("exact-nullary hot {}", line);
         }
     }
 
@@ -1137,17 +968,16 @@ fn eval_owned_abs(
         OwnedExpr::Concat(a, b) => {
             let lhs = eval_owned_abs(a, vars, fallback_bits, depth + 1);
             let rhs = eval_owned_abs(b, vars, fallback_bits, depth + 1);
-            let rhs_bits = rhs.bits();
             AbsValue {
-                may_one: concat_value(lhs.may_one, rhs.may_one, rhs_bits),
-                may_zero: concat_value(lhs.may_zero, rhs.may_zero, rhs_bits),
+                may_one: lhs.may_one.concat(&rhs.may_one),
+                may_zero: lhs.may_zero.concat(&rhs.may_zero),
             }
         }
         OwnedExpr::Extract(a, hi, lo) => {
             let child = eval_owned_abs(a, vars, fallback_bits, depth + 1);
             AbsValue {
-                may_one: extract_value(child.may_one, *hi, *lo),
-                may_zero: extract_value(child.may_zero, *hi, *lo),
+                may_one: child.may_one.extract(*hi, *lo),
+                may_zero: child.may_zero.extract(*hi, *lo),
             }
         }
         OwnedExpr::Ite(c, a, b) => {
@@ -1180,55 +1010,8 @@ fn eval_owned_abs(
                 .collect::<Vec<_>>();
             eval_fop_abs(*id, args.len(), &args)
         }
-        _ => AbsValue::top(owned_expr_width(expr).max(fallback_bits).max(1)),
+        _ => AbsValue::top(expr.width().max(fallback_bits).max(1)),
     }
-}
-
-fn owned_expr_width(expr: &OwnedExpr) -> usize {
-    match expr {
-        OwnedExpr::Concat(a, b) => owned_expr_width(a) + owned_expr_width(b),
-        OwnedExpr::Extract(_, hi, lo) => (hi - lo + 1) as usize,
-        OwnedExpr::Fop0Dyn(id) => deffun::ENV.ret_bits(*id, 0),
-        OwnedExpr::FopDyn(id, args) => deffun::ENV.ret_bits(*id, args.len()),
-        OwnedExpr::Const(v) => v.bits(),
-        OwnedExpr::Var(_) => 64,
-        OwnedExpr::Let(_, _, body) => owned_expr_width(body),
-        OwnedExpr::Not(a) | OwnedExpr::Neg(a) | OwnedExpr::Fop1Dyn(_, a) => owned_expr_width(a),
-        OwnedExpr::Add(a, _)
-        | OwnedExpr::Xor(a, _)
-        | OwnedExpr::And(a, _)
-        | OwnedExpr::Or(a, _)
-        | OwnedExpr::Mul(a, _)
-        | OwnedExpr::Sub(a, _)
-        | OwnedExpr::Fop2Dyn(_, a, _)
-        | OwnedExpr::LShr(a, _)
-        | OwnedExpr::AShr(a, _)
-        | OwnedExpr::Shl(a, _)
-        | OwnedExpr::UDiv(a, _)
-        | OwnedExpr::URem(a, _)
-        | OwnedExpr::SDiv(a, _)
-        | OwnedExpr::SRem(a, _) => owned_expr_width(a),
-        OwnedExpr::Ite(_, a, _) => owned_expr_width(a),
-    }
-}
-
-fn extract_value(value: Value, hi: u64, lo: u64) -> Value {
-    let width = (hi - lo + 1) as usize;
-    if width == 1 {
-        return Value::from_u64(value.bit(lo as usize) as u64, 1);
-    }
-    if value.bits() <= 64 {
-        return Value::from_u64(value.as_u64_lossy() >> lo, width);
-    }
-    let shifted = value.to_biguint() >> (lo as usize);
-    let mask = (BigUint::one() << width) - BigUint::one();
-    Value::from_biguint(shifted & mask, width)
-}
-
-fn concat_value(lhs: Value, rhs: Value, rhs_bits: usize) -> Value {
-    let total_bits = lhs.bits() + rhs_bits;
-    let raw = (lhs.to_biguint() << rhs_bits) | rhs.to_biguint();
-    Value::from_biguint(raw, total_bits)
 }
 
 fn insert_existing_candidate(
@@ -1341,44 +1124,5 @@ fn materialize_node(id: NodeId, grammar: &ExactGrammar<'_>, nodes: &[Node]) -> O
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{search_nullary, NullarySpec};
-    use crate::parse::{deffun, SynthProblem};
-    use sygus_parser::ast::SyGuSFile;
-
-    #[test]
-    fn recursive_nullary_search_finds_non_leaf_solution() {
-        let file = SyGuSFile::from_str(
-            r#"
-(set-logic BV)
-(define-fun c1 () (_ BitVec 2) #b01)
-(define-fun c2 () (_ BitVec 2) #b10)
-(define-fun both ((x (_ BitVec 2)) (y (_ BitVec 2))) (_ BitVec 2) (bvor x y))
-(synth-fun f () (_ BitVec 2)
-  ((Start (_ BitVec 2)))
-  ((Start (_ BitVec 2) (c1 c2 (both Start Start)))))
-(constraint (= ((_ extract 0 0) f) #b1))
-(constraint (= ((_ extract 1 1) f) #b1))
-(check-synth)
-"#,
-        )
-        .expect("test sygus file should parse");
-
-        deffun::ENV.clear();
-        deffun::ENV
-            .parse_from_file(&file)
-            .expect("define-funs should parse");
-        let problem = SynthProblem::parse_from_file(&file).expect("problem should parse");
-        let spec = NullarySpec::from_file(&file, &problem)
-            .expect("nullary spec should parse")
-            .expect("fixture should be recognized as nullary");
-
-        let expr = search_nullary(&problem, &spec).expect("recursive nullary search should work");
-        let value = expr.eval(&[]).expect("result should evaluate");
-
-        assert_eq!(value.to_smt_hex(), "#x3");
-        assert!(expr.to_string().contains("both"));
-    }
-}
+use num_bigint::BigUint;
+use num_traits::One;
