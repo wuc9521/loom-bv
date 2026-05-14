@@ -1,7 +1,5 @@
-use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
 use std::collections::BTreeMap;
-use std::env;
 use std::time::Instant;
 
 mod eval;
@@ -19,7 +17,7 @@ use crate::{
         value::Value,
     },
     info,
-    parse::{self, deffun, SynthProblem},
+    parse::{self, SynthProblem},
 };
 
 pub enum NullarySpec {
@@ -101,7 +99,7 @@ pub fn search_nullary(
         "exact-nullary setup exact-grammar completed in {:?}",
         grammar_start.elapsed()
     );
-    search_nullary_multi_nt(&grammar, spec, problem.bits)
+    search_nullary_multi_nt(&grammar, spec)
 }
 
 type NodeId = usize;
@@ -147,58 +145,6 @@ struct ExactEvalCache {
     leaves: FxHashMap<OwnedExpr, Option<Value>>,
 }
 
-#[derive(Clone)]
-struct AbsValue {
-    may_one: Value,
-    may_zero: Value,
-}
-
-impl AbsValue {
-    fn bits(&self) -> usize {
-        self.may_one.bits()
-    }
-
-    fn top(bits: usize) -> Self {
-        let ones = Value::from_biguint((BigUint::one() << bits) - BigUint::one(), bits);
-        Self {
-            may_one: ones.clone(),
-            may_zero: ones,
-        }
-    }
-
-    fn exact(value: &Value) -> Self {
-        Self {
-            may_one: value.clone(),
-            may_zero: value.clone().bitnot(),
-        }
-    }
-
-    fn can_be_zero(&self) -> bool {
-        (0..self.bits()).all(|bit| self.may_zero.bit(bit))
-    }
-
-    fn is_forced_zero(&self) -> bool {
-        self.can_be_zero() && (0..self.bits()).all(|bit| !self.may_one.bit(bit))
-    }
-
-    fn can_be_nonzero(&self) -> bool {
-        (0..self.bits()).any(|bit| self.may_one.bit(bit))
-    }
-
-    fn union(self, other: Self) -> Self {
-        Self {
-            may_one: self.may_one.bitor(other.may_one),
-            may_zero: self.may_zero.bitor(other.may_zero),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct GoalObligation {
-    known_bits: Vec<(usize, bool)>,
-    structural: Vec<OwnedExpr>,
-}
-
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ProjectionKey(Vec<u64>);
 
@@ -216,86 +162,10 @@ struct Candidate {
     value: Value,
 }
 
-impl GoalObligation {
-    fn from_spec(spec: &NullarySpec) -> Self {
-        match spec {
-            NullarySpec::Exact(expected) => Self {
-                known_bits: (0..expected.bits())
-                    .map(|bit| (bit, expected.bit(bit)))
-                    .collect(),
-                structural: Vec::new(),
-            },
-            NullarySpec::BitConstraints {
-                known_bits,
-                structural,
-                ..
-            } => Self {
-                known_bits: known_bits
-                    .iter()
-                    .map(|(bit, value)| (*bit, *value))
-                    .collect(),
-                structural: structural.clone(),
-            },
-        }
-    }
-
-    fn score(&self, value: &Value) -> usize {
-        let known_bit_score = self
-            .known_bits
-            .iter()
-            .filter(|(bit, expected)| value.bit(*bit) == *expected)
-            .count();
-        let structural_score = self
-            .structural
-            .iter()
-            .filter(|expr| {
-                expr.eval(std::slice::from_ref(value))
-                    .map(|v| v.is_zero())
-                    .unwrap_or(false)
-            })
-            .count();
-        known_bit_score + structural_score
-    }
-
-    fn abstract_rank(&self, abs: &AbsValue) -> Option<usize> {
-        let mut forced = 0usize;
-        for (bit, expected) in &self.known_bits {
-            let possible = if *expected {
-                abs.may_one.bit(*bit)
-            } else {
-                abs.may_zero.bit(*bit)
-            };
-            if !possible {
-                return None;
-            }
-            let forced_ok = if *expected {
-                abs.may_one.bit(*bit) && !abs.may_zero.bit(*bit)
-            } else {
-                abs.may_zero.bit(*bit) && !abs.may_one.bit(*bit)
-            };
-            if forced_ok {
-                forced += 1;
-            }
-        }
-        for expr in &self.structural {
-            let expr_abs = eval_owned_abs(expr, std::slice::from_ref(abs), abs.bits(), 0);
-            if !expr_abs.can_be_zero() {
-                return None;
-            }
-            if expr_abs.is_forced_zero() {
-                forced += 1;
-            }
-        }
-        Some(forced)
-    }
-}
-
 fn search_nullary_multi_nt(
     grammar: &ExactGrammar<'static>,
     spec: &NullarySpec,
-    synth_bits: usize,
 ) -> parse::Result<OwnedExpr> {
-    let goal = GoalObligation::from_spec(spec);
     let relevance_start = Instant::now();
     let seen_relevant_bits = relevance::compute_relevant_bits_for_spec(grammar, spec);
     info!(
@@ -355,13 +225,6 @@ fn search_nullary_multi_nt(
     }
     let mut nodes = Vec::<Node>::new();
     let mut eval_cache = ExactEvalCache::default();
-    let mut goal_score_cache = FxHashMap::<Value, usize>::default();
-    let use_goal_ordering = env::var("DRYAD_EXACT_GOAL_ORDERING")
-        .ok()
-        .as_deref()
-        .map(|value| matches!(value, "1" | "true" | "on"))
-        .unwrap_or(false);
-    let mut best_goal_score = 0usize;
 
     for size in 1.. {
         let mut eval_attempted = 0usize;
@@ -411,14 +274,11 @@ fn search_nullary_multi_nt(
                         if by_size[*child_nt].get(child_size).is_none_or(Vec::is_empty) {
                             continue;
                         }
-                        let mut children = by_size[*child_nt]
+                        let children = by_size[*child_nt]
                             .get(child_size)
                             .map(Vec::as_slice)
                             .unwrap_or(&[][..])
                             .to_vec();
-                        if use_goal_ordering {
-                            filter_and_sort_unary_children(*fid, &mut children, &goal, synth_bits);
-                        }
                         for child in &children {
                             eval_attempted += 1;
                             let value = eval::evaluate_fop1(*fid, &child.value);
@@ -460,43 +320,24 @@ fn search_nullary_multi_nt(
                             {
                                 continue;
                             }
-                            let mut lhs_pool = by_size[*lhs_nt]
+                            let lhs_pool = by_size[*lhs_nt]
                                 .get(lhs_size)
                                 .map(Vec::as_slice)
                                 .unwrap_or(&[][..])
                                 .to_vec();
-                            let mut rhs_pool = by_size[*rhs_nt]
+                            let rhs_pool = by_size[*rhs_nt]
                                 .get(rhs_size)
                                 .map(Vec::as_slice)
                                 .unwrap_or(&[][..])
                                 .to_vec();
-                            if use_goal_ordering {
-                                filter_and_sort_binary_children(
-                                    *fid,
-                                    0,
-                                    &mut lhs_pool,
-                                    &goal,
-                                    synth_bits,
-                                );
-                                filter_and_sort_binary_children(
-                                    *fid,
-                                    1,
-                                    &mut rhs_pool,
-                                    &goal,
-                                    synth_bits,
-                                );
-                            }
                             if lhs_pool.is_empty() || rhs_pool.is_empty() {
                                 continue;
                             }
-                            if use_goal_ordering {
-                                for (lhs_idx, rhs_idx) in
-                                    filter_and_rank_binary_pairs(*fid, &lhs_pool, &rhs_pool, &goal)
-                                {
-                                    let lhs = &lhs_pool[lhs_idx];
-                                    let rhs = &rhs_pool[rhs_idx];
+                            for lhs in &lhs_pool {
+                                for rhs in &rhs_pool {
                                     eval_attempted += 1;
-                                    let value = eval::evaluate_fop2(*fid, &lhs.value, &rhs.value);
+                                    let value =
+                                        eval::evaluate_fop2(*fid, &lhs.value, &rhs.value);
                                     let Ok(value) = value else {
                                         eval_failed += 1;
                                         continue;
@@ -517,35 +358,6 @@ fn search_nullary_multi_nt(
                                         },
                                     ) {
                                         return Ok(found);
-                                    }
-                                }
-                            } else {
-                                for lhs in &lhs_pool {
-                                    for rhs in &rhs_pool {
-                                        eval_attempted += 1;
-                                        let value =
-                                            eval::evaluate_fop2(*fid, &lhs.value, &rhs.value);
-                                        let Ok(value) = value else {
-                                            eval_failed += 1;
-                                            continue;
-                                        };
-                                        if let Some(found) = insert_multi_nt_candidate(
-                                            nt_idx,
-                                            value,
-                                            size,
-                                            &grammar,
-                                            spec,
-                                            &mut seen,
-                                            &mut by_size,
-                                            &mut nodes,
-                                            || Node {
-                                                nt_idx,
-                                                rule_idx,
-                                                children: vec![lhs.node, rhs.node],
-                                            },
-                                        ) {
-                                            return Ok(found);
-                                        }
                                     }
                                 }
                             }
@@ -593,11 +405,6 @@ fn search_nullary_multi_nt(
                                 });
                             },
                         );
-                        if use_goal_ordering {
-                            staged.sort_by_key(|(value, _)| {
-                                Reverse(cached_goal_score(value, &goal, &mut goal_score_cache))
-                            });
-                        }
                         for (value, children) in staged {
                             if let Some(found) = insert_multi_nt_candidate(
                                 nt_idx,
@@ -701,11 +508,6 @@ fn search_nullary_multi_nt(
                                 });
                             },
                         );
-                        if use_goal_ordering {
-                            staged.sort_by_key(|(value, _)| {
-                                Reverse(cached_goal_score(value, &goal, &mut goal_score_cache))
-                            });
-                        }
                         for (value, children) in staged {
                             if let Some(found) = insert_multi_nt_candidate(
                                 nt_idx,
@@ -760,258 +562,9 @@ fn search_nullary_multi_nt(
                 break;
             }
         }
-
-        for nt in 0..nt_count {
-            if nt == grammar.start && use_goal_ordering {
-                for candidate in &by_size[nt][size] {
-                    let score = cached_goal_score(&candidate.value, &goal, &mut goal_score_cache);
-                    if score > best_goal_score {
-                        best_goal_score = score;
-                    }
-                }
-            }
-        }
     }
 
     unreachable!("nullary enumeration should either find a solution or diverge");
-}
-
-fn cached_goal_score(
-    value: &Value,
-    goal: &GoalObligation,
-    score_cache: &mut FxHashMap<Value, usize>,
-) -> usize {
-    if let Some(score) = score_cache.get(value) {
-        return *score;
-    }
-    let score = goal.score(value);
-    score_cache.insert(value.clone(), score);
-    score
-}
-
-fn filter_and_sort_unary_children(
-    fid: usize,
-    children: &mut Vec<Candidate>,
-    goal: &GoalObligation,
-    synth_bits: usize,
-) {
-    let mut ranked = children
-        .drain(..)
-        .filter_map(|child| {
-            let rank = rule_goal_rank(fid, &[Some(&child.value)], 1, goal, synth_bits)?;
-            Some((rank, child))
-        })
-        .collect::<Vec<_>>();
-    ranked.sort_by_key(|(rank, child)| (Reverse(*rank), Reverse(goal.score(&child.value))));
-    children.extend(ranked.into_iter().map(|(_, child)| child));
-}
-
-fn filter_and_sort_binary_children(
-    fid: usize,
-    known_index: usize,
-    children: &mut Vec<Candidate>,
-    goal: &GoalObligation,
-    synth_bits: usize,
-) {
-    let mut ranked = children
-        .drain(..)
-        .filter_map(|child| {
-            let args = if known_index == 0 {
-                [Some(&child.value), None]
-            } else {
-                [None, Some(&child.value)]
-            };
-            let rank = rule_goal_rank(fid, &args, 2, goal, synth_bits)?;
-            Some((rank, child))
-        })
-        .collect::<Vec<_>>();
-    ranked.sort_by_key(|(rank, child)| (Reverse(*rank), Reverse(goal.score(&child.value))));
-    children.extend(ranked.into_iter().map(|(_, child)| child));
-}
-
-fn filter_and_rank_binary_pairs(
-    fid: usize,
-    lhs_pool: &[Candidate],
-    rhs_pool: &[Candidate],
-    goal: &GoalObligation,
-) -> Vec<(usize, usize)> {
-    let mut ranked = Vec::new();
-    for (lhs_idx, lhs) in lhs_pool.iter().enumerate() {
-        for (rhs_idx, rhs) in rhs_pool.iter().enumerate() {
-            let Some(rank) = rule_goal_rank_exact(fid, &[&lhs.value, &rhs.value], 2, goal) else {
-                continue;
-            };
-            ranked.push((
-                rank,
-                goal.score(&lhs.value) + goal.score(&rhs.value),
-                lhs_idx,
-                rhs_idx,
-            ));
-        }
-    }
-    ranked.sort_by_key(|(rank, child_score, lhs_idx, rhs_idx)| {
-        (Reverse(*rank), Reverse(*child_score), *lhs_idx, *rhs_idx)
-    });
-    ranked
-        .into_iter()
-        .map(|(_, _, lhs_idx, rhs_idx)| (lhs_idx, rhs_idx))
-        .collect()
-}
-
-fn rule_goal_rank(
-    fid: usize,
-    known_args: &[Option<&Value>],
-    nargs: usize,
-    goal: &GoalObligation,
-    default_bits: usize,
-) -> Option<usize> {
-    let arg_bits = deffun::ENV.arg_bits(fid, nargs);
-    let abs_args = known_args
-        .iter()
-        .enumerate()
-        .map(|(idx, arg)| {
-            let bits = arg_bits.get(idx).copied().unwrap_or(default_bits);
-            arg.map(AbsValue::exact)
-                .unwrap_or_else(|| AbsValue::top(bits))
-        })
-        .collect::<Vec<_>>();
-    let abs = eval_fop_abs(fid, nargs, &abs_args);
-    goal.abstract_rank(&abs)
-}
-
-fn rule_goal_rank_exact(
-    fid: usize,
-    args: &[&Value],
-    nargs: usize,
-    goal: &GoalObligation,
-) -> Option<usize> {
-    let abs_args = args
-        .iter()
-        .map(|arg| AbsValue::exact(arg))
-        .collect::<Vec<_>>();
-    let abs = eval_fop_abs(fid, nargs, &abs_args);
-    goal.abstract_rank(&abs)
-}
-
-fn eval_fop_abs(fid: usize, nargs: usize, args: &[AbsValue]) -> AbsValue {
-    let body = deffun::ENV.apply(fid, nargs);
-    let fallback_bits = deffun::ENV.ret_bits(fid, nargs);
-    eval_owned_abs(body, args, fallback_bits, 0)
-}
-
-fn eval_owned_abs(
-    expr: &OwnedExpr,
-    vars: &[AbsValue],
-    fallback_bits: usize,
-    depth: usize,
-) -> AbsValue {
-    if depth > 64 {
-        return AbsValue::top(fallback_bits.max(1));
-    }
-    match expr {
-        OwnedExpr::Var(i) => vars
-            .get(*i)
-            .cloned()
-            .unwrap_or_else(|| AbsValue::top(fallback_bits.max(1))),
-        OwnedExpr::Const(v) => AbsValue::exact(v),
-        OwnedExpr::Let(_, _, _) => {
-            let mut scoped = vars.to_vec();
-            let mut current = expr;
-            loop {
-                match current {
-                    OwnedExpr::Let(_, value, body) => {
-                        let bound = eval_owned_abs(value, &scoped, fallback_bits, depth + 1);
-                        scoped.push(bound);
-                        current = body;
-                    }
-                    other => return eval_owned_abs(other, &scoped, fallback_bits, depth + 1),
-                }
-            }
-        }
-        OwnedExpr::Not(a) | OwnedExpr::Neg(a) => {
-            let child = eval_owned_abs(a, vars, fallback_bits, depth + 1);
-            AbsValue {
-                may_one: child.may_zero,
-                may_zero: child.may_one,
-            }
-        }
-        OwnedExpr::And(a, b) => {
-            let lhs = eval_owned_abs(a, vars, fallback_bits, depth + 1);
-            let rhs = eval_owned_abs(b, vars, fallback_bits, depth + 1);
-            AbsValue {
-                may_one: lhs.may_one.bitand(rhs.may_one),
-                may_zero: lhs.may_zero.bitor(rhs.may_zero),
-            }
-        }
-        OwnedExpr::Or(a, b) => {
-            let lhs = eval_owned_abs(a, vars, fallback_bits, depth + 1);
-            let rhs = eval_owned_abs(b, vars, fallback_bits, depth + 1);
-            AbsValue {
-                may_one: lhs.may_one.bitor(rhs.may_one),
-                may_zero: lhs.may_zero.bitand(rhs.may_zero),
-            }
-        }
-        OwnedExpr::Xor(a, b) => {
-            let lhs = eval_owned_abs(a, vars, fallback_bits, depth + 1);
-            let rhs = eval_owned_abs(b, vars, fallback_bits, depth + 1);
-            let may_one = lhs
-                .may_one
-                .clone()
-                .bitand(rhs.may_zero.clone())
-                .bitor(lhs.may_zero.clone().bitand(rhs.may_one.clone()));
-            let may_zero = lhs
-                .may_one
-                .bitand(rhs.may_one)
-                .bitor(lhs.may_zero.bitand(rhs.may_zero));
-            AbsValue { may_one, may_zero }
-        }
-        OwnedExpr::Concat(a, b) => {
-            let lhs = eval_owned_abs(a, vars, fallback_bits, depth + 1);
-            let rhs = eval_owned_abs(b, vars, fallback_bits, depth + 1);
-            AbsValue {
-                may_one: lhs.may_one.concat(&rhs.may_one),
-                may_zero: lhs.may_zero.concat(&rhs.may_zero),
-            }
-        }
-        OwnedExpr::Extract(a, hi, lo) => {
-            let child = eval_owned_abs(a, vars, fallback_bits, depth + 1);
-            AbsValue {
-                may_one: child.may_one.extract(*hi, *lo),
-                may_zero: child.may_zero.extract(*hi, *lo),
-            }
-        }
-        OwnedExpr::Ite(c, a, b) => {
-            let cond = eval_owned_abs(c, vars, 1, depth + 1);
-            let then_abs = eval_owned_abs(a, vars, fallback_bits, depth + 1);
-            let else_abs = eval_owned_abs(b, vars, fallback_bits, depth + 1);
-            let zero_branch = cond.can_be_zero().then_some(then_abs.clone());
-            let nonzero_branch = cond.can_be_nonzero().then_some(else_abs.clone());
-            match (zero_branch, nonzero_branch) {
-                (Some(zero), Some(nonzero)) => zero.union(nonzero),
-                (Some(zero), None) => zero,
-                (None, Some(nonzero)) => nonzero,
-                (None, None) => AbsValue::top(fallback_bits.max(1)),
-            }
-        }
-        OwnedExpr::Fop0Dyn(id) => eval_fop_abs(*id, 0, &[]),
-        OwnedExpr::Fop1Dyn(id, a) => {
-            let child = eval_owned_abs(a, vars, fallback_bits, depth + 1);
-            eval_fop_abs(*id, 1, &[child])
-        }
-        OwnedExpr::Fop2Dyn(id, a, b) => {
-            let lhs = eval_owned_abs(a, vars, fallback_bits, depth + 1);
-            let rhs = eval_owned_abs(b, vars, fallback_bits, depth + 1);
-            eval_fop_abs(*id, 2, &[lhs, rhs])
-        }
-        OwnedExpr::FopDyn(id, args) => {
-            let args = args
-                .iter()
-                .map(|arg| eval_owned_abs(arg, vars, fallback_bits, depth + 1))
-                .collect::<Vec<_>>();
-            eval_fop_abs(*id, args.len(), &args)
-        }
-        _ => AbsValue::top(expr.width().max(fallback_bits).max(1)),
-    }
 }
 
 fn insert_existing_candidate(
@@ -1124,5 +677,3 @@ fn materialize_node(id: NodeId, grammar: &ExactGrammar<'_>, nodes: &[Node]) -> O
         }
     }
 }
-use num_bigint::BigUint;
-use num_traits::One;

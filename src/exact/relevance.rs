@@ -1,4 +1,5 @@
 use rustc_hash::FxHashMap;
+use std::collections::VecDeque;
 
 use crate::{
     enumerate::{expr::OwnedExpr, grammar::TemplateExpr},
@@ -37,6 +38,17 @@ impl BitSet {
         if word < self.words.len() {
             self.words[word] |= 1u64 << (bit % 64);
         }
+    }
+
+    fn insert_new(&mut self, bit: usize) -> bool {
+        let word = bit / 64;
+        if word >= self.words.len() {
+            return false;
+        }
+        let mask = 1u64 << (bit % 64);
+        let old = self.words[word];
+        self.words[word] |= mask;
+        old & mask == 0
     }
 
     fn union_inplace(&mut self, other: &Self) {
@@ -92,6 +104,7 @@ impl BitDep {
 }
 
 type DepCache = FxHashMap<(usize, usize, usize), Option<BitDep>>;
+type TemplateDepCache = FxHashMap<(usize, usize), Option<BitDep>>;
 
 pub fn compute_relevant_bits_for_spec(
     grammar: &ExactGrammar<'_>,
@@ -119,106 +132,74 @@ pub fn compute_relevant_bits_for_spec(
     }
 
     let mut dep_cache = DepCache::default();
+    let mut template_dep_cache = TemplateDepCache::default();
     let mut relevant = nt_bits
         .iter()
-        .map(|bits| vec![false; *bits])
+        .map(|bits| BitSet::new(*bits))
         .collect::<Vec<_>>();
+    let mut worklist = VecDeque::new();
     for bit in known_bits.keys() {
-        if *bit < relevant[grammar.start].len() {
-            relevant[grammar.start][*bit] = true;
+        if relevant[grammar.start].insert_new(*bit) {
+            worklist.push_back((grammar.start, *bit));
         }
     }
 
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for (nt_idx, (_, rules)) in grammar.nts.iter().enumerate() {
-            let parent_relevant = relevant[nt_idx]
-                .iter()
-                .enumerate()
-                .filter_map(|(bit, is_rel)| is_rel.then_some(bit))
-                .collect::<Vec<_>>();
-            if parent_relevant.is_empty() {
-                continue;
-            }
-            for rule in rules {
-                match rule {
-                    ExactRule::Alias(child_nt) => {
-                        for bit in &parent_relevant {
-                            if *bit < relevant[*child_nt].len() && !relevant[*child_nt][*bit] {
-                                relevant[*child_nt][*bit] = true;
-                                changed = true;
-                            }
-                        }
+    while let Some((nt_idx, bit)) = worklist.pop_front() {
+        for rule in &grammar.nts[nt_idx].1 {
+            match rule {
+                ExactRule::Alias(child_nt) => {
+                    if relevant[*child_nt].insert_new(bit) {
+                        worklist.push_back((*child_nt, bit));
                     }
-                    ExactRule::Leaf(_) => {}
-                    ExactRule::Unary { fid, child_nt } => {
-                        for bit in &parent_relevant {
-                            let Some(dep) = get_deffun_dep_bit(*fid, 1, *bit, &mut dep_cache)
-                            else {
-                                return None;
-                            };
-                            propagate_dep(&dep, 0, &mut relevant[*child_nt], &mut changed);
-                        }
+                }
+                ExactRule::Leaf(_) => {}
+                ExactRule::Unary { fid, child_nt } => {
+                    let Some(dep) = get_deffun_dep_bit(*fid, 1, bit, &mut dep_cache) else {
+                        return None;
+                    };
+                    propagate_dep(&dep, 0, *child_nt, &mut relevant, &mut worklist);
+                }
+                ExactRule::Binary {
+                    fid,
+                    lhs_nt,
+                    rhs_nt,
+                } => {
+                    let Some(dep) = get_deffun_dep_bit(*fid, 2, bit, &mut dep_cache) else {
+                        return None;
+                    };
+                    propagate_dep(&dep, 0, *lhs_nt, &mut relevant, &mut worklist);
+                    propagate_dep(&dep, 1, *rhs_nt, &mut relevant, &mut worklist);
+                }
+                ExactRule::Nary { fid, child_nts } => {
+                    let Some(dep) = get_deffun_dep_bit(*fid, child_nts.len(), bit, &mut dep_cache)
+                    else {
+                        return None;
+                    };
+                    for (arg_idx, child_nt) in child_nts.iter().enumerate() {
+                        propagate_dep(&dep, arg_idx, *child_nt, &mut relevant, &mut worklist);
                     }
-                    ExactRule::Binary {
-                        fid,
-                        lhs_nt,
-                        rhs_nt,
-                    } => {
-                        for bit in &parent_relevant {
-                            let Some(dep) = get_deffun_dep_bit(*fid, 2, *bit, &mut dep_cache)
-                            else {
-                                return None;
-                            };
-                            propagate_dep(&dep, 0, &mut relevant[*lhs_nt], &mut changed);
-                            propagate_dep(&dep, 1, &mut relevant[*rhs_nt], &mut changed);
-                        }
-                    }
-                    ExactRule::Nary { fid, child_nts } => {
-                        for bit in &parent_relevant {
-                            let Some(dep) =
-                                get_deffun_dep_bit(*fid, child_nts.len(), *bit, &mut dep_cache)
-                            else {
-                                return None;
-                            };
-                            for (arg_idx, child_nt) in child_nts.iter().enumerate() {
-                                propagate_dep(
-                                    &dep,
-                                    arg_idx,
-                                    &mut relevant[*child_nt],
-                                    &mut changed,
-                                );
-                            }
-                        }
-                    }
-                    ExactRule::GenericTemplate {
+                }
+                ExactRule::GenericTemplate {
+                    template,
+                    child_nts,
+                    ..
+                } => {
+                    let slot_bits = child_nts
+                        .iter()
+                        .map(|child_nt| nt_bits[*child_nt])
+                        .collect::<Vec<_>>();
+                    let dep = compute_template_dep_bit(
                         template,
-                        child_nts,
-                        ..
-                    } => {
-                        let slot_bits = child_nts
-                            .iter()
-                            .map(|child_nt| nt_bits[*child_nt])
-                            .collect::<Vec<_>>();
-                        for bit in &parent_relevant {
-                            let Some(dep) = compute_template_dep_bit(
-                                template,
-                                &slot_bits,
-                                *bit,
-                                &mut dep_cache,
-                            ) else {
-                                return None;
-                            };
-                            for (arg_idx, child_nt) in child_nts.iter().enumerate() {
-                                propagate_dep(
-                                    &dep,
-                                    arg_idx,
-                                    &mut relevant[*child_nt],
-                                    &mut changed,
-                                );
-                            }
-                        }
+                        &slot_bits,
+                        bit,
+                        &mut dep_cache,
+                        &mut template_dep_cache,
+                    );
+                    let Some(dep) = dep else {
+                        return None;
+                    };
+                    for (arg_idx, child_nt) in child_nts.iter().enumerate() {
+                        propagate_dep(&dep, arg_idx, *child_nt, &mut relevant, &mut worklist);
                     }
                 }
             }
@@ -227,12 +208,7 @@ pub fn compute_relevant_bits_for_spec(
 
     let relevant_bits = relevant
         .into_iter()
-        .map(|bits| {
-            bits.into_iter()
-                .enumerate()
-                .filter_map(|(idx, relevant)| relevant.then_some(idx))
-                .collect::<Vec<_>>()
-        })
+        .map(|bits| bits.iter_ones().collect::<Vec<_>>())
         .collect::<Vec<_>>();
     let reduced_any = relevant_bits
         .iter()
@@ -241,14 +217,20 @@ pub fn compute_relevant_bits_for_spec(
     reduced_any.then_some(relevant_bits)
 }
 
-fn propagate_dep(dep: &BitDep, arg_idx: usize, child_relevant: &mut [bool], changed: &mut bool) {
+fn propagate_dep(
+    dep: &BitDep,
+    arg_idx: usize,
+    child_nt: usize,
+    relevant: &mut [BitSet],
+    worklist: &mut VecDeque<(usize, usize)>,
+) {
     let Some(bits) = dep.per_arg.get(arg_idx) else {
         return;
     };
+    let child_relevant = &mut relevant[child_nt];
     for child_bit in bits.iter_ones() {
-        if child_bit < child_relevant.len() && !child_relevant[child_bit] {
-            child_relevant[child_bit] = true;
-            *changed = true;
+        if child_relevant.insert_new(child_bit) {
+            worklist.push_back((child_nt, child_bit));
         }
     }
 }
@@ -289,8 +271,14 @@ fn compute_template_dep_bit(
     slot_bits: &[usize],
     bit: usize,
     cache: &mut DepCache,
+    template_cache: &mut TemplateDepCache,
 ) -> Option<BitDep> {
-    match template {
+    let key = (template as *const TemplateExpr as usize, bit);
+    if let Some(dep) = template_cache.get(&key) {
+        return dep.clone();
+    }
+
+    let dep = match template {
         TemplateExpr::Slot(slot) => {
             let bits = *slot_bits.get(*slot)?;
             (bit < bits).then(|| BitDep::single_slot(slot_bits, *slot, bit))
@@ -303,13 +291,21 @@ fn compute_template_dep_bit(
             for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
                 let part = parts.get(arg_idx)?;
                 for inner_bit in bits.iter_ones() {
-                    let dep = compute_template_dep_bit(part, slot_bits, inner_bit, cache)?;
+                    let dep = compute_template_dep_bit(
+                        part,
+                        slot_bits,
+                        inner_bit,
+                        cache,
+                        template_cache,
+                    )?;
                     combined.union_inplace(&dep);
                 }
             }
             Some(combined)
         }
-    }
+    };
+    template_cache.insert(key, dep.clone());
+    dep
 }
 
 fn compute_expr_dep_bit(
