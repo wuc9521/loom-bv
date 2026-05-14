@@ -209,6 +209,7 @@ impl BitCircuitPlan {
         }
         Ok(value_from_words(words, self.ret_bits))
     }
+
 }
 
 fn eval_bool_node(node: &BoolNode, args: &[Value], temps: &[bool]) -> bool {

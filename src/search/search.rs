@@ -19,6 +19,24 @@ use crate::{
 
 use super::sample::SampleConfig;
 
+struct JoinOnDrop(Option<thread::JoinHandle<()>>);
+
+impl JoinOnDrop {
+    fn new(handle: thread::JoinHandle<()>) -> Self {
+        Self(Some(handle))
+    }
+}
+
+impl Drop for JoinOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            if handle.join().is_err() {
+                info!("condition-search worker panicked");
+            }
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct SearchConfig {
     pub ar_ratio: usize,
@@ -110,7 +128,7 @@ impl SearchConfig {
             self.cond_search.filter.count_limit = 10000;
         }
         let mut rng = self.rng();
-        thread::spawn({
+        let cond_worker = JoinOnDrop::new(thread::spawn({
             let problem = problem.clone();
             let pbecstr = pbecstr.clone();
             let cond_search = self.cond_search.clone();
@@ -150,7 +168,7 @@ impl SearchConfig {
 
                 info!("{} Condition Searched.", conds.solved.len())
             }
-        });
+        }));
 
         let mut rng = self.rng();
 
@@ -202,9 +220,12 @@ impl SearchConfig {
             }
         }
         if let Some(best) = exprs.best_solution() {
+            drop(cond_worker);
             Ok(best)
         } else {
-            Ok(exprs.get_tree())
+            let tree = exprs.get_tree();
+            drop(cond_worker);
+            Ok(tree)
         }
     }
 
