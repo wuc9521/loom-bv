@@ -9,6 +9,13 @@ use crate::{
 
 use super::{ExactGrammar, ExactRule, NullarySpec};
 
+#[derive(Clone, Copy)]
+struct WorkItem {
+    nt_idx: usize,
+    bit: usize,
+    rule_idx: usize,
+}
+
 #[derive(Clone, Default)]
 struct BitSet {
     words: Vec<u64>,
@@ -107,77 +114,125 @@ impl BitDep {
 type DepCache = FxHashMap<(usize, usize, usize), Option<BitDep>>;
 type TemplateDepCache = FxHashMap<(usize, usize), Option<BitDep>>;
 
-pub fn compute_relevant_bits_for_spec(
-    grammar: &ExactGrammar<'_>,
-    spec: &NullarySpec,
-) -> Option<Vec<Vec<usize>>> {
-    let NullarySpec::BitConstraints {
-        bits,
-        known_bits,
-        structural,
-    } = spec
-    else {
-        return None;
-    };
-    if !structural.is_empty() || known_bits.is_empty() {
-        return None;
-    }
+pub struct LazyRelevance<'a> {
+    grammar: &'a ExactGrammar<'a>,
+    nt_bits: Vec<usize>,
+    dep_cache: DepCache,
+    template_dep_cache: TemplateDepCache,
+    relevant: Vec<BitSet>,
+    worklist: VecDeque<WorkItem>,
+    complete: bool,
+}
 
-    let nt_bits = grammar
-        .nts
-        .iter()
-        .map(|(_, rules)| nt_output_bits(rules))
-        .collect::<Vec<_>>();
-    if nt_bits.get(grammar.start).copied() != Some(*bits) {
-        return None;
-    }
-
-    let mut dep_cache = DepCache::default();
-    let mut template_dep_cache = TemplateDepCache::default();
-    let mut relevant = nt_bits
-        .iter()
-        .map(|bits| BitSet::new(*bits))
-        .collect::<Vec<_>>();
-    let mut worklist = VecDeque::new();
-    for bit in known_bits.keys() {
-        if relevant[grammar.start].insert_new(*bit) {
-            worklist.push_back((grammar.start, *bit));
+impl<'a> LazyRelevance<'a> {
+    pub fn new(grammar: &'a ExactGrammar<'a>, spec: &NullarySpec) -> Option<Self> {
+        let NullarySpec::BitConstraints {
+            bits,
+            known_bits,
+            structural,
+        } = spec
+        else {
+            return None;
+        };
+        if !structural.is_empty() || known_bits.is_empty() {
+            return None;
         }
+
+        let nt_bits = grammar
+            .nts
+            .iter()
+            .map(|(_, rules)| nt_output_bits(rules))
+            .collect::<Vec<_>>();
+        if nt_bits.get(grammar.start).copied() != Some(*bits) {
+            return None;
+        }
+
+        let mut relevant = nt_bits
+            .iter()
+            .map(|bits| BitSet::new(*bits))
+            .collect::<Vec<_>>();
+        let mut worklist = VecDeque::new();
+        for bit in known_bits.keys() {
+            if relevant[grammar.start].insert_new(*bit) {
+                worklist.push_back(WorkItem {
+                    nt_idx: grammar.start,
+                    bit: *bit,
+                    rule_idx: 0,
+                });
+            }
+        }
+
+        Some(Self {
+            grammar,
+            nt_bits,
+            dep_cache: DepCache::default(),
+            template_dep_cache: TemplateDepCache::default(),
+            relevant,
+            worklist,
+            complete: false,
+        })
     }
 
-    while let Some((nt_idx, bit)) = worklist.pop_front() {
-        for rule in &grammar.nts[nt_idx].1 {
+    pub fn advance(&mut self, budget: usize) -> bool {
+        if self.complete {
+            return true;
+        }
+        for _ in 0..budget {
+            let Some(item) = self.worklist.pop_front() else {
+                self.complete = true;
+                return true;
+            };
+            let nt_rules = &self.grammar.nts[item.nt_idx].1;
+            let Some(rule) = nt_rules.get(item.rule_idx) else {
+                continue;
+            };
             match rule {
                 ExactRule::Alias(child_nt) => {
-                    if relevant[*child_nt].insert_new(bit) {
-                        worklist.push_back((*child_nt, bit));
+                    if self.relevant[*child_nt].insert_new(item.bit) {
+                        self.worklist.push_back(WorkItem {
+                            nt_idx: *child_nt,
+                            bit: item.bit,
+                            rule_idx: 0,
+                        });
                     }
                 }
                 ExactRule::Leaf(_) => {}
                 ExactRule::Unary { fid, child_nt } => {
-                    let Some(dep) = get_deffun_dep_bit(*fid, 1, bit, &mut dep_cache) else {
-                        return None;
+                    let Some(dep) = get_deffun_dep_bit(*fid, 1, item.bit, &mut self.dep_cache)
+                    else {
+                        self.complete = true;
+                        return true;
                     };
-                    propagate_dep(&dep, 0, *child_nt, &mut relevant, &mut worklist);
+                    propagate_dep(&dep, 0, *child_nt, &mut self.relevant, &mut self.worklist);
                 }
                 ExactRule::Binary {
                     fid,
                     lhs_nt,
                     rhs_nt,
                 } => {
-                    let Some(dep) = get_deffun_dep_bit(*fid, 2, bit, &mut dep_cache) else {
-                        return None;
+                    let Some(dep) = get_deffun_dep_bit(*fid, 2, item.bit, &mut self.dep_cache)
+                    else {
+                        self.complete = true;
+                        return true;
                     };
-                    propagate_dep(&dep, 0, *lhs_nt, &mut relevant, &mut worklist);
-                    propagate_dep(&dep, 1, *rhs_nt, &mut relevant, &mut worklist);
+                    propagate_dep(&dep, 0, *lhs_nt, &mut self.relevant, &mut self.worklist);
+                    propagate_dep(&dep, 1, *rhs_nt, &mut self.relevant, &mut self.worklist);
                 }
                 ExactRule::Nary { fid, child_nts } => {
-                    let Some(dep) = get_deffun_dep_bit(*fid, child_nts.len(), bit, &mut dep_cache)
+                    let Some(dep) =
+                        get_deffun_dep_bit(*fid, child_nts.len(), item.bit, &mut self.dep_cache)
                     else {
-                        return None;
+                        self.complete = true;
+                        return true;
                     };
                     for (arg_idx, child_nt) in child_nts.iter().enumerate() {
-                        propagate_dep(&dep, arg_idx, *child_nt, &mut relevant, &mut worklist);
+                        propagate_dep(
+                            &dep,
+                            arg_idx,
+                            *child_nt,
+                            &mut self.relevant,
+                            &mut self.worklist,
+                        );
                     }
                 }
                 ExactRule::GenericTemplate {
@@ -187,38 +242,64 @@ pub fn compute_relevant_bits_for_spec(
                 } => {
                     let slot_bits = child_nts
                         .iter()
-                        .map(|child_nt| nt_bits[*child_nt])
+                        .map(|child_nt| self.nt_bits[*child_nt])
                         .collect::<Vec<_>>();
                     let dep = compute_template_dep_bit(
                         template,
                         &slot_bits,
-                        bit,
-                        &mut dep_cache,
-                        &mut template_dep_cache,
+                        item.bit,
+                        &mut self.dep_cache,
+                        &mut self.template_dep_cache,
                     );
                     let Some(dep) = dep else {
-                        return None;
+                        self.complete = true;
+                        return true;
                     };
                     for (arg_idx, child_nt) in child_nts.iter().enumerate() {
-                        propagate_dep(&dep, arg_idx, *child_nt, &mut relevant, &mut worklist);
+                        propagate_dep(
+                            &dep,
+                            arg_idx,
+                            *child_nt,
+                            &mut self.relevant,
+                            &mut self.worklist,
+                        );
                     }
                 }
             }
+            if item.rule_idx + 1 < nt_rules.len() {
+                self.worklist.push_back(WorkItem {
+                    rule_idx: item.rule_idx + 1,
+                    ..item
+                });
+            }
         }
+        false
     }
 
-    let relevant_bits = relevant
-        .into_iter()
-        .map(|bits| bits.iter_ones().collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-    let reduced_any = relevant_bits
-        .iter()
-        .zip(nt_bits.iter())
-        .any(|(rel, bits)| rel.len() < *bits);
-    if !reduced_any {
-        info!("relevance: all bits relevant, no reduction");
+    pub fn finish(self) -> Option<Vec<Vec<usize>>> {
+        let relevant_bits = self
+            .relevant
+            .into_iter()
+            .map(|bits| bits.iter_ones().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let reduced_any = relevant_bits
+            .iter()
+            .zip(self.nt_bits.iter())
+            .any(|(rel, bits)| rel.len() < *bits);
+        if !reduced_any {
+            info!("relevance: all bits relevant, no reduction");
+        }
+        reduced_any.then_some(relevant_bits)
     }
-    reduced_any.then_some(relevant_bits)
+}
+
+pub fn compute_relevant_bits_for_spec(
+    grammar: &ExactGrammar<'_>,
+    spec: &NullarySpec,
+) -> Option<Vec<Vec<usize>>> {
+    let mut lazy = LazyRelevance::new(grammar, spec)?;
+    while !lazy.advance(1024) {}
+    lazy.finish()
 }
 
 fn propagate_dep(
@@ -226,7 +307,7 @@ fn propagate_dep(
     arg_idx: usize,
     child_nt: usize,
     relevant: &mut [BitSet],
-    worklist: &mut VecDeque<(usize, usize)>,
+    worklist: &mut VecDeque<WorkItem>,
 ) {
     let Some(bits) = dep.per_arg.get(arg_idx) else {
         return;
@@ -234,7 +315,11 @@ fn propagate_dep(
     let child_relevant = &mut relevant[child_nt];
     for child_bit in bits.iter_ones() {
         if child_relevant.insert_new(child_bit) {
-            worklist.push_back((child_nt, child_bit));
+            worklist.push_back(WorkItem {
+                nt_idx: child_nt,
+                bit: child_bit,
+                rule_idx: 0,
+            });
         }
     }
 }

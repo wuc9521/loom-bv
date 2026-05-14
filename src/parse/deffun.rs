@@ -541,21 +541,22 @@ impl Environ {
                 )
             })?;
             let expr = OwnedExpr::from_term(def.body, args.as_slice())?;
+            if self.inner().len() <= args.len() {
+                self.inner().resize_with(args.len() + 1, Vec::new);
+            }
+            let plan = compile_plan(&expr, args.len());
             info!(
                 "DefineFun: {} {} -> {}",
                 name,
                 args.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "),
                 summarize_expr(&expr, 160)
             );
-            if self.inner().len() <= args.len() {
-                self.inner().resize_with(args.len() + 1, Vec::new);
-            }
             self.inner()[args.len()].push(DefineFun {
                 name,
                 args: args.iter().map(|(name, _)| *name).collect(),
                 arg_bits: args.iter().map(|(_, bits)| *bits as usize).collect(),
                 ret_bits,
-                plan: compile_plan(&expr, args.len()),
+                plan,
                 expr,
             });
         }

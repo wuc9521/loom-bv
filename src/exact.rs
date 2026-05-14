@@ -87,6 +87,7 @@ pub fn search_nullary(
     problem: &SynthProblem<'static>,
     spec: &NullarySpec,
     min: bool,
+    mitm: bool,
 ) -> parse::Result<OwnedExpr> {
     let cfg_start = Instant::now();
     let multi = MultiConfig::from_problem(problem)?;
@@ -100,7 +101,7 @@ pub fn search_nullary(
         "exact-nullary setup exact-grammar completed in {:?}",
         grammar_start.elapsed()
     );
-    search_nullary_multi_nt(&grammar, spec, min)
+    search_nullary_multi_nt(&grammar, spec, min, mitm)
 }
 
 type NodeId = usize;
@@ -163,28 +164,46 @@ struct Candidate {
     value: Value,
 }
 
+#[derive(Default)]
+struct RefinementPressure {
+    inserted: usize,
+    collisions: usize,
+}
+
+impl RefinementPressure {
+    fn credits(&self) -> usize {
+        self.inserted.saturating_add(self.collisions)
+    }
+}
+
 fn search_nullary_multi_nt(
     grammar: &ExactGrammar<'static>,
     spec: &NullarySpec,
     min: bool,
+    mitm: bool,
 ) -> parse::Result<OwnedExpr> {
-    let relevance_start = Instant::now();
     let relevance_disabled = !min;
-    let seen_relevant_bits = if relevance_disabled {
-        None
-    } else {
-        relevance::compute_relevant_bits_for_spec(grammar, spec)
-    };
+    let interactive_relevance = min && mitm;
+    let mut eager_relevant_bits = None;
+    let mut lazy_relevance = None;
     if relevance_disabled {
         info!(
             "exact-nullary setup relevance skipped in {:?} (--min=false)",
-            relevance_start.elapsed()
+            Instant::now().elapsed()
         );
+    } else if interactive_relevance {
+        lazy_relevance = relevance::LazyRelevance::new(grammar, spec).map(|engine| (Instant::now(), engine));
+        info!("exact-nullary setup relevance initialized lazily (--mitm)");
     } else {
+        let relevance_start = Instant::now();
+        eager_relevant_bits = relevance::compute_relevant_bits_for_spec(grammar, spec);
         info!(
             "exact-nullary setup relevance completed in {:?}",
             relevance_start.elapsed()
         );
+        if let Some(bits) = &eager_relevant_bits {
+            log_relevance_summary(grammar, bits);
+        }
     }
     let mut leaf_rules = 0usize;
     let mut alias_rules = 0usize;
@@ -216,42 +235,28 @@ fn search_nullary_multi_nt(
     );
     let nt_count = grammar.nts.len();
     let mut by_size = vec![vec![Vec::<Candidate>::new()]; nt_count];
-    let mut seen = match seen_relevant_bits {
-        Some(relevant_bits) => SeenMode::Projected {
-            maps: (0..nt_count).map(|_| FxHashMap::default()).collect(),
-            relevant_bits,
-        },
-        None => SeenMode::Exact(vec![FxHashMap::<Value, usize>::default(); nt_count]),
-    };
-    if let SeenMode::Projected { relevant_bits, .. } = &seen {
-        let total_kept: usize = relevant_bits.iter().map(Vec::len).sum();
-        let total_full: usize = grammar
-            .nts
-            .iter()
-            .map(|(_, rules)| relevance::nt_output_bits(rules))
-            .sum();
-        info!(
-            "exact-nullary relevance: {}/{} bits relevant ({:.1}%)",
-            total_kept,
-            total_full,
-            total_kept as f64 / total_full as f64 * 100.0
-        );
-        for (i, (bits, (_, rules))) in relevant_bits.iter().zip(grammar.nts.iter()).enumerate() {
-            let nt_total = relevance::nt_output_bits(rules);
-            info!(
-                "  nt[{}]: {}/{} bits relevant",
-                i,
-                bits.len(),
-                nt_total
-            );
+    let mut seen = if !relevance_disabled && !interactive_relevance {
+        if let Some(relevant_bits) = eager_relevant_bits {
+            SeenMode::Projected {
+                relevant_bits,
+                maps: (0..nt_count)
+                    .map(|_| FxHashMap::<ProjectionKey, usize>::default())
+                    .collect(),
+            }
+        } else {
+            SeenMode::Exact(vec![FxHashMap::<Value, usize>::default(); nt_count])
         }
-    }
+    } else {
+        SeenMode::Exact(vec![FxHashMap::<Value, usize>::default(); nt_count])
+    };
     let mut nodes = Vec::<Node>::new();
     let mut eval_cache = ExactEvalCache::default();
+    let mut relevance_credit = 0usize;
 
     for size in 1.. {
         let mut eval_attempted = 0usize;
         let mut eval_failed = 0usize;
+        let mut pressure = RefinementPressure::default();
         for buckets in &mut by_size {
             buckets.push(Vec::new());
         }
@@ -279,6 +284,7 @@ fn search_nullary_multi_nt(
                                 &mut seen,
                                 &mut by_size,
                                 &mut nodes,
+                                &mut pressure,
                                 || Node {
                                     nt_idx,
                                     rule_idx,
@@ -318,6 +324,7 @@ fn search_nullary_multi_nt(
                                 &mut seen,
                                 &mut by_size,
                                 &mut nodes,
+                                &mut pressure,
                                 || Node {
                                     nt_idx,
                                     rule_idx,
@@ -374,18 +381,19 @@ fn search_nullary_multi_nt(
                                         &mut seen,
                                         &mut by_size,
                                         &mut nodes,
+                                        &mut pressure,
                                         || Node {
                                             nt_idx,
                                             rule_idx,
                                             children: vec![lhs.node, rhs.node],
                                         },
-                                    ) {
-                                        return Ok(found);
+                                        ) {
+                                            return Ok(found);
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
                     ExactRule::Nary { fid, child_nts } => {
                         if size <= child_nts.len() {
                             continue;
@@ -438,6 +446,7 @@ fn search_nullary_multi_nt(
                                 &mut seen,
                                 &mut by_size,
                                 &mut nodes,
+                                &mut pressure,
                                 || Node {
                                     nt_idx,
                                     rule_idx,
@@ -472,6 +481,7 @@ fn search_nullary_multi_nt(
                                         &mut seen,
                                         &mut by_size,
                                         &mut nodes,
+                                        &mut pressure,
                                         || Node {
                                             nt_idx,
                                             rule_idx,
@@ -541,6 +551,7 @@ fn search_nullary_multi_nt(
                                 &mut seen,
                                 &mut by_size,
                                 &mut nodes,
+                                &mut pressure,
                                 || Node {
                                     nt_idx,
                                     rule_idx,
@@ -574,6 +585,7 @@ fn search_nullary_multi_nt(
                             &mut seen,
                             &mut by_size,
                             &nodes,
+                            &mut pressure,
                         ) {
                             return Ok(found);
                         }
@@ -585,9 +597,96 @@ fn search_nullary_multi_nt(
                 break;
             }
         }
+        relevance_credit = relevance_credit.saturating_add(pressure.credits());
+        maybe_refine_lazy_relevance(
+            grammar,
+            &mut lazy_relevance,
+            &mut seen,
+            &by_size,
+            &mut relevance_credit,
+        );
     }
 
     unreachable!("nullary enumeration should either find a solution or diverge");
+}
+
+fn maybe_refine_lazy_relevance(
+    grammar: &ExactGrammar<'_>,
+    lazy_relevance: &mut Option<(Instant, relevance::LazyRelevance<'_>)>,
+    seen: &mut SeenMode,
+    by_size: &[Vec<Vec<Candidate>>],
+    relevance_credit: &mut usize,
+) {
+    let Some((_start, engine)) = lazy_relevance.as_mut() else {
+        return;
+    };
+    if *relevance_credit == 0 {
+        return;
+    }
+    loop {
+        if engine.advance(1) {
+            break;
+        }
+        *relevance_credit = relevance_credit.saturating_sub(1);
+        if *relevance_credit == 0 {
+            return;
+        }
+    }
+    *relevance_credit = 0;
+    let (start, engine) = lazy_relevance.take().unwrap();
+    let Some(relevant_bits) = engine.finish() else {
+        info!(
+            "exact-nullary setup relevance completed lazily in {:?} (no reduction)",
+            start.elapsed()
+        );
+        return;
+    };
+    info!(
+        "exact-nullary setup relevance completed lazily in {:?}",
+        start.elapsed()
+    );
+    log_relevance_summary(grammar, &relevant_bits);
+    *seen = build_projected_seen(by_size, &relevant_bits);
+}
+
+fn build_projected_seen(
+    by_size: &[Vec<Vec<Candidate>>],
+    relevant_bits: &[Vec<usize>],
+) -> SeenMode {
+    let mut maps = (0..by_size.len())
+        .map(|_| FxHashMap::<ProjectionKey, usize>::default())
+        .collect::<Vec<_>>();
+    for (nt_idx, size_buckets) in by_size.iter().enumerate() {
+        for (size, bucket) in size_buckets.iter().enumerate() {
+            for candidate in bucket {
+                let key = project_value(&candidate.value, &relevant_bits[nt_idx]);
+                maps[nt_idx].entry(key).or_insert(size);
+            }
+        }
+    }
+    SeenMode::Projected {
+        relevant_bits: relevant_bits.to_vec(),
+        maps,
+    }
+}
+
+fn log_relevance_summary(grammar: &ExactGrammar<'_>, relevant_bits: &[Vec<usize>]) {
+    let total_kept: usize = relevant_bits.iter().map(Vec::len).sum();
+    let total_full: usize = grammar
+        .nts
+        .iter()
+        .map(|(_, rules)| relevance::nt_output_bits(rules))
+        .sum();
+    info!(
+        "exact-nullary relevance: {}/{} bits relevant ({:.1}%)",
+        total_kept,
+        total_full,
+        total_kept as f64 / total_full as f64 * 100.0
+    );
+    for (i, (bits, (_, rules))) in relevant_bits.iter().zip(grammar.nts.iter()).enumerate() {
+        let nt_total = relevance::nt_output_bits(rules);
+        info!("  nt[{}]: {}/{} bits relevant", i, bits.len(), nt_total);
+    }
 }
 
 fn insert_existing_candidate(
@@ -599,14 +698,16 @@ fn insert_existing_candidate(
     seen: &mut SeenMode,
     by_size: &mut [Vec<Vec<Candidate>>],
     nodes: &[Node],
+    pressure: &mut RefinementPressure,
 ) -> Option<OwnedExpr> {
     if nt_idx == grammar.start && spec.matches(&candidate.value) {
         return materialize_node(candidate.node, grammar, nodes);
     }
-    if seen_contains_or_insert(seen, nt_idx, &candidate.value, size) {
+    if seen_contains_or_insert(seen, nt_idx, &candidate.value, size, pressure) {
         return None;
     }
     by_size[nt_idx][size].push(candidate);
+    pressure.inserted += 1;
     None
 }
 
@@ -619,25 +720,36 @@ fn insert_multi_nt_candidate(
     seen: &mut SeenMode,
     by_size: &mut [Vec<Vec<Candidate>>],
     nodes: &mut Vec<Node>,
+    pressure: &mut RefinementPressure,
     build_node: impl FnOnce() -> Node,
 ) -> Option<OwnedExpr> {
     if nt_idx == grammar.start && spec.matches(&value) {
         let node = intern_node(nodes, build_node());
         return materialize_node(node, grammar, nodes);
     }
-    if seen_contains_or_insert(seen, nt_idx, &value, size) {
+    if seen_contains_or_insert(seen, nt_idx, &value, size, pressure) {
         None
     } else {
         let node = intern_node(nodes, build_node());
         by_size[nt_idx][size].push(Candidate { node, value });
+        pressure.inserted += 1;
         None
     }
 }
 
-fn seen_contains_or_insert(seen: &mut SeenMode, nt_idx: usize, value: &Value, size: usize) -> bool {
+fn seen_contains_or_insert(
+    seen: &mut SeenMode,
+    nt_idx: usize,
+    value: &Value,
+    size: usize,
+    pressure: &mut RefinementPressure,
+) -> bool {
     match seen {
         SeenMode::Exact(maps) => match maps[nt_idx].entry(value.clone()) {
-            Entry::Occupied(_) => true,
+            Entry::Occupied(_) => {
+                pressure.collisions += 1;
+                true
+            }
             Entry::Vacant(entry) => {
                 entry.insert(size);
                 false
@@ -649,7 +761,10 @@ fn seen_contains_or_insert(seen: &mut SeenMode, nt_idx: usize, value: &Value, si
         } => {
             let key = project_value(value, &relevant_bits[nt_idx]);
             match maps[nt_idx].entry(key) {
-                Entry::Occupied(_) => true,
+                Entry::Occupied(_) => {
+                    pressure.collisions += 1;
+                    true
+                }
                 Entry::Vacant(entry) => {
                     entry.insert(size);
                     false

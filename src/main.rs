@@ -28,6 +28,9 @@ struct Cli {
         value_parser = BoolishValueParser::new()
     )]
     min: bool,
+
+    #[arg(long = "mitm", default_value_t = false)]
+    mitm: bool,
 }
 
 pub fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -70,6 +73,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         None,
         args.verbose,
         args.min,
+        args.mitm,
     )?;
     println!("{output}");
     Ok(())
