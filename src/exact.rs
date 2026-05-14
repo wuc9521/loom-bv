@@ -86,6 +86,7 @@ impl NullarySpec {
 pub fn search_nullary(
     problem: &SynthProblem<'static>,
     spec: &NullarySpec,
+    min: bool,
 ) -> parse::Result<OwnedExpr> {
     let cfg_start = Instant::now();
     let multi = MultiConfig::from_problem(problem)?;
@@ -99,7 +100,7 @@ pub fn search_nullary(
         "exact-nullary setup exact-grammar completed in {:?}",
         grammar_start.elapsed()
     );
-    search_nullary_multi_nt(&grammar, spec)
+    search_nullary_multi_nt(&grammar, spec, min)
 }
 
 type NodeId = usize;
@@ -165,13 +166,26 @@ struct Candidate {
 fn search_nullary_multi_nt(
     grammar: &ExactGrammar<'static>,
     spec: &NullarySpec,
+    min: bool,
 ) -> parse::Result<OwnedExpr> {
     let relevance_start = Instant::now();
-    let seen_relevant_bits = relevance::compute_relevant_bits_for_spec(grammar, spec);
-    info!(
-        "exact-nullary setup relevance completed in {:?}",
-        relevance_start.elapsed()
-    );
+    let relevance_disabled = !min;
+    let seen_relevant_bits = if relevance_disabled {
+        None
+    } else {
+        relevance::compute_relevant_bits_for_spec(grammar, spec)
+    };
+    if relevance_disabled {
+        info!(
+            "exact-nullary setup relevance skipped in {:?} (--min=false)",
+            relevance_start.elapsed()
+        );
+    } else {
+        info!(
+            "exact-nullary setup relevance completed in {:?}",
+            relevance_start.elapsed()
+        );
+    }
     let mut leaf_rules = 0usize;
     let mut alias_rules = 0usize;
     let mut unary_rules = 0usize;
@@ -210,18 +224,27 @@ fn search_nullary_multi_nt(
         None => SeenMode::Exact(vec![FxHashMap::<Value, usize>::default(); nt_count]),
     };
     if let SeenMode::Projected { relevant_bits, .. } = &seen {
-        let total_kept = relevant_bits.iter().map(Vec::len).sum::<usize>();
-        let total_full = grammar
+        let total_kept: usize = relevant_bits.iter().map(Vec::len).sum();
+        let total_full: usize = grammar
             .nts
             .iter()
             .map(|(_, rules)| relevance::nt_output_bits(rules))
-            .sum::<usize>();
+            .sum();
         info!(
-            "exact-nullary projected-seen nts={} kept_bits={} total_bits={}",
-            relevant_bits.len(),
+            "exact-nullary relevance: {}/{} bits relevant ({:.1}%)",
             total_kept,
-            total_full
+            total_full,
+            total_kept as f64 / total_full as f64 * 100.0
         );
+        for (i, (bits, (_, rules))) in relevant_bits.iter().zip(grammar.nts.iter()).enumerate() {
+            let nt_total = relevance::nt_output_bits(rules);
+            info!(
+                "  nt[{}]: {}/{} bits relevant",
+                i,
+                bits.len(),
+                nt_total
+            );
+        }
     }
     let mut nodes = Vec::<Node>::new();
     let mut eval_cache = ExactEvalCache::default();

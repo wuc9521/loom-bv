@@ -258,14 +258,14 @@ fn value_from_words(words: Vec<u64>, bits: usize) -> Value {
 fn compile_bool_atom(expr: &OwnedExpr, nargs: usize) -> Option<BoolAtom> {
     match expr {
         OwnedExpr::Const(value) if value.bits() == 1 => Some(BoolAtom::Const(!value.is_zero())),
-        OwnedExpr::Var(idx) if *idx < nargs => None,
-        OwnedExpr::Var(idx) => Some(BoolAtom::Temp(idx.checked_sub(nargs)?)),
+        OwnedExpr::Var(idx, _) if *idx < nargs => None,
+        OwnedExpr::Var(idx, _) => Some(BoolAtom::Temp(idx.checked_sub(nargs)?)),
         OwnedExpr::Extract(src, hi, lo) if hi == lo => match src.as_ref() {
-            OwnedExpr::Var(idx) if *idx < nargs => Some(BoolAtom::InputBit {
+            OwnedExpr::Var(idx, _) if *idx < nargs => Some(BoolAtom::InputBit {
                 arg: *idx,
                 bit: *lo as usize,
             }),
-            OwnedExpr::Var(idx) => Some(BoolAtom::Temp(idx.checked_sub(nargs)?)),
+            OwnedExpr::Var(idx, _) => Some(BoolAtom::Temp(idx.checked_sub(nargs)?)),
             _ => None,
         },
         _ => None,
@@ -277,7 +277,7 @@ fn compile_bool_node(expr: &OwnedExpr, nargs: usize) -> Option<BoolNode> {
         OwnedExpr::Const(value) if value.bits() == 1 => {
             Some(BoolNode::Atom(BoolAtom::Const(!value.is_zero())))
         }
-        OwnedExpr::Var(_) | OwnedExpr::Extract(_, _, _) => {
+        OwnedExpr::Var(_, _) | OwnedExpr::Extract(_, _, _) => {
             Some(BoolNode::Atom(compile_bool_atom(expr, nargs)?))
         }
         OwnedExpr::Not(inner) => Some(BoolNode::Not(compile_bool_atom(inner, nargs)?)),
@@ -365,7 +365,7 @@ fn compile_plan(expr: &OwnedExpr, nargs: usize) -> DefineFunPlan {
             slot
         };
         match expr {
-            OwnedExpr::Var(idx) => env_slots[*idx],
+            OwnedExpr::Var(idx, _) => env_slots[*idx],
             OwnedExpr::Const(value) => push(PlanInstr::Const(value.clone()), next_slot, instrs),
             OwnedExpr::Concat(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, instrs);

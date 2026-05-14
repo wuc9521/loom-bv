@@ -69,9 +69,15 @@ impl<'a> MultiConfig<'a> {
             .map(|(idx, nt)| (nt.0, idx))
             .collect::<HashMap<_, _>>();
         let env = problem
-            .args
+            .arg_decls
             .iter()
-            .map(|name| (*name, 64_u64))
+            .map(|sv| {
+                let name: &str = Box::leak(sv.name.clone().into_boxed_str());
+                let bits = crate::parse::SortAliases::default()
+                    .parse_sort_width(&sv.sort)
+                    .unwrap_or(1) as u64;
+                (name, bits)
+            })
             .collect::<Vec<_>>();
         let mut nts = Vec::with_capacity(problem.cfg.len());
         for nt in problem.cfg.iter() {

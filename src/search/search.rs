@@ -134,7 +134,7 @@ impl SearchConfig {
                                     conds.add_solution(
                                         &And(
                                             &LShr(
-                                                &Var(i),
+                                                &Var(i, problem.bits),
                                                 &Const(Value::from_u64(shift as u64, problem.bits)),
                                             ),
                                             &Const(Value::from_u64(1, 1)),

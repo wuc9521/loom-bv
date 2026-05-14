@@ -291,7 +291,7 @@ impl<'a, const N: usize> Algo<'a, N> {
             return Some(AbsSummary::top());
         }
         Some(match expr {
-            OwnedExpr::Var(i) => vars.get(*i).copied().unwrap_or_else(AbsSummary::top),
+            OwnedExpr::Var(i, _) => vars.get(*i).copied().unwrap_or_else(AbsSummary::top),
             OwnedExpr::Const(v) => AbsSummary::exact(Bv([v.as_u64_lossy(); N].into())),
             OwnedExpr::Let(_, _, _) => {
                 let mut scoped = vars.to_vec();
@@ -459,7 +459,7 @@ fn owned_expr_bit_width(expr: &OwnedExpr) -> usize {
         OwnedExpr::Fop0Dyn(id) => crate::parse::deffun::ENV.ret_bits(*id, 0),
         OwnedExpr::FopDyn(id, args) => crate::parse::deffun::ENV.ret_bits(*id, args.len()),
         OwnedExpr::Const(v) => v.bits(),
-        OwnedExpr::Var(_) => 64,
+        OwnedExpr::Var(_, width) => *width,
         OwnedExpr::Let(_, _, body) => owned_expr_bit_width(body),
         OwnedExpr::Not(a) | OwnedExpr::Neg(a) | OwnedExpr::Fop1Dyn(_, a) => owned_expr_bit_width(a),
         OwnedExpr::Add(a, _)

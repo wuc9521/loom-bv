@@ -46,7 +46,7 @@ fn expr_width(expr: &Expr<'_>) -> usize {
         Expr::Extract(_, hi, lo) => (hi - lo + 1) as usize,
         Expr::Fop0Dyn(id) => deffun::ENV.ret_bits(*id, 0),
         Expr::Const(v) => v.bits(),
-        Expr::Var(_) => 64,
+        Expr::Var(_, width) => *width,
         Expr::Not(a)
         | Expr::Neg(a)
         | Expr::Fop1Dyn(_, a) => expr_width(a),
@@ -100,7 +100,7 @@ impl<'a> Expr<'a> {
                 }
             };
         }
-        if let Expr::Var(a) = self {
+        if let Expr::Var(a, _) = self {
             return Ok(args[*a].clone());
         }
         if let Expr::Concat(a, b) = self {
@@ -145,7 +145,7 @@ impl<'a> Expr<'a> {
                 }
             };
         }
-        if let Expr::Var(a) = self {
+        if let Expr::Var(a, _) = self {
             return args[*a];
         }
         if let Expr::Concat(a, b) = self {
@@ -198,8 +198,8 @@ impl<'a> Expr<'a> {
                 }
             };
         }
-        if let OwnedExpr::Var(i) = expr {
-            return bump.alloc(Expr::Var(*i));
+        if let OwnedExpr::Var(i, w) = expr {
+            return bump.alloc(Expr::Var(*i, *w));
         }
         if let OwnedExpr::Concat(a, b) = expr {
             return bump.alloc(Expr::Concat(
@@ -281,7 +281,7 @@ impl<'a> Expr<'a> {
                 }
             }};
         }
-        if let Expr::Var(i) = self {
+        if let Expr::Var(i, _) = self {
             return Ok(Some(args[*i].clone()));
         }
         if let Expr::Concat(a, b) = self {
@@ -430,8 +430,8 @@ impl OwnedExpr {
         match term {
             SyGuSTerm::Identifier(id) => {
                 let v = symbol_name(id);
-                if let Some((i, _)) = env.iter().enumerate().find(|(_, x)| x.0 == v) {
-                    Ok(Self::Var(i))
+                if let Some((i, (_, w))) = env.iter().enumerate().find(|(_, x)| x.0 == v) {
+                    Ok(Self::Var(i, *w as usize))
                 } else if let Some(value) = identifier_to_value(id) {
                     Ok(Self::Const(value?))
                 } else if let Some(fid) = deffun::ENV.lookup(v, 0) {
@@ -594,7 +594,7 @@ impl OwnedExpr {
                 }
             };
         }
-        if let OwnedExpr::Var(_) = self {
+        if let OwnedExpr::Var(_, _) = self {
             return 1;
         }
         if let OwnedExpr::Concat(a, b) = self {
@@ -651,7 +651,7 @@ impl OwnedExpr {
                 }
             };
         }
-        if let OwnedExpr::Var(i) = self {
+        if let OwnedExpr::Var(i, _) = self {
             return names
                 .get(*i)
                 .map(|name| (*name).to_string())
@@ -717,8 +717,8 @@ impl OwnedExpr {
 
 impl<'a> From<&Expr<'a>> for OwnedExpr {
     fn from(value: &Expr<'a>) -> Self {
-        if let Expr::Var(i) = value {
-            return OwnedExpr::Var(*i);
+        if let Expr::Var(i, w) = value {
+            return OwnedExpr::Var(*i, *w);
         }
         if let Expr::Concat(a, b) = value {
             return OwnedExpr::Concat(Box::new((*a).into()), Box::new((*b).into()));
@@ -764,7 +764,7 @@ impl<'a> From<&Expr<'a>> for OwnedExpr {
 
 #[macro_export]
 macro_rules! oexpr {
-    ($v:literal) => { OwnedExpr::Var($v as usize) };
+    ($v:literal) => { OwnedExpr::Var($v as usize, 64) };
     ([$v:expr]) => { OwnedExpr::Const(crate::enumerate::value::Value::from_u64($v as u64, 64)) };
     ($v:ident) => { $v.clone() };
     (! $a1:tt) => { OwnedExpr::Not(Box::new(oexpr![$a1])) };
@@ -799,7 +799,7 @@ impl OwnedExpr {
             OwnedExpr::Fop0Dyn(id) => deffun::ENV.ret_bits(*id, 0),
             OwnedExpr::FopDyn(id, args) => deffun::ENV.ret_bits(*id, args.len()),
             OwnedExpr::Const(v) => v.bits(),
-            OwnedExpr::Var(_) => 64,
+            OwnedExpr::Var(_, width) => *width,
             OwnedExpr::Let(_, _, body) => body.width(),
             OwnedExpr::Not(a) | OwnedExpr::Neg(a) | OwnedExpr::Fop1Dyn(_, a) => a.width(),
             OwnedExpr::Add(a, _)
@@ -868,7 +868,7 @@ impl OwnedExpr {
                 }
             };
         }
-        if let OwnedExpr::Var(a) = self {
+        if let OwnedExpr::Var(a, _) = self {
             return Ok(args[*a].clone());
         }
         if let OwnedExpr::Concat(a, b) = self {
@@ -923,7 +923,7 @@ impl OwnedExpr {
                 }
             };
         }
-        if let OwnedExpr::Var(a) = self {
+        if let OwnedExpr::Var(a, _) = self {
             return args[*a];
         }
         if let OwnedExpr::Concat(a, b) = self {

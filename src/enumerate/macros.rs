@@ -68,7 +68,7 @@ macro_rules! enum_expr {
             Ite(&'a Expr<'a>, &'a Expr<'a>, &'a Expr<'a>),
             #[debug(fmt = "v{:?}", _0)]
             #[display(fmt = "v{:?}", _0)]
-            Var(usize),
+            Var(usize, usize),
             #[debug(fmt = "{:?}", _0)]
             #[display(fmt = "{}", _0)]
             Const(crate::enumerate::value::Value),
@@ -152,7 +152,7 @@ macro_rules! enum_ownedexpr {
             Let(String, Box<OwnedExpr>, Box<OwnedExpr>),
             #[debug(fmt = "v{:?}", _0)]
             #[display(fmt = "v{:?}", _0)]
-            Var(usize),
+            Var(usize, usize),
             #[debug(fmt = "{:?}", _0)]
             #[display(fmt = "{}", _0)]
             Const(crate::enumerate::value::Value),

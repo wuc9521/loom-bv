@@ -82,6 +82,7 @@ fn solve_file_inner(
     file: &SyGuSFile,
     config_path: Option<&str>,
     description: String,
+    min: bool,
 ) -> SolverResult<(SynthProblem<'static>, OwnedExpr)> {
     let view = ProblemView::from_file(file);
     deffun::ENV.clear();
@@ -96,7 +97,7 @@ fn solve_file_inner(
             problem.bits,
             file.cmds.len()
         );
-        let result = exact::search_nullary(&problem, &spec)?;
+        let result = exact::search_nullary(&problem, &spec, min)?;
         return Ok((problem, result));
     }
     if pbecstr.len() > 0 {
@@ -202,6 +203,7 @@ pub fn solve_sygus_file(
     description: &str,
     _axioms: Option<&[sygus_parser::ast::SyGuSTerm]>,
     verbose: u8,
+    min: bool,
 ) -> SolverResult<String> {
     log::set_log_level(verbose + 2);
     unsafe {
@@ -214,7 +216,7 @@ pub fn solve_sygus_file(
     let handle = thread::Builder::new()
         .name("main-worker".to_string())
         .stack_size(MAIN_STACK_SIZE)
-        .spawn(move || solve_file_inner(&file, config_path.as_deref(), description))
+        .spawn(move || solve_file_inner(&file, config_path.as_deref(), description, min))
         .map_err(|e| format!("failed to spawn main worker: {e}"))?;
     let result = handle
         .join()
@@ -228,9 +230,10 @@ pub fn solve_sygus_cmds(
     description: &str,
     axioms: Option<&[sygus_parser::ast::SyGuSTerm]>,
     verbose: u8,
+    min: bool,
 ) -> SolverResult<String> {
     let file = SyGuSFile { cmds: cmds.to_vec() };
-    match solve_sygus_file(&file, config_path, description, axioms, verbose) {
+    match solve_sygus_file(&file, config_path, description, axioms, verbose, min) {
         Ok(result) => Ok(result),
         Err(err) => {
             let message = err.to_string();
@@ -243,7 +246,7 @@ pub fn solve_sygus_cmds(
             let normalized = String::from_utf8(normalized)?;
             let reparsed =
                 SyGuSFile::from_str(&normalized).map_err(|e| format!("failed to normalize SyGuS commands: {e}"))?;
-            solve_sygus_file(&reparsed, config_path, description, axioms, verbose)
+            solve_sygus_file(&reparsed, config_path, description, axioms, verbose, min)
         }
     }
 }

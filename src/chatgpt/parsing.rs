@@ -102,7 +102,7 @@ impl<'a> Env<'a> {
             }
             "identifier" => {
                 if !self.maps.contains_key(self.text(&node)) {
-                    let v = OwnedExpr::Var(self.var);
+                    let v = OwnedExpr::Var(self.var, 64);
                     self.var += 1;
                     self.maps.insert(self.text(&node), v.clone());
                     Ok(v)
@@ -166,7 +166,7 @@ impl<'a> Env<'a> {
                 Ok(OwnedExpr::Const(Value::from_u64(value, 64)))
             }
             "arrow_bracket" => {
-                let v = OwnedExpr::Var(self.var);
+                let v = OwnedExpr::Var(self.var, 64);
                 self.var += 1;
                 Ok(v)
             }

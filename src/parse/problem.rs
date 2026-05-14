@@ -116,6 +116,14 @@ impl<'i> SynthProblem<'i> {
             .map(|x| x.0)
     }
 
+    pub fn arg_widths(&self) -> Vec<usize> {
+        let aliases = super::sorts::SortAliases::default();
+        self.arg_decls
+            .iter()
+            .map(|sv| aliases.parse_sort_width(&sv.sort).unwrap_or(1))
+            .collect()
+    }
+
     pub fn format_solution(&self, expr: &OwnedExpr) -> String {
         let args = self
             .arg_decls

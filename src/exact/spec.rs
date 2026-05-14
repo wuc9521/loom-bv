@@ -41,20 +41,25 @@ pub fn parse_bit_constraints(
 
     for cmd in &file.cmds {
         if let SyGuSCmd::Constraint(c) = cmd {
-            if let Some((bit, value)) = parse_bit_constraint(c, target_name) {
-                if bit >= target_bits {
-                    continue;
-                }
-                found_any = true;
-                if let Some(old) = known_bits.get(&bit).copied() {
-                    if old != value {
-                        return Err(new_custom_error_span(
-                            format!("Conflicting constraints on bit {} of {}", bit, target_name),
-                            empty_span(),
-                        ));
+            if let Some(bits) = collect_bit_constraints(c, target_name) {
+                for (bit, value) in bits {
+                    if bit >= target_bits {
+                        continue;
                     }
-                } else {
-                    known_bits.insert(bit, value);
+                    found_any = true;
+                    if let Some(old) = known_bits.get(&bit).copied() {
+                        if old != value {
+                            return Err(new_custom_error_span(
+                                format!(
+                                    "Conflicting constraints on bit {} of {}",
+                                    bit, target_name
+                                ),
+                                empty_span(),
+                            ));
+                        }
+                    } else {
+                        known_bits.insert(bit, value);
+                    }
                 }
             } else if constraint_mentions_target(c, target_name) {
                 validate_structural_shape(c, target_name)?;
@@ -251,19 +256,41 @@ fn extract_on_phi_range(term: &SyGuSTerm, target: &str) -> Option<(usize, usize)
     }
 }
 
-fn parse_bit_constraint(term: &SyGuSTerm, target_name: &str) -> Option<(usize, bool)> {
+/// Try to extract a conjunction of bit constraints from a term.
+/// Handles `and`, `not`, and atomic `(= (extract i i) target) literal` patterns.
+/// Returns None if the term cannot be fully decomposed into bit constraints.
+fn collect_bit_constraints(
+    term: &SyGuSTerm,
+    target_name: &str,
+) -> Option<Vec<(usize, bool)>> {
     if let SyGuSTerm::Annotated(inner, _) = term {
-        return parse_bit_constraint(inner, target_name);
+        return collect_bit_constraints(inner, target_name);
     }
-    let SyGuSTerm::Application(eq, args) = term else {
+    let SyGuSTerm::Application(op, args) = term else {
         return None;
     };
-    if eq.get_name() != "=" || args.len() != 2 {
-        return None;
+    match op.get_name() {
+        "not" if args.len() == 1 => {
+            let inner = collect_bit_constraints(&args[0], target_name)?;
+            Some(inner.into_iter().map(|(bit, val)| (bit, !val)).collect())
+        }
+        "and" => {
+            let mut result = Vec::new();
+            for arg in args {
+                result.extend(collect_bit_constraints(arg, target_name)?);
+            }
+            Some(result)
+        }
+        "=" if args.len() == 2 => {
+            let pair = extract_bit_of_target(&args[0], target_name)
+                .zip(bit_literal(&args[1]))
+                .or_else(|| {
+                    extract_bit_of_target(&args[1], target_name).zip(bit_literal(&args[0]))
+                })?;
+            Some(vec![pair])
+        }
+        _ => None,
     }
-    extract_bit_of_target(&args[0], target_name)
-        .zip(bit_literal(&args[1]))
-        .or_else(|| extract_bit_of_target(&args[1], target_name).zip(bit_literal(&args[0])))
 }
 
 fn bit_literal(term: &SyGuSTerm) -> Option<bool> {

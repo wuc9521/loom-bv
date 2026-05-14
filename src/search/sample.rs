@@ -84,7 +84,9 @@ impl SampleConfig {
             .state(args.clone(), &out, &bump, self.partial_solution);
         if problem.cfg.len() == 1 {
             let config = Config::from_problem(problem, self.partial_solution)?;
-            let mut algo = algo::Algo::new(config, args, out.clone(), self.dag_size, &bump);
+            let arg_widths = problem.arg_widths();
+            let mut algo =
+                algo::Algo::new(config, args, arg_widths, out.clone(), self.dag_size, &bump);
             let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
             let result = !filter.solved;
             info!(

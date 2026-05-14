@@ -21,6 +21,7 @@ pub struct Algo<'a, const N: usize> {
     exprs: Vec<Vec<(&'a Expr<'a>, Bv<N>)>>,
     pub map: HashMap<Bv<N>, Option<&'a Expr<'a>>>,
     args: Vec<Bv<N>>,
+    arg_widths: Vec<usize>,
     dag_size: bool,
     bump: &'a Bump,
     counter2: usize,
@@ -54,6 +55,7 @@ impl<'a, const N: usize> Algo<'a, N> {
     pub fn new(
         config: Config<N>,
         args: Vec<Bv<N>>,
+        arg_widths: Vec<usize>,
         output: Bv<N>,
         dag_size: bool,
         bump: &'a Bump,
@@ -66,6 +68,7 @@ impl<'a, const N: usize> Algo<'a, N> {
             map,
             dag_size,
             args,
+            arg_widths,
             bump,
             counter2: 0,
         }
@@ -225,7 +228,7 @@ impl<'a, const N: usize> Algo<'a, N> {
                             let l = if *rule == Rule::LShr { 1 } else if *rule == Rule::Shl { 2 } else { 3 };
                             if size > l {
                                 for (e2, v2) in self.exprs[1].iter() {
-                                    if let Expr::Var(_) | Expr::Const(_) = e2 {
+                                    if let Expr::Var(_, _) | Expr::Const(_) = e2 {
                                         for (e1, v1) in self.exprs[size - l].iter() {
                                             let v = $v(*v1, *v2);
                                             insert!(bump.alloc($e(e1, e2)), v);
@@ -266,7 +269,7 @@ impl<'a, const N: usize> Algo<'a, N> {
                             let l = if *rule == Rule::LShr { 1 } else if *rule == Rule::Shl { 2 } else { 3 };
                             if size > l {
                                 for (e2, v2) in self.exprs[1].iter() {
-                                    if let Expr::Var(_) | Expr::Const(_) = e2 {
+                                    if let Expr::Var(_, _) | Expr::Const(_) = e2 {
                                         for (e1, v1) in self.exprs[size - l].iter() {
                                             if std::ptr::eq(*e1, *e2) {
                                                 continue;
@@ -341,7 +344,8 @@ impl<'a, const N: usize> Algo<'a, N> {
                     (var, $id:expr) => {
                         if size == 1 {
                             let v = self.args[*$id];
-                            insert!(bump.alloc(Expr::Var(*$id)), v);
+                            let w = self.arg_widths[*$id];
+                            insert!(bump.alloc(Expr::Var(*$id, w)), v);
                         }
                     };
                     (chatgpt, $e:expr, $v:expr) => {

@@ -2,7 +2,7 @@
 #![feature(map_try_insert)]
 #![feature(int_roundings)]
 
-use clap::Parser;
+use clap::{builder::BoolishValueParser, Parser};
 use std::{env, fs, io::Read};
 
 #[cfg(feature = "dhat-heap")]
@@ -17,6 +17,17 @@ struct Cli {
     path: String,
     #[arg(short, long)]
     config: Option<String>,
+
+    /// Enable exact-nullary relevance (bit minimization); use --min=false to disable.
+    #[arg(
+        long = "min",
+        default_value_t = true,
+        default_missing_value = "true",
+        num_args = 0..=1,
+        require_equals = true,
+        value_parser = BoolishValueParser::new()
+    )]
+    min: bool,
 }
 
 pub fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -58,6 +69,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         &description,
         None,
         args.verbose,
+        args.min,
     )?;
     println!("{output}");
     Ok(())

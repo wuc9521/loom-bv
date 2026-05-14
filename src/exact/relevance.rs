@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 
 use crate::{
     enumerate::{expr::OwnedExpr, grammar::TemplateExpr},
+    info,
     parse::deffun,
 };
 
@@ -214,6 +215,9 @@ pub fn compute_relevant_bits_for_spec(
         .iter()
         .zip(nt_bits.iter())
         .any(|(rel, bits)| rel.len() < *bits);
+    if !reduced_any {
+        info!("relevance: all bits relevant, no reduction");
+    }
     reduced_any.then_some(relevant_bits)
 }
 
@@ -316,7 +320,7 @@ fn compute_expr_dep_bit(
 ) -> Option<BitDep> {
     match expr {
         OwnedExpr::Const(value) => (bit < value.bits()).then(|| BitDep::empty(arg_bits)),
-        OwnedExpr::Var(idx) => {
+        OwnedExpr::Var(idx, _) => {
             let bits = *arg_bits.get(*idx)?;
             (bit < bits).then(|| BitDep::single_slot(arg_bits, *idx, bit))
         }
@@ -420,16 +424,22 @@ fn collapse_bound_slot(
     scope_bits: &[usize],
     cache: &mut DepCache,
 ) -> Option<BitDep> {
-    if dep.per_arg.len() != slot_idx + 1 {
+    if dep.per_arg.len() < slot_idx + 1 {
         return None;
     }
     let mut combined = BitDep::empty(scope_bits);
     for (arg_idx, bits) in dep.per_arg.iter().enumerate() {
         if arg_idx < slot_idx {
             combined.per_arg[arg_idx].union_inplace(bits);
-        } else {
+        } else if arg_idx == slot_idx {
             for bit in bits.iter_ones() {
                 combined.union_inplace(&compute_expr_dep_bit(value, scope_bits, bit, cache)?);
+            }
+        } else {
+            // Extra slots beyond the one being collapsed — pass through
+            // This can happen when Var indices don't perfectly align with let-binding order
+            if arg_idx < scope_bits.len() {
+                combined.per_arg[arg_idx].union_inplace(bits);
             }
         }
     }
