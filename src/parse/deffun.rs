@@ -36,29 +36,30 @@ pub struct DefineFun {
 }
 
 #[derive(Clone, Debug)]
-enum DefineFunPlan {
+pub(crate) enum DefineFunPlan {
     Generic {
         root: usize,
         slot_count: usize,
+        slot_bits: Vec<usize>,
         instrs: Vec<PlanInstr>,
     },
     BitCircuit(BitCircuitPlan),
 }
 
 #[derive(Clone, Debug)]
-struct BitCircuitPlan {
-    bindings: Vec<BoolBinding>,
-    output_bits: Vec<BoolAtom>,
-    ret_bits: usize,
+pub(crate) struct BitCircuitPlan {
+    pub(crate) bindings: Vec<BoolBinding>,
+    pub(crate) output_bits: Vec<BoolAtom>,
+    pub(crate) ret_bits: usize,
 }
 
 #[derive(Clone, Debug)]
-struct BoolBinding {
-    expr: BoolNode,
+pub(crate) struct BoolBinding {
+    pub(crate) expr: BoolNode,
 }
 
 #[derive(Clone, Debug)]
-enum BoolNode {
+pub(crate) enum BoolNode {
     Atom(BoolAtom),
     Not(BoolAtom),
     And(BoolAtom, BoolAtom),
@@ -68,14 +69,14 @@ enum BoolNode {
 }
 
 #[derive(Clone, Debug)]
-enum BoolAtom {
+pub(crate) enum BoolAtom {
     Const(bool),
     InputBit { arg: usize, bit: usize },
     Temp(usize),
 }
 
 #[derive(Clone, Debug)]
-enum PlanInstr {
+pub(crate) enum PlanInstr {
     Const(Value),
     Concat { lhs: usize, rhs: usize },
     Extract { src: usize, hi: u64, lo: u64 },
@@ -107,6 +108,7 @@ impl DefineFunPlan {
             DefineFunPlan::Generic {
                 root,
                 slot_count,
+                slot_bits: _,
                 instrs,
             } => {
                 let mut slots = Vec::with_capacity(*slot_count);
@@ -198,48 +200,94 @@ impl BitCircuitPlan {
     fn eval(&self, args: &[Value]) -> Result<Value, DivideByZero> {
         let mut temps = Vec::with_capacity(self.bindings.len());
         for binding in &self.bindings {
-            let value = eval_bool_node(&binding.expr, args, &temps);
+            let value = binding.expr.eval(args, &temps);
             temps.push(value);
         }
         let mut words = vec![0u64; self.ret_bits.div_ceil(64)];
         for (bit_idx, atom) in self.output_bits.iter().enumerate() {
-            if eval_bool_atom(atom, args, &temps) {
+            if atom.eval(args, &temps) {
                 words[bit_idx / 64] |= 1u64 << (bit_idx % 64);
             }
         }
         Ok(value_from_words(words, self.ret_bits))
     }
-
 }
 
-fn eval_bool_node(node: &BoolNode, args: &[Value], temps: &[bool]) -> bool {
-    match node {
-        BoolNode::Atom(atom) => eval_bool_atom(atom, args, temps),
-        BoolNode::Not(atom) => !eval_bool_atom(atom, args, temps),
-        BoolNode::And(lhs, rhs) => {
-            eval_bool_atom(lhs, args, temps) & eval_bool_atom(rhs, args, temps)
-        }
-        BoolNode::Or(lhs, rhs) => {
-            eval_bool_atom(lhs, args, temps) | eval_bool_atom(rhs, args, temps)
-        }
-        BoolNode::Xor(lhs, rhs) => {
-            eval_bool_atom(lhs, args, temps) ^ eval_bool_atom(rhs, args, temps)
-        }
-        BoolNode::Ite(cond, then_atom, else_atom) => {
-            if eval_bool_atom(cond, args, temps) {
-                eval_bool_atom(else_atom, args, temps)
-            } else {
-                eval_bool_atom(then_atom, args, temps)
+impl BoolNode {
+    fn eval(&self, args: &[Value], temps: &[bool]) -> bool {
+        match self {
+            BoolNode::Atom(atom) => atom.eval(args, temps),
+            BoolNode::Not(atom) => !atom.eval(args, temps),
+            BoolNode::And(lhs, rhs) => lhs.eval(args, temps) & rhs.eval(args, temps),
+            BoolNode::Or(lhs, rhs) => lhs.eval(args, temps) | rhs.eval(args, temps),
+            BoolNode::Xor(lhs, rhs) => lhs.eval(args, temps) ^ rhs.eval(args, temps),
+            BoolNode::Ite(cond, then_atom, else_atom) => {
+                if cond.eval(args, temps) {
+                    else_atom.eval(args, temps)
+                } else {
+                    then_atom.eval(args, temps)
+                }
             }
         }
     }
 }
 
-fn eval_bool_atom(atom: &BoolAtom, args: &[Value], temps: &[bool]) -> bool {
-    match atom {
-        BoolAtom::Const(value) => *value,
-        BoolAtom::InputBit { arg, bit } => args[*arg].bit(*bit),
-        BoolAtom::Temp(idx) => temps[*idx],
+impl BoolAtom {
+    fn eval(&self, args: &[Value], temps: &[bool]) -> bool {
+        match self {
+            BoolAtom::Const(value) => *value,
+            BoolAtom::InputBit { arg, bit } => args[*arg].bit(*bit),
+            BoolAtom::Temp(idx) => temps[*idx],
+        }
+    }
+
+    fn compile(expr: &OwnedExpr, nargs: usize) -> Option<Self> {
+        match expr {
+            OwnedExpr::Const(value) if value.bits() == 1 => Some(Self::Const(!value.is_zero())),
+            OwnedExpr::Var(idx, _) if *idx < nargs => None,
+            OwnedExpr::Var(idx, _) => Some(Self::Temp(idx.checked_sub(nargs)?)),
+            OwnedExpr::Extract(src, hi, lo) if hi == lo => match src.as_ref() {
+                OwnedExpr::Var(idx, _) if *idx < nargs => Some(Self::InputBit {
+                    arg: *idx,
+                    bit: *lo as usize,
+                }),
+                OwnedExpr::Var(idx, _) => Some(Self::Temp(idx.checked_sub(nargs)?)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+impl BoolNode {
+    fn compile(expr: &OwnedExpr, nargs: usize) -> Option<Self> {
+        match expr {
+            OwnedExpr::Const(value) if value.bits() == 1 => {
+                Some(Self::Atom(BoolAtom::Const(!value.is_zero())))
+            }
+            OwnedExpr::Var(_, _) | OwnedExpr::Extract(_, _, _) => {
+                Some(Self::Atom(BoolAtom::compile(expr, nargs)?))
+            }
+            OwnedExpr::Not(inner) => Some(Self::Not(BoolAtom::compile(inner, nargs)?)),
+            OwnedExpr::And(lhs, rhs) => Some(Self::And(
+                BoolAtom::compile(lhs, nargs)?,
+                BoolAtom::compile(rhs, nargs)?,
+            )),
+            OwnedExpr::Or(lhs, rhs) => Some(Self::Or(
+                BoolAtom::compile(lhs, nargs)?,
+                BoolAtom::compile(rhs, nargs)?,
+            )),
+            OwnedExpr::Xor(lhs, rhs) => Some(Self::Xor(
+                BoolAtom::compile(lhs, nargs)?,
+                BoolAtom::compile(rhs, nargs)?,
+            )),
+            OwnedExpr::Ite(cond, then_expr, else_expr) => Some(Self::Ite(
+                BoolAtom::compile(cond, nargs)?,
+                BoolAtom::compile(then_expr, nargs)?,
+                BoolAtom::compile(else_expr, nargs)?,
+            )),
+            _ => None,
+        }
     }
 }
 
@@ -253,53 +301,6 @@ fn value_from_words(words: Vec<u64>, bits: usize) -> Value {
             raw |= num_bigint::BigUint::from(word.1.to_owned());
         }
         Value::from_biguint(raw, bits)
-    }
-}
-
-fn compile_bool_atom(expr: &OwnedExpr, nargs: usize) -> Option<BoolAtom> {
-    match expr {
-        OwnedExpr::Const(value) if value.bits() == 1 => Some(BoolAtom::Const(!value.is_zero())),
-        OwnedExpr::Var(idx, _) if *idx < nargs => None,
-        OwnedExpr::Var(idx, _) => Some(BoolAtom::Temp(idx.checked_sub(nargs)?)),
-        OwnedExpr::Extract(src, hi, lo) if hi == lo => match src.as_ref() {
-            OwnedExpr::Var(idx, _) if *idx < nargs => Some(BoolAtom::InputBit {
-                arg: *idx,
-                bit: *lo as usize,
-            }),
-            OwnedExpr::Var(idx, _) => Some(BoolAtom::Temp(idx.checked_sub(nargs)?)),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn compile_bool_node(expr: &OwnedExpr, nargs: usize) -> Option<BoolNode> {
-    match expr {
-        OwnedExpr::Const(value) if value.bits() == 1 => {
-            Some(BoolNode::Atom(BoolAtom::Const(!value.is_zero())))
-        }
-        OwnedExpr::Var(_, _) | OwnedExpr::Extract(_, _, _) => {
-            Some(BoolNode::Atom(compile_bool_atom(expr, nargs)?))
-        }
-        OwnedExpr::Not(inner) => Some(BoolNode::Not(compile_bool_atom(inner, nargs)?)),
-        OwnedExpr::And(lhs, rhs) => Some(BoolNode::And(
-            compile_bool_atom(lhs, nargs)?,
-            compile_bool_atom(rhs, nargs)?,
-        )),
-        OwnedExpr::Or(lhs, rhs) => Some(BoolNode::Or(
-            compile_bool_atom(lhs, nargs)?,
-            compile_bool_atom(rhs, nargs)?,
-        )),
-        OwnedExpr::Xor(lhs, rhs) => Some(BoolNode::Xor(
-            compile_bool_atom(lhs, nargs)?,
-            compile_bool_atom(rhs, nargs)?,
-        )),
-        OwnedExpr::Ite(cond, then_expr, else_expr) => Some(BoolNode::Ite(
-            compile_bool_atom(cond, nargs)?,
-            compile_bool_atom(then_expr, nargs)?,
-            compile_bool_atom(else_expr, nargs)?,
-        )),
-        _ => None,
     }
 }
 
@@ -326,7 +327,7 @@ fn try_compile_bit_circuit(expr: &OwnedExpr, nargs: usize, ret_bits: usize) -> O
         if value.width() != 1 {
             return None;
         }
-        let node = compile_bool_node(value, nargs)?;
+        let node = BoolNode::compile(value, nargs)?;
         bindings.push(BoolBinding { expr: node });
         current = body;
     }
@@ -339,7 +340,7 @@ fn try_compile_bit_circuit(expr: &OwnedExpr, nargs: usize, ret_bits: usize) -> O
     }
     let output_bits = raw_bits
         .into_iter()
-        .map(|bit| compile_bool_atom(bit, nargs))
+        .map(|bit| BoolAtom::compile(bit, nargs))
         .collect::<Option<Vec<_>>>()?;
     Some(BitCircuitPlan {
         bindings,
@@ -348,7 +349,8 @@ fn try_compile_bit_circuit(expr: &OwnedExpr, nargs: usize, ret_bits: usize) -> O
     })
 }
 
-fn compile_plan(expr: &OwnedExpr, nargs: usize) -> DefineFunPlan {
+fn compile_plan(expr: &OwnedExpr, arg_bits: &[usize]) -> DefineFunPlan {
+    let nargs = arg_bits.len();
     let ret_bits = expr.width();
     if let Some(plan) = try_compile_bit_circuit(expr, nargs, ret_bits) {
         return DefineFunPlan::BitCircuit(plan);
@@ -357,139 +359,197 @@ fn compile_plan(expr: &OwnedExpr, nargs: usize) -> DefineFunPlan {
         expr: &OwnedExpr,
         env_slots: &mut Vec<usize>,
         next_slot: &mut usize,
+        slot_bits: &mut Vec<usize>,
         instrs: &mut Vec<PlanInstr>,
     ) -> usize {
-        let push = |instr: PlanInstr, next_slot: &mut usize, instrs: &mut Vec<PlanInstr>| {
+        let push = |
+            instr: PlanInstr,
+            width: usize,
+            next_slot: &mut usize,
+            slot_bits: &mut Vec<usize>,
+            instrs: &mut Vec<PlanInstr>,
+        | {
             let slot = *next_slot;
             *next_slot += 1;
+            slot_bits.push(width);
             instrs.push(instr);
             slot
         };
         match expr {
             OwnedExpr::Var(idx, _) => env_slots[*idx],
-            OwnedExpr::Const(value) => push(PlanInstr::Const(value.clone()), next_slot, instrs),
+            OwnedExpr::Const(value) => push(
+                PlanInstr::Const(value.clone()),
+                value.bits(),
+                next_slot,
+                slot_bits,
+                instrs,
+            ),
             OwnedExpr::Concat(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::Concat { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(
+                    PlanInstr::Concat { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::Extract(src, hi, lo) => {
-                let src = compile_expr(src, env_slots, next_slot, instrs);
-                push(PlanInstr::Extract { src, hi: *hi, lo: *lo }, next_slot, instrs)
+                let src = compile_expr(src, env_slots, next_slot, slot_bits, instrs);
+                push(
+                    PlanInstr::Extract { src, hi: *hi, lo: *lo },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::Not(src) => {
-                let src = compile_expr(src, env_slots, next_slot, instrs);
-                push(PlanInstr::Not { src }, next_slot, instrs)
+                let src = compile_expr(src, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::Not { src }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::Neg(src) => {
-                let src = compile_expr(src, env_slots, next_slot, instrs);
-                push(PlanInstr::Neg { src }, next_slot, instrs)
+                let src = compile_expr(src, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::Neg { src }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::Add(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::Add { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::Add { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::Xor(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::Xor { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::Xor { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::And(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::And { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::And { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::Or(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::Or { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::Or { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::Mul(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::Mul { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::Mul { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::Sub(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::Sub { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::Sub { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::LShr(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::LShr { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::LShr { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::AShr(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::AShr { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::AShr { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::Shl(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::Shl { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::Shl { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::UDiv(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::UDiv { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::UDiv { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::URem(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::URem { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::URem { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::SDiv(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::SDiv { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::SDiv { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::SRem(lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::SRem { lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::SRem { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
             }
             OwnedExpr::Ite(cond, then_expr, else_expr) => {
-                let cond = compile_expr(cond, env_slots, next_slot, instrs);
-                let then_slot = compile_expr(then_expr, env_slots, next_slot, instrs);
-                let else_slot = compile_expr(else_expr, env_slots, next_slot, instrs);
-                push(PlanInstr::Ite { cond, then_slot, else_slot }, next_slot, instrs)
+                let cond = compile_expr(cond, env_slots, next_slot, slot_bits, instrs);
+                let then_slot = compile_expr(then_expr, env_slots, next_slot, slot_bits, instrs);
+                let else_slot = compile_expr(else_expr, env_slots, next_slot, slot_bits, instrs);
+                push(
+                    PlanInstr::Ite { cond, then_slot, else_slot },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::Let(_, value, body) => {
-                let value_slot = compile_expr(value, env_slots, next_slot, instrs);
+                let value_slot = compile_expr(value, env_slots, next_slot, slot_bits, instrs);
                 env_slots.push(value_slot);
-                let body_slot = compile_expr(body, env_slots, next_slot, instrs);
+                let body_slot = compile_expr(body, env_slots, next_slot, slot_bits, instrs);
                 env_slots.pop();
                 body_slot
             }
-            OwnedExpr::Fop0Dyn(fid) => push(PlanInstr::Fop0Dyn { fid: *fid }, next_slot, instrs),
+            OwnedExpr::Fop0Dyn(fid) => push(
+                PlanInstr::Fop0Dyn { fid: *fid },
+                expr.width(),
+                next_slot,
+                slot_bits,
+                instrs,
+            ),
             OwnedExpr::Fop1Dyn(fid, arg) => {
-                let arg = compile_expr(arg, env_slots, next_slot, instrs);
-                push(PlanInstr::Fop1Dyn { fid: *fid, arg }, next_slot, instrs)
+                let arg = compile_expr(arg, env_slots, next_slot, slot_bits, instrs);
+                push(
+                    PlanInstr::Fop1Dyn { fid: *fid, arg },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::Fop2Dyn(fid, lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, instrs);
-                push(PlanInstr::Fop2Dyn { fid: *fid, lhs, rhs }, next_slot, instrs)
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(
+                    PlanInstr::Fop2Dyn { fid: *fid, lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::FopDyn(fid, args) => {
                 let args = args
                     .iter()
-                    .map(|arg| compile_expr(arg, env_slots, next_slot, instrs))
+                    .map(|arg| compile_expr(arg, env_slots, next_slot, slot_bits, instrs))
                     .collect();
-                push(PlanInstr::FopDyn { fid: *fid, args }, next_slot, instrs)
+                push(
+                    PlanInstr::FopDyn { fid: *fid, args },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
         }
     }
 
     let mut instrs = Vec::new();
     let mut env_slots = (0..nargs).collect::<Vec<_>>();
+    let mut slot_bits = arg_bits.to_vec();
     let mut next_slot = nargs;
-    let root = compile_expr(expr, &mut env_slots, &mut next_slot, &mut instrs);
+    let root = compile_expr(expr, &mut env_slots, &mut next_slot, &mut slot_bits, &mut instrs);
     DefineFunPlan::Generic {
         root,
         slot_count: next_slot,
+        slot_bits,
         instrs,
     }
 }
@@ -544,7 +604,8 @@ impl Environ {
             if self.inner().len() <= args.len() {
                 self.inner().resize_with(args.len() + 1, Vec::new);
             }
-            let plan = compile_plan(&expr, args.len());
+            let arg_bits = args.iter().map(|(_, bits)| *bits as usize).collect::<Vec<_>>();
+            let plan = compile_plan(&expr, &arg_bits);
             info!(
                 "DefineFun: {} {} -> {}",
                 name,
@@ -554,7 +615,7 @@ impl Environ {
             self.inner()[args.len()].push(DefineFun {
                 name,
                 args: args.iter().map(|(name, _)| *name).collect(),
-                arg_bits: args.iter().map(|(_, bits)| *bits as usize).collect(),
+                arg_bits,
                 ret_bits,
                 plan,
                 expr,
@@ -574,7 +635,7 @@ impl Environ {
     pub fn apply(&self, id: usize, nargs: usize) -> &OwnedExpr {
         &self.inner()[nargs][id].expr
     }
-    fn plan(&self, id: usize, nargs: usize) -> &DefineFunPlan {
+    pub(crate) fn plan(&self, id: usize, nargs: usize) -> &DefineFunPlan {
         &self.inner()[nargs][id].plan
     }
     pub fn ret_bits(&self, id: usize, nargs: usize) -> usize {

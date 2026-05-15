@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use crate::{
     enumerate::{expr::OwnedExpr, grammar::TemplateExpr},
     info,
-    parse::deffun,
+    parse::deffun::{self, BitCircuitPlan, BoolAtom, BoolNode, DefineFunPlan, PlanInstr},
 };
 
 use super::{ExactGrammar, ExactRule, NullarySpec};
@@ -12,8 +12,13 @@ use super::{ExactGrammar, ExactRule, NullarySpec};
 #[derive(Clone, Copy)]
 struct WorkItem {
     nt_idx: usize,
-    bit: usize,
     rule_idx: usize,
+}
+
+impl WorkItem {
+    fn new(nt_idx: usize, rule_idx: usize) -> Self {
+        Self { nt_idx, rule_idx }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -48,21 +53,40 @@ impl BitSet {
         }
     }
 
-    fn insert_new(&mut self, bit: usize) -> bool {
-        let word = bit / 64;
-        if word >= self.words.len() {
-            return false;
-        }
-        let mask = 1u64 << (bit % 64);
-        let old = self.words[word];
-        self.words[word] |= mask;
-        old & mask == 0
-    }
-
     fn union_inplace(&mut self, other: &Self) {
         for (lhs, rhs) in self.words.iter_mut().zip(other.words.iter()) {
             *lhs |= *rhs;
         }
+    }
+
+    fn union_delta(&mut self, other: &Self) -> Self {
+        let mut delta = Self {
+            words: vec![0; self.words.len()],
+        };
+        for ((lhs, rhs), delta_word) in self
+            .words
+            .iter_mut()
+            .zip(other.words.iter())
+            .zip(delta.words.iter_mut())
+        {
+            let new_bits = *rhs & !*lhs;
+            *lhs |= *rhs;
+            *delta_word = new_bits;
+        }
+        delta
+    }
+
+    fn is_empty(&self) -> bool {
+        self.words.iter().all(|word| *word == 0)
+    }
+
+    fn take(&mut self) -> Self {
+        std::mem::replace(
+            self,
+            Self {
+                words: vec![0; self.words.len()],
+            },
+        )
     }
 
     fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
@@ -120,6 +144,8 @@ pub struct LazyRelevance<'a> {
     dep_cache: DepCache,
     template_dep_cache: TemplateDepCache,
     relevant: Vec<BitSet>,
+    pending: Vec<Vec<BitSet>>,
+    queued: Vec<Vec<bool>>,
     worklist: VecDeque<WorkItem>,
     complete: bool,
 }
@@ -151,14 +177,32 @@ impl<'a> LazyRelevance<'a> {
             .iter()
             .map(|bits| BitSet::new(*bits))
             .collect::<Vec<_>>();
+        let mut pending = grammar
+            .nts
+            .iter()
+            .enumerate()
+            .map(|(nt_idx, (_, rules))| {
+                rules.iter()
+                    .map(|_| BitSet::new(nt_bits[nt_idx]))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut queued = grammar
+            .nts
+            .iter()
+            .map(|(_, rules)| vec![false; rules.len()])
+            .collect::<Vec<_>>();
         let mut worklist = VecDeque::new();
+        let mut start_demand = BitSet::new(*bits);
         for bit in known_bits.keys() {
-            if relevant[grammar.start].insert_new(*bit) {
-                worklist.push_back(WorkItem {
-                    nt_idx: grammar.start,
-                    bit: *bit,
-                    rule_idx: 0,
-                });
+            relevant[grammar.start].insert(*bit);
+            start_demand.insert(*bit);
+        }
+        if !start_demand.is_empty() {
+            for rule_idx in 0..grammar.nts[grammar.start].1.len() {
+                pending[grammar.start][rule_idx].union_inplace(&start_demand);
+                queued[grammar.start][rule_idx] = true;
+                worklist.push_back(WorkItem::new(grammar.start, rule_idx));
             }
         }
 
@@ -168,6 +212,8 @@ impl<'a> LazyRelevance<'a> {
             dep_cache: DepCache::default(),
             template_dep_cache: TemplateDepCache::default(),
             relevant,
+            pending,
+            queued,
             worklist,
             complete: false,
         })
@@ -182,95 +228,18 @@ impl<'a> LazyRelevance<'a> {
                 self.complete = true;
                 return true;
             };
+            self.queued[item.nt_idx][item.rule_idx] = false;
+            let demanded = self.pending[item.nt_idx][item.rule_idx].take();
+            if demanded.is_empty() {
+                continue;
+            }
             let nt_rules = &self.grammar.nts[item.nt_idx].1;
             let Some(rule) = nt_rules.get(item.rule_idx) else {
                 continue;
             };
-            match rule {
-                ExactRule::Alias(child_nt) => {
-                    if self.relevant[*child_nt].insert_new(item.bit) {
-                        self.worklist.push_back(WorkItem {
-                            nt_idx: *child_nt,
-                            bit: item.bit,
-                            rule_idx: 0,
-                        });
-                    }
-                }
-                ExactRule::Leaf(_) => {}
-                ExactRule::Unary { fid, child_nt } => {
-                    let Some(dep) = get_deffun_dep_bit(*fid, 1, item.bit, &mut self.dep_cache)
-                    else {
-                        self.complete = true;
-                        return true;
-                    };
-                    propagate_dep(&dep, 0, *child_nt, &mut self.relevant, &mut self.worklist);
-                }
-                ExactRule::Binary {
-                    fid,
-                    lhs_nt,
-                    rhs_nt,
-                } => {
-                    let Some(dep) = get_deffun_dep_bit(*fid, 2, item.bit, &mut self.dep_cache)
-                    else {
-                        self.complete = true;
-                        return true;
-                    };
-                    propagate_dep(&dep, 0, *lhs_nt, &mut self.relevant, &mut self.worklist);
-                    propagate_dep(&dep, 1, *rhs_nt, &mut self.relevant, &mut self.worklist);
-                }
-                ExactRule::Nary { fid, child_nts } => {
-                    let Some(dep) =
-                        get_deffun_dep_bit(*fid, child_nts.len(), item.bit, &mut self.dep_cache)
-                    else {
-                        self.complete = true;
-                        return true;
-                    };
-                    for (arg_idx, child_nt) in child_nts.iter().enumerate() {
-                        propagate_dep(
-                            &dep,
-                            arg_idx,
-                            *child_nt,
-                            &mut self.relevant,
-                            &mut self.worklist,
-                        );
-                    }
-                }
-                ExactRule::GenericTemplate {
-                    template,
-                    child_nts,
-                    ..
-                } => {
-                    let slot_bits = child_nts
-                        .iter()
-                        .map(|child_nt| self.nt_bits[*child_nt])
-                        .collect::<Vec<_>>();
-                    let dep = compute_template_dep_bit(
-                        template,
-                        &slot_bits,
-                        item.bit,
-                        &mut self.dep_cache,
-                        &mut self.template_dep_cache,
-                    );
-                    let Some(dep) = dep else {
-                        self.complete = true;
-                        return true;
-                    };
-                    for (arg_idx, child_nt) in child_nts.iter().enumerate() {
-                        propagate_dep(
-                            &dep,
-                            arg_idx,
-                            *child_nt,
-                            &mut self.relevant,
-                            &mut self.worklist,
-                        );
-                    }
-                }
-            }
-            if item.rule_idx + 1 < nt_rules.len() {
-                self.worklist.push_back(WorkItem {
-                    rule_idx: item.rule_idx + 1,
-                    ..item
-                });
+            if !self.process_rule_item(item, &demanded, rule) {
+                self.complete = true;
+                return true;
             }
         }
         false
@@ -291,6 +260,91 @@ impl<'a> LazyRelevance<'a> {
         }
         reduced_any.then_some(relevant_bits)
     }
+
+    fn process_rule_item(&mut self, _item: WorkItem, demanded: &BitSet, rule: &ExactRule) -> bool {
+        match rule {
+            ExactRule::Alias(child_nt) => {
+                self.propagate_bits(*child_nt, demanded);
+                true
+            }
+            ExactRule::Leaf(_) => true,
+            ExactRule::Unary { fid, child_nt } => {
+                let Some(dep) = get_deffun_dep_bits(*fid, 1, demanded, &mut self.dep_cache) else {
+                    return false;
+                };
+                self.propagate_dep(&dep, 0, *child_nt);
+                true
+            }
+            ExactRule::Binary { fid, lhs_nt, rhs_nt } => {
+                let Some(dep) = get_deffun_dep_bits(*fid, 2, demanded, &mut self.dep_cache)
+                else {
+                    return false;
+                };
+                self.propagate_dep(&dep, 0, *lhs_nt);
+                self.propagate_dep(&dep, 1, *rhs_nt);
+                true
+            }
+            ExactRule::Nary { fid, child_nts } => {
+                let Some(dep) =
+                    get_deffun_dep_bits(*fid, child_nts.len(), demanded, &mut self.dep_cache)
+                else {
+                    return false;
+                };
+                for (arg_idx, child_nt) in child_nts.iter().enumerate() {
+                    self.propagate_dep(&dep, arg_idx, *child_nt);
+                }
+                true
+            }
+            ExactRule::GenericTemplate {
+                template,
+                child_nts,
+                ..
+            } => {
+                let slot_bits = child_nts
+                    .iter()
+                    .map(|child_nt| self.nt_bits[*child_nt])
+                    .collect::<Vec<_>>();
+                let mut dep = BitDep::empty(&slot_bits);
+                for bit in demanded.iter_ones() {
+                    let Some(bit_dep) = compute_template_dep_bit(
+                        template,
+                        &slot_bits,
+                        bit,
+                        &mut self.dep_cache,
+                        &mut self.template_dep_cache,
+                    ) else {
+                        return false;
+                    };
+                    dep.union_inplace(&bit_dep);
+                }
+                for (arg_idx, child_nt) in child_nts.iter().enumerate() {
+                    self.propagate_dep(&dep, arg_idx, *child_nt);
+                }
+                true
+            }
+        }
+    }
+
+    fn propagate_bits(&mut self, nt_idx: usize, bits: &BitSet) {
+        let delta = self.relevant[nt_idx].union_delta(bits);
+        if delta.is_empty() {
+            return;
+        }
+        for rule_idx in 0..self.pending[nt_idx].len() {
+            self.pending[nt_idx][rule_idx].union_inplace(&delta);
+            if !self.queued[nt_idx][rule_idx] {
+                self.queued[nt_idx][rule_idx] = true;
+                self.worklist.push_back(WorkItem::new(nt_idx, rule_idx));
+            }
+        }
+    }
+
+    fn propagate_dep(&mut self, dep: &BitDep, arg_idx: usize, child_nt: usize) {
+        let Some(bits) = dep.per_arg.get(arg_idx) else {
+            return;
+        };
+        self.propagate_bits(child_nt, bits);
+    }
 }
 
 pub fn compute_relevant_bits_for_spec(
@@ -300,28 +354,6 @@ pub fn compute_relevant_bits_for_spec(
     let mut lazy = LazyRelevance::new(grammar, spec)?;
     while !lazy.advance(1024) {}
     lazy.finish()
-}
-
-fn propagate_dep(
-    dep: &BitDep,
-    arg_idx: usize,
-    child_nt: usize,
-    relevant: &mut [BitSet],
-    worklist: &mut VecDeque<WorkItem>,
-) {
-    let Some(bits) = dep.per_arg.get(arg_idx) else {
-        return;
-    };
-    let child_relevant = &mut relevant[child_nt];
-    for child_bit in bits.iter_ones() {
-        if child_relevant.insert_new(child_bit) {
-            worklist.push_back(WorkItem {
-                nt_idx: child_nt,
-                bit: child_bit,
-                rule_idx: 0,
-            });
-        }
-    }
 }
 
 pub fn nt_output_bits(rules: &[ExactRule]) -> usize {
@@ -350,9 +382,412 @@ fn get_deffun_dep_bit(
         return dep.clone();
     }
     let arg_bits = deffun::ENV.arg_bits(fid, nargs).to_vec();
-    let dep = compute_expr_dep_bit(deffun::ENV.apply(fid, nargs), &arg_bits, bit, cache);
+    let dep = match deffun::ENV.plan(fid, nargs) {
+        DefineFunPlan::BitCircuit(plan) => compute_bit_circuit_dep_bit(plan, &arg_bits, bit),
+        DefineFunPlan::Generic {
+            root,
+            slot_bits,
+            instrs,
+            ..
+        } => compute_generic_dep_bit(*root, slot_bits, instrs, &arg_bits, bit, cache),
+    };
     cache.insert((fid, nargs, bit), dep.clone());
     dep
+}
+
+fn get_deffun_dep_bits(
+    fid: usize,
+    nargs: usize,
+    demanded: &BitSet,
+    cache: &mut DepCache,
+) -> Option<BitDep> {
+    let arg_bits = deffun::ENV.arg_bits(fid, nargs).to_vec();
+    match deffun::ENV.plan(fid, nargs) {
+        DefineFunPlan::BitCircuit(plan) => Some(compute_bit_circuit_dep_bits(plan, &arg_bits, demanded)),
+        DefineFunPlan::Generic {
+            root,
+            slot_bits,
+            instrs,
+            ..
+        } => compute_generic_dep_bits(*root, slot_bits, instrs, &arg_bits, demanded, cache),
+    }
+}
+
+fn compute_bit_circuit_dep_bit(
+    plan: &BitCircuitPlan,
+    arg_bits: &[usize],
+    bit: usize,
+) -> Option<BitDep> {
+    if bit >= plan.ret_bits {
+        return None;
+    }
+
+    fn atom_dep(
+        atom: &BoolAtom,
+        bindings: &[crate::parse::deffun::BoolBinding],
+        arg_bits: &[usize],
+        memo: &mut FxHashMap<usize, BitDep>,
+    ) -> Option<BitDep> {
+        match atom {
+            BoolAtom::Const(_) => Some(BitDep::empty(arg_bits)),
+            BoolAtom::InputBit { arg, bit } => {
+                let width = *arg_bits.get(*arg)?;
+                (*bit < width).then(|| BitDep::single_slot(arg_bits, *arg, *bit))
+            }
+            BoolAtom::Temp(idx) => {
+                if let Some(dep) = memo.get(idx) {
+                    return Some(dep.clone());
+                }
+                let binding = bindings.get(*idx)?;
+                let dep = match &binding.expr {
+                    BoolNode::Atom(atom) | BoolNode::Not(atom) => {
+                        atom_dep(atom, bindings, arg_bits, memo)?
+                    }
+                    BoolNode::And(lhs, rhs) | BoolNode::Or(lhs, rhs) | BoolNode::Xor(lhs, rhs) => {
+                        let mut dep = atom_dep(lhs, bindings, arg_bits, memo)?;
+                        dep.union_inplace(&atom_dep(rhs, bindings, arg_bits, memo)?);
+                        dep
+                    }
+                    BoolNode::Ite(cond, then_atom, else_atom) => {
+                        let mut dep = atom_dep(cond, bindings, arg_bits, memo)?;
+                        dep.union_inplace(&atom_dep(then_atom, bindings, arg_bits, memo)?);
+                        dep.union_inplace(&atom_dep(else_atom, bindings, arg_bits, memo)?);
+                        dep
+                    }
+                };
+                memo.insert(*idx, dep.clone());
+                Some(dep)
+            }
+        }
+    }
+
+    let mut memo = FxHashMap::default();
+    atom_dep(&plan.output_bits[bit], &plan.bindings, arg_bits, &mut memo)
+}
+
+fn compute_bit_circuit_dep_bits(
+    plan: &BitCircuitPlan,
+    arg_bits: &[usize],
+    demanded: &BitSet,
+) -> BitDep {
+    fn visit_atom(
+        atom: &BoolAtom,
+        bindings: &[crate::parse::deffun::BoolBinding],
+        seen: &mut [bool],
+        out: &mut BitDep,
+    ) {
+        match atom {
+            BoolAtom::Const(_) => {}
+            BoolAtom::InputBit { arg, bit } => out.per_arg[*arg].insert(*bit),
+            BoolAtom::Temp(idx) => {
+                if std::mem::replace(&mut seen[*idx], true) {
+                    return;
+                }
+                match &bindings[*idx].expr {
+                    BoolNode::Atom(atom) | BoolNode::Not(atom) => visit_atom(atom, bindings, seen, out),
+                    BoolNode::And(lhs, rhs) | BoolNode::Or(lhs, rhs) | BoolNode::Xor(lhs, rhs) => {
+                        visit_atom(lhs, bindings, seen, out);
+                        visit_atom(rhs, bindings, seen, out);
+                    }
+                    BoolNode::Ite(cond, then_atom, else_atom) => {
+                        visit_atom(cond, bindings, seen, out);
+                        visit_atom(then_atom, bindings, seen, out);
+                        visit_atom(else_atom, bindings, seen, out);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = BitDep::empty(arg_bits);
+    let mut seen = vec![false; plan.bindings.len()];
+    for bit in demanded.iter_ones() {
+        if bit < plan.ret_bits {
+            visit_atom(&plan.output_bits[bit], &plan.bindings, &mut seen, &mut out);
+        }
+    }
+    out
+}
+
+fn compute_generic_dep_bit(
+    root: usize,
+    slot_bits: &[usize],
+    instrs: &[PlanInstr],
+    arg_bits: &[usize],
+    bit: usize,
+    cache: &mut DepCache,
+) -> Option<BitDep> {
+    fn slot_dep(
+        slot: usize,
+        bit: usize,
+        slot_bits: &[usize],
+        instrs: &[PlanInstr],
+        arg_bits: &[usize],
+        cache: &mut DepCache,
+        memo: &mut FxHashMap<(usize, usize), Option<BitDep>>,
+    ) -> Option<BitDep> {
+        if let Some(dep) = memo.get(&(slot, bit)) {
+            return dep.clone();
+        }
+        let width = *slot_bits.get(slot)?;
+        if bit >= width {
+            memo.insert((slot, bit), None);
+            return None;
+        }
+        let dep = if slot < arg_bits.len() {
+            Some(BitDep::single_slot(arg_bits, slot, bit))
+        } else {
+            let instr = instrs.get(slot.checked_sub(arg_bits.len())?)?;
+            match instr {
+                PlanInstr::Const(_) => Some(BitDep::empty(arg_bits)),
+                PlanInstr::Concat { lhs, rhs } => {
+                    let rhs_bits = *slot_bits.get(*rhs)?;
+                    if bit < rhs_bits {
+                        slot_dep(*rhs, bit, slot_bits, instrs, arg_bits, cache, memo)
+                    } else {
+                        slot_dep(
+                            *lhs,
+                            bit - rhs_bits,
+                            slot_bits,
+                            instrs,
+                            arg_bits,
+                            cache,
+                            memo,
+                        )
+                    }
+                }
+                PlanInstr::Extract { src, hi, lo } => {
+                    let extract_width = (*hi - *lo + 1) as usize;
+                    if bit >= extract_width {
+                        None
+                    } else {
+                        slot_dep(
+                            *src,
+                            *lo as usize + bit,
+                            slot_bits,
+                            instrs,
+                            arg_bits,
+                            cache,
+                            memo,
+                        )
+                    }
+                }
+                PlanInstr::Not { src } => {
+                    slot_dep(*src, bit, slot_bits, instrs, arg_bits, cache, memo)
+                }
+                PlanInstr::And { lhs, rhs }
+                | PlanInstr::Or { lhs, rhs }
+                | PlanInstr::Xor { lhs, rhs } => {
+                    let mut dep = slot_dep(*lhs, bit, slot_bits, instrs, arg_bits, cache, memo)?;
+                    dep.union_inplace(&slot_dep(
+                        *rhs, bit, slot_bits, instrs, arg_bits, cache, memo,
+                    )?);
+                    Some(dep)
+                }
+                PlanInstr::Ite {
+                    cond,
+                    then_slot,
+                    else_slot,
+                } => {
+                    let mut dep = slot_dep(*cond, 0, slot_bits, instrs, arg_bits, cache, memo)?;
+                    dep.union_inplace(&slot_dep(
+                        *then_slot, bit, slot_bits, instrs, arg_bits, cache, memo,
+                    )?);
+                    dep.union_inplace(&slot_dep(
+                        *else_slot, bit, slot_bits, instrs, arg_bits, cache, memo,
+                    )?);
+                    Some(dep)
+                }
+                PlanInstr::Fop0Dyn { fid } => get_deffun_dep_bit(*fid, 0, bit, cache),
+                PlanInstr::Fop1Dyn { fid, arg } => {
+                    let outer = get_deffun_dep_bit(*fid, 1, bit, cache)?;
+                    let mut combined = BitDep::empty(arg_bits);
+                    for inner_bit in outer.per_arg[0].iter_ones() {
+                        combined.union_inplace(&slot_dep(
+                            *arg, inner_bit, slot_bits, instrs, arg_bits, cache, memo,
+                        )?);
+                    }
+                    Some(combined)
+                }
+                PlanInstr::Fop2Dyn { fid, lhs, rhs } => {
+                    let outer = get_deffun_dep_bit(*fid, 2, bit, cache)?;
+                    let mut combined = BitDep::empty(arg_bits);
+                    for inner_bit in outer.per_arg[0].iter_ones() {
+                        combined.union_inplace(&slot_dep(
+                            *lhs, inner_bit, slot_bits, instrs, arg_bits, cache, memo,
+                        )?);
+                    }
+                    for inner_bit in outer.per_arg[1].iter_ones() {
+                        combined.union_inplace(&slot_dep(
+                            *rhs, inner_bit, slot_bits, instrs, arg_bits, cache, memo,
+                        )?);
+                    }
+                    Some(combined)
+                }
+                PlanInstr::FopDyn { fid, args } => {
+                    let outer = get_deffun_dep_bit(*fid, args.len(), bit, cache)?;
+                    let mut combined = BitDep::empty(arg_bits);
+                    for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
+                        let arg_slot = *args.get(arg_idx)?;
+                        for inner_bit in bits.iter_ones() {
+                            combined.union_inplace(&slot_dep(
+                                arg_slot, inner_bit, slot_bits, instrs, arg_bits, cache, memo,
+                            )?);
+                        }
+                    }
+                    Some(combined)
+                }
+                PlanInstr::Neg { .. }
+                | PlanInstr::Add { .. }
+                | PlanInstr::Mul { .. }
+                | PlanInstr::Sub { .. }
+                | PlanInstr::LShr { .. }
+                | PlanInstr::AShr { .. }
+                | PlanInstr::Shl { .. }
+                | PlanInstr::UDiv { .. }
+                | PlanInstr::URem { .. }
+                | PlanInstr::SDiv { .. }
+                | PlanInstr::SRem { .. } => Some(BitDep::full(arg_bits)),
+            }
+        };
+        memo.insert((slot, bit), dep.clone());
+        dep
+    }
+
+    let mut memo = FxHashMap::default();
+    slot_dep(root, bit, slot_bits, instrs, arg_bits, cache, &mut memo)
+}
+
+fn compute_generic_dep_bits(
+    root: usize,
+    slot_bits: &[usize],
+    instrs: &[PlanInstr],
+    arg_bits: &[usize],
+    demanded: &BitSet,
+    cache: &mut DepCache,
+) -> Option<BitDep> {
+    fn enqueue_slot(
+        slot: usize,
+        bits: &BitSet,
+        demanded_by_slot: &mut [BitSet],
+        stack: &mut Vec<(usize, BitSet)>,
+    ) {
+        let delta = demanded_by_slot[slot].union_delta(bits);
+        if !delta.is_empty() {
+            stack.push((slot, delta));
+        }
+    }
+
+    let mut out = BitDep::empty(arg_bits);
+    let mut demanded_by_slot = slot_bits
+        .iter()
+        .map(|bits| BitSet::new(*bits))
+        .collect::<Vec<_>>();
+    let mut stack = Vec::<(usize, BitSet)>::new();
+    enqueue_slot(root, demanded, &mut demanded_by_slot, &mut stack);
+
+    while let Some((slot, delta)) = stack.pop() {
+        if slot < arg_bits.len() {
+            out.per_arg[slot].union_inplace(&delta);
+            continue;
+        }
+        let instr = instrs.get(slot.checked_sub(arg_bits.len())?)?;
+        match instr {
+            PlanInstr::Const(_) => {}
+            PlanInstr::Concat { lhs, rhs } => {
+                let rhs_width = slot_bits[*rhs];
+                let mut lhs_bits = BitSet::new(slot_bits[*lhs]);
+                let mut rhs_bits = BitSet::new(rhs_width);
+                for bit in delta.iter_ones() {
+                    if bit < rhs_width {
+                        rhs_bits.insert(bit);
+                    } else {
+                        lhs_bits.insert(bit - rhs_width);
+                    }
+                }
+                enqueue_slot(*lhs, &lhs_bits, &mut demanded_by_slot, &mut stack);
+                enqueue_slot(*rhs, &rhs_bits, &mut demanded_by_slot, &mut stack);
+            }
+            PlanInstr::Extract { src, lo, .. } => {
+                let mut src_bits = BitSet::new(slot_bits[*src]);
+                for bit in delta.iter_ones() {
+                    src_bits.insert(*lo as usize + bit);
+                }
+                enqueue_slot(*src, &src_bits, &mut demanded_by_slot, &mut stack);
+            }
+            PlanInstr::Not { src } => {
+                enqueue_slot(*src, &delta, &mut demanded_by_slot, &mut stack);
+            }
+            PlanInstr::And { lhs, rhs }
+            | PlanInstr::Or { lhs, rhs }
+            | PlanInstr::Xor { lhs, rhs } => {
+                enqueue_slot(*lhs, &delta, &mut demanded_by_slot, &mut stack);
+                enqueue_slot(*rhs, &delta, &mut demanded_by_slot, &mut stack);
+            }
+            PlanInstr::Ite {
+                cond,
+                then_slot,
+                else_slot,
+            } => {
+                let mut cond_bits = BitSet::new(slot_bits[*cond]);
+                cond_bits.insert(0);
+                enqueue_slot(*cond, &cond_bits, &mut demanded_by_slot, &mut stack);
+                enqueue_slot(*then_slot, &delta, &mut demanded_by_slot, &mut stack);
+                enqueue_slot(*else_slot, &delta, &mut demanded_by_slot, &mut stack);
+            }
+            PlanInstr::Fop0Dyn { fid } => {
+                let _ = get_deffun_dep_bits(*fid, 0, &delta, cache)?;
+            }
+            PlanInstr::Fop1Dyn { fid, arg } => {
+                let outer = get_deffun_dep_bits(*fid, 1, &delta, cache)?;
+                enqueue_slot(*arg, &outer.per_arg[0], &mut demanded_by_slot, &mut stack);
+            }
+            PlanInstr::Fop2Dyn { fid, lhs, rhs } => {
+                let outer = get_deffun_dep_bits(*fid, 2, &delta, cache)?;
+                enqueue_slot(*lhs, &outer.per_arg[0], &mut demanded_by_slot, &mut stack);
+                enqueue_slot(*rhs, &outer.per_arg[1], &mut demanded_by_slot, &mut stack);
+            }
+            PlanInstr::FopDyn { fid, args } => {
+                let outer = get_deffun_dep_bits(*fid, args.len(), &delta, cache)?;
+                for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
+                    enqueue_slot(args[arg_idx], bits, &mut demanded_by_slot, &mut stack);
+                }
+            }
+            PlanInstr::Neg { src } => {
+                enqueue_slot(
+                    *src,
+                    &BitSet::full(slot_bits[*src]),
+                    &mut demanded_by_slot,
+                    &mut stack,
+                );
+            }
+            PlanInstr::Add { lhs, rhs }
+            | PlanInstr::Mul { lhs, rhs }
+            | PlanInstr::Sub { lhs, rhs }
+            | PlanInstr::LShr { lhs, rhs }
+            | PlanInstr::AShr { lhs, rhs }
+            | PlanInstr::Shl { lhs, rhs }
+            | PlanInstr::UDiv { lhs, rhs }
+            | PlanInstr::URem { lhs, rhs }
+            | PlanInstr::SDiv { lhs, rhs }
+            | PlanInstr::SRem { lhs, rhs } => {
+                enqueue_slot(
+                    *lhs,
+                    &BitSet::full(slot_bits[*lhs]),
+                    &mut demanded_by_slot,
+                    &mut stack,
+                );
+                enqueue_slot(
+                    *rhs,
+                    &BitSet::full(slot_bits[*rhs]),
+                    &mut demanded_by_slot,
+                    &mut stack,
+                );
+            }
+        }
+    }
+
+    Some(out)
 }
 
 fn compute_template_dep_bit(
