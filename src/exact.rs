@@ -2,6 +2,7 @@ use std::collections::hash_map::Entry;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+pub mod multisynth;
 mod eval;
 mod grammar;
 mod relevance;

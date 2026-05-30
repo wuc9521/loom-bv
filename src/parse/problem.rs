@@ -59,7 +59,7 @@ impl<'i> SynthProblem<'i> {
     }
 
     pub fn parse_from_view(view: &ProblemView<'_>) -> Result<SynthProblem<'static>, Error> {
-        let synth = view.synth_fun.ok_or_else(|| {
+        let synth = view.synth_fun().ok_or_else(|| {
             new_custom_error_span(
                 "SynthProblem: Expecting a `synth-fun`.".into(),
                 Span::new("", 0, 0).unwrap(),

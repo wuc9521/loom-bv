@@ -84,10 +84,25 @@ fn solve_file_inner(
     description: String,
     min: bool,
     mitm: bool,
-) -> SolverResult<(SynthProblem<'static>, OwnedExpr)> {
+) -> SolverResult<String> {
     let view = ProblemView::from_file(file);
     deffun::ENV.clear();
     deffun::ENV.parse_from_view(&view)?;
+
+    // CYK pattern (two synth-funs + closure constraint): handle before
+    // SynthProblem construction, since SynthProblem assumes a single synth-fun.
+    if let Some(spec) = exact::multisynth::MultiSynthSpec::detect(&view) {
+        info!(
+            "Using exact multi-synth closure search (bits={}, labels={})",
+            spec.bits,
+            spec.labels.len()
+        );
+        const MULTISYNTH_MAX_G_SIZE: usize = 30;
+        let result = exact::multisynth::search(file, &spec, &deffun::ENV, MULTISYNTH_MAX_G_SIZE)?;
+        return result
+            .ok_or_else(|| "CYK: no solution within size bound".to_string().into());
+    }
+
     let mut problem = SynthProblem::parse_from_view(&view)?;
     problem.description = description;
     let pbecstr = PbeConstraint::parse_from_view(problem.name, problem.args.len(), &view)?;
@@ -99,7 +114,7 @@ fn solve_file_inner(
             file.cmds.len()
         );
         let result = exact::search_nullary(&problem, &spec, min, mitm)?;
-        return Ok((problem, result));
+        return Ok(problem.format_solution(&result));
     }
     if pbecstr.len() > 0 {
         let fig = Figment::new().merge(Serialized::defaults(SearchConfig::default_pbe()));
@@ -111,7 +126,7 @@ fn solve_file_inner(
         let mut config: SearchConfig = fig.extract()?;
         config.is_pbe = true;
         let result = config.search(&problem, &pbecstr, PbeConstraint::new(problem.args.len()))?;
-        Ok((problem, result))
+        Ok(problem.format_solution(&result))
     } else if let Some(refimpl) =
         RefImplConstraint::parse_from_view(&view, problem.name, problem.args.len())?
     {
@@ -184,11 +199,11 @@ fn solve_file_inner(
                 .recv()
                 .unwrap()
                 .map_err(|e| format!("cegis failed: {e}"))?;
-            return Ok((original_problem, a));
+            return Ok(original_problem.format_solution(&a));
         }
         let result = run_cegis_with_large_stack(config, problem, refimpl)
             .map_err(|e| format!("cegis failed: {e}"))?;
-        Ok((original_problem, result))
+        Ok(original_problem.format_solution(&result))
     } else {
         Err(format!(
             "Unsupported SyGuS benchmark shape for {}: expected PBE examples, a define-fun reference implementation, or a nullary bit-constraint task",
@@ -223,7 +238,7 @@ pub fn solve_sygus_file(
     let result = handle
         .join()
         .map_err(|_| "main worker panicked".to_string())??;
-    Ok(format!("(\n{}\n)", result.0.format_solution(&result.1)))
+    Ok(format!("(\n{}\n)", result))
 }
 
 pub fn solve_sygus_cmds(

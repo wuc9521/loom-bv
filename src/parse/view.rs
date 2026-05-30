@@ -21,7 +21,7 @@ pub struct SynthFunView<'a> {
 pub struct ProblemView<'a> {
     pub file: &'a SyGuSFile,
     pub sort_aliases: SortAliases,
-    pub synth_fun: Option<SynthFunView<'a>>,
+    pub synth_funs: Vec<SynthFunView<'a>>,
     pub define_funs: Vec<DefineFunView<'a>>,
     pub constraints: Vec<&'a SyGuSTerm>,
     pub axioms: Vec<&'a SyGuSTerm>,
@@ -30,7 +30,7 @@ pub struct ProblemView<'a> {
 impl<'a> ProblemView<'a> {
     pub fn from_file(file: &'a SyGuSFile) -> Self {
         let sort_aliases = SortAliases::from_file(file);
-        let mut synth_fun = None;
+        let mut synth_funs = Vec::new();
         let mut define_funs = Vec::new();
         let mut constraints = Vec::new();
         let mut axioms = Vec::new();
@@ -38,14 +38,12 @@ impl<'a> ProblemView<'a> {
         for cmd in &file.cmds {
             match cmd {
                 SyGuSCmd::SynthFun(name, args, ret, grammar) => {
-                    if synth_fun.is_none() {
-                        synth_fun = Some(SynthFunView {
-                            name,
-                            args,
-                            ret,
-                            grammar: grammar.as_ref(),
-                        });
-                    }
+                    synth_funs.push(SynthFunView {
+                        name,
+                        args,
+                        ret,
+                        grammar: grammar.as_ref(),
+                    });
                 }
                 SyGuSCmd::DefineFun(name, args, ret, body) => {
                     define_funs.push(DefineFunView {
@@ -64,11 +62,16 @@ impl<'a> ProblemView<'a> {
         Self {
             file,
             sort_aliases,
-            synth_fun,
+            synth_funs,
             define_funs,
             constraints,
             axioms,
         }
+    }
+
+    /// First synth-fun, for legacy single-synth-fun callers.
+    pub fn synth_fun(&self) -> Option<SynthFunView<'a>> {
+        self.synth_funs.first().copied()
     }
 
     pub fn define_fun(&self, name: &str, arity: usize) -> Option<DefineFunView<'a>> {

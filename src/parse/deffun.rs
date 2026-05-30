@@ -33,6 +33,14 @@ pub struct DefineFun {
     pub ret_bits: usize,
     pub expr: OwnedExpr,
     plan: DefineFunPlan,
+    /// Names of synth-funs (in SyGuS file order) that the body may reference.
+    /// SyGuS 2.1 §3.7 allows define-fun bodies to reference any signature
+    /// symbol except themselves; these synth-funs are appended to the Var
+    /// index space after `args`. Callers of `eval_defined` must pass
+    /// `args.len() + closure_args.len()` values: real args first, then the
+    /// current value of each closure synth-fun in this list's order.
+    pub closure_args: Vec<&'static str>,
+    pub closure_arg_bits: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -577,6 +585,24 @@ impl Environ {
     }
 
     pub fn parse_from_view(&self, view: &ProblemView<'_>) -> Result<(), Error> {
+        // SyGuS 2.1 §3.7: define-fun bodies may reference any signature
+        // symbol except themselves — including other synth-funs. We support
+        // references to closure-shaped synth-funs (those with a `(Constant T)`
+        // grammar, used as LFP placeholders by the encoder). They're appended
+        // to each define-fun's parsing env as additional Var slots after the
+        // real args; callers of `eval_defined` must supply the current value
+        // of each one.
+        let closure_args: Vec<(&'static str, u64)> = view
+            .synth_funs
+            .iter()
+            .filter(|sf| sf.grammar.is_some_and(is_constant_grammar))
+            .filter_map(|sf| {
+                let bits = view.sort_aliases.parse_sort_width(sf.ret)? as u64;
+                let name: &'static str = Box::leak(sf.name.to_string().into_boxed_str());
+                Some((name, bits))
+            })
+            .collect();
+
         for def in &view.define_funs {
             if def.name == "if0" || def.name == "im" {
                 continue;
@@ -600,12 +626,18 @@ impl Environ {
                     pest::Span::new("", 0, 0).unwrap(),
                 )
             })?;
-            let expr = OwnedExpr::from_term(def.body, args.as_slice())?;
+            let mut extended_env = args.clone();
+            extended_env.extend(closure_args.iter().copied());
+            let expr = OwnedExpr::from_term(def.body, extended_env.as_slice())?;
             if self.inner().len() <= args.len() {
                 self.inner().resize_with(args.len() + 1, Vec::new);
             }
             let arg_bits = args.iter().map(|(_, bits)| *bits as usize).collect::<Vec<_>>();
-            let plan = compile_plan(&expr, &arg_bits);
+            let extended_arg_bits = extended_env
+                .iter()
+                .map(|(_, bits)| *bits as usize)
+                .collect::<Vec<_>>();
+            let plan = compile_plan(&expr, &extended_arg_bits);
             info!(
                 "DefineFun: {} {} -> {}",
                 name,
@@ -619,6 +651,11 @@ impl Environ {
                 ret_bits,
                 plan,
                 expr,
+                closure_args: closure_args.iter().map(|(n, _)| *n).collect(),
+                closure_arg_bits: closure_args
+                    .iter()
+                    .map(|(_, bits)| *bits as usize)
+                    .collect(),
             });
         }
         Ok(())
@@ -647,6 +684,15 @@ impl Environ {
     pub fn name(&self, id: usize, nargs: usize) -> &'static str {
         &self.inner()[nargs][id].name
     }
+    /// Names of closure-shaped synth-funs that this define-fun's body may
+    /// reference (in SyGuS file order). Callers must append the current
+    /// value of each one to `args` when invoking `eval_defined`.
+    pub fn closure_args(&self, id: usize, nargs: usize) -> &[&'static str] {
+        &self.inner()[nargs][id].closure_args
+    }
+    pub fn closure_arg_bits(&self, id: usize, nargs: usize) -> &[usize] {
+        &self.inner()[nargs][id].closure_arg_bits
+    }
     pub fn eval_defined(
         &self,
         id: usize,
@@ -655,6 +701,16 @@ impl Environ {
     ) -> Result<Value, DivideByZero> {
         self.plan(id, nargs).eval(self, args)
     }
+}
+
+/// True iff the grammar is just `((<NT> <Sort> ((Constant <Sort>))))` — the
+/// LFP-placeholder shape used for closure synth-funs.
+fn is_constant_grammar(grammar: &sygus_parser::ast::GrammarDef) -> bool {
+    if grammar.grouped_rule_lists.len() != 1 {
+        return false;
+    }
+    let rules = &grammar.grouped_rule_lists[0].terms;
+    rules.len() == 1 && matches!(&rules[0], sygus_parser::ast::SyGuSGTerm::Constant(_))
 }
 
 unsafe impl Sync for Environ {}

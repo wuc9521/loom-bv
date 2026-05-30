@@ -148,6 +148,12 @@ pub struct LazyRelevance<'a> {
     queued: Vec<Vec<bool>>,
     worklist: VecDeque<WorkItem>,
     complete: bool,
+    /// If `Some(idx)`, the arg index of a "closure parameter" leaf: any Leaf
+    /// rule of shape `Var(idx, _)` propagates its demanded bits back to the
+    /// start NT's demand, modeling a closure constraint `param = g`. This is
+    /// how cyk-style synthesis with a `cfg.rhs.S` LFP placeholder is
+    /// captured for backward-relevance purposes.
+    closure_param: Option<usize>,
 }
 
 impl<'a> LazyRelevance<'a> {
@@ -216,7 +222,22 @@ impl<'a> LazyRelevance<'a> {
             queued,
             worklist,
             complete: false,
+            closure_param: None,
         })
+    }
+
+    /// Variant of [`Self::new`] that wires a "closure feedback" edge.  When
+    /// `closure_param` is set, processing a `Leaf(Var(closure_param, _))`
+    /// rule propagates its demanded bits back to the start NT, modeling the
+    /// closure constraint of cyk-style synthesis (`param = g`).
+    pub fn new_with_closure(
+        grammar: &'a ExactGrammar<'a>,
+        spec: &NullarySpec,
+        closure_param: usize,
+    ) -> Option<Self> {
+        let mut this = Self::new(grammar, spec)?;
+        this.closure_param = Some(closure_param);
+        Some(this)
     }
 
     pub fn advance(&mut self, budget: usize) -> bool {
@@ -267,7 +288,19 @@ impl<'a> LazyRelevance<'a> {
                 self.propagate_bits(*child_nt, demanded);
                 true
             }
-            ExactRule::Leaf(_) => true,
+            ExactRule::Leaf(expr) => {
+                if let Some(closure_idx) = self.closure_param {
+                    if let OwnedExpr::Var(i, _) = expr {
+                        if *i == closure_idx {
+                            // Closure feedback: bits demanded from the closure
+                            // parameter become bits demanded from g (the start NT).
+                            let start = self.grammar.start;
+                            self.propagate_bits(start, demanded);
+                        }
+                    }
+                }
+                true
+            }
             ExactRule::Unary { fid, child_nt } => {
                 let Some(dep) = get_deffun_dep_bits(*fid, 1, demanded, &mut self.dep_cache) else {
                     return false;

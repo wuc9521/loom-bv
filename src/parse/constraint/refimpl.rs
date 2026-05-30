@@ -86,8 +86,10 @@ impl RefImplConstraint {
         }
 
         let Some(target_decl) = view
-            .synth_fun
-            .filter(|synth| synth.name == target_name)
+            .synth_funs
+            .iter()
+            .copied()
+            .find(|synth| synth.name == target_name)
             .map(|synth| synth.args)
         else {
             return Ok(None);
