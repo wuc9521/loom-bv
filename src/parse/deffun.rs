@@ -56,14 +56,9 @@ pub(crate) enum DefineFunPlan {
 
 #[derive(Clone, Debug)]
 pub(crate) struct BitCircuitPlan {
-    pub(crate) bindings: Vec<BoolBinding>,
+    pub(crate) bindings: Vec<BoolNode>,
     pub(crate) output_bits: Vec<BoolAtom>,
     pub(crate) ret_bits: usize,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct BoolBinding {
-    pub(crate) expr: BoolNode,
 }
 
 #[derive(Clone, Debug)]
@@ -208,7 +203,7 @@ impl BitCircuitPlan {
     fn eval(&self, args: &[Value]) -> Result<Value, DivideByZero> {
         let mut temps = Vec::with_capacity(self.bindings.len());
         for binding in &self.bindings {
-            let value = binding.expr.eval(args, &temps);
+            let value = binding.eval(args, &temps);
             temps.push(value);
         }
         let mut words = vec![0u64; self.ret_bits.div_ceil(64)];
@@ -249,7 +244,7 @@ impl BoolAtom {
         }
     }
 
-    fn compile(expr: &OwnedExpr, nargs: usize) -> Option<Self> {
+    fn try_leaf(expr: &OwnedExpr, nargs: usize) -> Option<Self> {
         match expr {
             OwnedExpr::Const(value) if value.bits() == 1 => Some(Self::Const(!value.is_zero())),
             OwnedExpr::Var(idx, _) if *idx < nargs => None,
@@ -265,34 +260,46 @@ impl BoolAtom {
             _ => None,
         }
     }
+
+    fn compile(expr: &OwnedExpr, nargs: usize, bindings: &mut Vec<BoolNode>) -> Option<Self> {
+        if let Some(atom) = Self::try_leaf(expr, nargs) {
+            return Some(atom);
+        }
+        let node = BoolNode::compile(expr, nargs, bindings)?;
+        let idx = bindings.len();
+        bindings.push(node);
+        Some(BoolAtom::Temp(idx))
+    }
 }
 
 impl BoolNode {
-    fn compile(expr: &OwnedExpr, nargs: usize) -> Option<Self> {
+    fn compile(expr: &OwnedExpr, nargs: usize, bindings: &mut Vec<BoolNode>) -> Option<Self> {
         match expr {
             OwnedExpr::Const(value) if value.bits() == 1 => {
                 Some(Self::Atom(BoolAtom::Const(!value.is_zero())))
             }
             OwnedExpr::Var(_, _) | OwnedExpr::Extract(_, _, _) => {
-                Some(Self::Atom(BoolAtom::compile(expr, nargs)?))
+                Some(Self::Atom(BoolAtom::try_leaf(expr, nargs)?))
             }
-            OwnedExpr::Not(inner) => Some(Self::Not(BoolAtom::compile(inner, nargs)?)),
+            OwnedExpr::Not(inner) => {
+                Some(Self::Not(BoolAtom::compile(inner, nargs, bindings)?))
+            }
             OwnedExpr::And(lhs, rhs) => Some(Self::And(
-                BoolAtom::compile(lhs, nargs)?,
-                BoolAtom::compile(rhs, nargs)?,
+                BoolAtom::compile(lhs, nargs, bindings)?,
+                BoolAtom::compile(rhs, nargs, bindings)?,
             )),
             OwnedExpr::Or(lhs, rhs) => Some(Self::Or(
-                BoolAtom::compile(lhs, nargs)?,
-                BoolAtom::compile(rhs, nargs)?,
+                BoolAtom::compile(lhs, nargs, bindings)?,
+                BoolAtom::compile(rhs, nargs, bindings)?,
             )),
             OwnedExpr::Xor(lhs, rhs) => Some(Self::Xor(
-                BoolAtom::compile(lhs, nargs)?,
-                BoolAtom::compile(rhs, nargs)?,
+                BoolAtom::compile(lhs, nargs, bindings)?,
+                BoolAtom::compile(rhs, nargs, bindings)?,
             )),
             OwnedExpr::Ite(cond, then_expr, else_expr) => Some(Self::Ite(
-                BoolAtom::compile(cond, nargs)?,
-                BoolAtom::compile(then_expr, nargs)?,
-                BoolAtom::compile(else_expr, nargs)?,
+                BoolAtom::compile(cond, nargs, bindings)?,
+                BoolAtom::compile(then_expr, nargs, bindings)?,
+                BoolAtom::compile(else_expr, nargs, bindings)?,
             )),
             _ => None,
         }
@@ -335,8 +342,8 @@ fn try_compile_bit_circuit(expr: &OwnedExpr, nargs: usize, ret_bits: usize) -> O
         if value.width() != 1 {
             return None;
         }
-        let node = BoolNode::compile(value, nargs)?;
-        bindings.push(BoolBinding { expr: node });
+        let node = BoolNode::compile(value, nargs, &mut bindings)?;
+        bindings.push(node);
         current = body;
     }
     let mut raw_bits = Vec::new();
@@ -348,7 +355,7 @@ fn try_compile_bit_circuit(expr: &OwnedExpr, nargs: usize, ret_bits: usize) -> O
     }
     let output_bits = raw_bits
         .into_iter()
-        .map(|bit| BoolAtom::compile(bit, nargs))
+        .map(|bit| BoolAtom::compile(bit, nargs, &mut bindings))
         .collect::<Option<Vec<_>>>()?;
     Some(BitCircuitPlan {
         bindings,

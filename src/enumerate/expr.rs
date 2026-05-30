@@ -113,7 +113,7 @@ impl<'a> Expr<'a> {
             return Ok(value.extract(*hi, *lo));
         }
         if let Expr::Fop0Dyn(id) = self {
-            return deffun::ENV.apply(*id, 0).eval(&[]);
+            return deffun::ENV.eval_defined(*id, 0, &[]);
         }
         if let Expr::Const(a) = self {
             return Ok(a.clone());
@@ -122,12 +122,11 @@ impl<'a> Expr<'a> {
             return Ok(op::ite(a.eval(args)?, b.eval(args)?, c.eval(args)?));
         }
         if let Expr::Fop1Dyn(id, e1) = self {
-            return Ok(deffun::ENV.apply(*id, 1).eval(&[e1.eval(args)?])?);
+            return deffun::ENV.eval_defined(*id, 1, &[e1.eval(args)?]);
         }
         if let Expr::Fop2Dyn(id, e1, e2) = self {
             return deffun::ENV
-                .apply(*id, 2)
-                .eval(&[e1.eval(args)?, e2.eval(args)?]);
+                .eval_defined(*id, 2, &[e1.eval(args)?, e2.eval(args)?]);
         }
         all_ops!(arity nonzero);
         panic!("should not reach here. {:?}", self);
@@ -881,7 +880,7 @@ impl OwnedExpr {
             return Ok(value.extract(*hi, *lo));
         }
         if let OwnedExpr::Fop0Dyn(id) = self {
-            return deffun::ENV.apply(*id, 0).eval(&[]);
+            return deffun::ENV.eval_defined(*id, 0, &[]);
         }
         if let OwnedExpr::Const(a) = self {
             return Ok(a.clone());
@@ -894,18 +893,17 @@ impl OwnedExpr {
                 .iter()
                 .map(|expr| expr.eval(args))
                 .collect::<Result<Vec<_>, _>>()?;
-            return deffun::ENV.apply(*id, exprs.len()).eval(&values);
+            return deffun::ENV.eval_defined(*id, exprs.len(), &values);
         }
         if let OwnedExpr::Ite(e1, e2, e3) = self {
             return Ok(op::ite(e1.eval(args)?, e2.eval(args)?, e3.eval(args)?));
         }
         if let OwnedExpr::Fop1Dyn(id, e1) = self {
-            return Ok(deffun::ENV.apply(*id, 1).eval(&[e1.eval(args)?])?);
+            return deffun::ENV.eval_defined(*id, 1, &[e1.eval(args)?]);
         }
         if let OwnedExpr::Fop2Dyn(id, e1, e2) = self {
             return deffun::ENV
-                .apply(*id, 2)
-                .eval(&[e1.eval(args)?, e2.eval(args)?]);
+                .eval_defined(*id, 2, &[e1.eval(args)?, e2.eval(args)?]);
         }
         all_ops!(arity nonzero);
         panic!("should not reach here.");

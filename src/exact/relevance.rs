@@ -457,7 +457,7 @@ fn compute_bit_circuit_dep_bit(
 
     fn atom_dep(
         atom: &BoolAtom,
-        bindings: &[crate::parse::deffun::BoolBinding],
+        bindings: &[BoolNode],
         arg_bits: &[usize],
         memo: &mut FxHashMap<usize, BitDep>,
     ) -> Option<BitDep> {
@@ -472,7 +472,7 @@ fn compute_bit_circuit_dep_bit(
                     return Some(dep.clone());
                 }
                 let binding = bindings.get(*idx)?;
-                let dep = match &binding.expr {
+                let dep = match binding {
                     BoolNode::Atom(atom) | BoolNode::Not(atom) => {
                         atom_dep(atom, bindings, arg_bits, memo)?
                     }
@@ -505,7 +505,7 @@ fn compute_bit_circuit_dep_bits(
 ) -> BitDep {
     fn visit_atom(
         atom: &BoolAtom,
-        bindings: &[crate::parse::deffun::BoolBinding],
+        bindings: &[BoolNode],
         seen: &mut [bool],
         out: &mut BitDep,
     ) {
@@ -516,7 +516,7 @@ fn compute_bit_circuit_dep_bits(
                 if std::mem::replace(&mut seen[*idx], true) {
                     return;
                 }
-                match &bindings[*idx].expr {
+                match &bindings[*idx] {
                     BoolNode::Atom(atom) | BoolNode::Not(atom) => visit_atom(atom, bindings, seen, out),
                     BoolNode::And(lhs, rhs) | BoolNode::Or(lhs, rhs) | BoolNode::Xor(lhs, rhs) => {
                         visit_atom(lhs, bindings, seen, out);

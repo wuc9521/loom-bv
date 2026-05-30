@@ -240,9 +240,12 @@ pub fn search(
     }
     let mut seen_lfp: FxHashSet<Vec<u64>> = FxHashSet::default();
 
-    let enumerator = TermEnumerator::new(grammar, spec.rhs_s_name);
+    let enumerator = TermEnumerator::new(grammar);
+    let mut candidates_total = 0usize;
+    let mut candidates_converged = 0usize;
     for size in 1..=max_g_size {
         for term in enumerator.terms_of_size(size) {
+            candidates_total += 1;
             // For each candidate g_term, compute LFP of cfg.rhs.S.
             let mut rhs_s = Value::from_u64(0, spec.bits);
             let mut converged = false;
@@ -257,6 +260,7 @@ pub fn search(
             if !converged {
                 continue;
             }
+            candidates_converged += 1;
             // Dedup by projected LFP if relevance computation succeeded.
             if let Some(bits) = relevant_bits.as_ref() {
                 let key = rhs_s.project_bits(bits);
@@ -270,6 +274,10 @@ pub fn search(
                 .iter()
                 .all(|(bit, expected)| rhs_s.bit(*bit) == *expected);
             if ok {
+                info!(
+                    "multisynth: found solution at size={}, candidates_total={}, candidates_converged={}",
+                    size, candidates_total, candidates_converged
+                );
                 let solution = format_solution(file, spec, &term, &rhs_s);
                 return Ok(Some(solution));
             }
@@ -614,7 +622,7 @@ fn eval_term(
                 ));
             };
             let arg_vals = closure_arg_values(env, id, 0, rhs_s_value, rhs_s_name);
-            env.apply(id, 0).eval(&arg_vals).map_err(|_| {
+            env.eval_defined(id, 0, &arg_vals).map_err(|_| {
                 new_custom_error_span(format!("multisynth: divide-by-zero in {name}"), empty_span())
             })
         }
@@ -633,7 +641,7 @@ fn eval_term(
             // define-fun's body — which may reference them via Var slots
             // beyond the real arity — has all the bindings it needs.
             arg_vals.extend(closure_arg_values(env, id, args.len(), rhs_s_value, rhs_s_name));
-            env.apply(id, args.len()).eval(&arg_vals).map_err(|_| {
+            env.eval_defined(id, args.len(), &arg_vals).map_err(|_| {
                 new_custom_error_span(
                     format!("multisynth: divide-by-zero in {name}"),
                     empty_span(),
