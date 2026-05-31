@@ -154,6 +154,7 @@ pub struct LazyRelevance<'a> {
     /// how cyk-style synthesis with a `cfg.rhs.S` LFP placeholder is
     /// captured for backward-relevance purposes.
     closure_param: Option<usize>,
+    closure_relevant: Option<BitSet>,
 }
 
 impl<'a> LazyRelevance<'a> {
@@ -223,6 +224,7 @@ impl<'a> LazyRelevance<'a> {
             worklist,
             complete: false,
             closure_param: None,
+            closure_relevant: None,
         })
     }
 
@@ -237,6 +239,7 @@ impl<'a> LazyRelevance<'a> {
     ) -> Option<Self> {
         let mut this = Self::new(grammar, spec)?;
         this.closure_param = Some(closure_param);
+        this.closure_relevant = Some(BitSet::new(this.nt_bits[grammar.start]));
         Some(this)
     }
 
@@ -267,6 +270,10 @@ impl<'a> LazyRelevance<'a> {
     }
 
     pub fn finish(self) -> Option<Vec<Vec<usize>>> {
+        self.finish_with_closure().0
+    }
+
+    pub fn finish_with_closure(self) -> (Option<Vec<Vec<usize>>>, Option<Vec<usize>>) {
         let relevant_bits = self
             .relevant
             .into_iter()
@@ -279,7 +286,11 @@ impl<'a> LazyRelevance<'a> {
         if !reduced_any {
             info!("relevance: all bits relevant, no reduction");
         }
-        reduced_any.then_some(relevant_bits)
+        let closure_bits = self
+            .closure_relevant
+            .map(|bits| bits.iter_ones().collect::<Vec<_>>())
+            .filter(|bits| !bits.is_empty());
+        (reduced_any.then_some(relevant_bits), closure_bits)
     }
 
     fn process_rule_item(&mut self, _item: WorkItem, demanded: &BitSet, rule: &ExactRule) -> bool {
@@ -294,6 +305,9 @@ impl<'a> LazyRelevance<'a> {
                         if *i == closure_idx {
                             // Closure feedback: bits demanded from the closure
                             // parameter become bits demanded from g (the start NT).
+                            if let Some(closure_relevant) = &mut self.closure_relevant {
+                                closure_relevant.union_inplace(demanded);
+                            }
                             let start = self.grammar.start;
                             self.propagate_bits(start, demanded);
                         }

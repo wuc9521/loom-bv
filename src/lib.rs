@@ -103,6 +103,22 @@ fn solve_file_inner(
             .ok_or_else(|| "CYK: no solution within size bound".to_string().into());
     }
 
+    if let Some(spec) = exact::multisynth::SingleSynthSpec::detect(&view) {
+        info!(
+            "Using single-synth closure search for {} (bits={}, labels={})",
+            spec.synth.name,
+            spec.bits,
+            spec.labels.len()
+        );
+        let result = exact::multisynth::search_single(&spec, &deffun::ENV)?;
+        let Some(expr) = result else {
+            return Err("single-closure: no solution".to_string().into());
+        };
+        let mut problem = SynthProblem::parse_from_view(&view)?;
+        problem.description = description;
+        return Ok(problem.format_solution(&expr));
+    }
+
     let mut problem = SynthProblem::parse_from_view(&view)?;
     problem.description = description;
     let pbecstr = PbeConstraint::parse_from_view(problem.name, problem.args.len(), &view)?;

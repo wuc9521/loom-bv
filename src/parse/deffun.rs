@@ -1,7 +1,7 @@
 use std::cell::UnsafeCell;
 
 use derive_more::DebugCustom;
-use sygus_parser::ast::SyGuSFile;
+use sygus_parser::ast::{SyGuSFile, SyGuSTerm};
 
 use crate::{
     enumerate::{
@@ -13,6 +13,27 @@ use crate::{
 };
 
 use super::{new_custom_error_span, Error, ProblemView};
+
+fn collect_term_symbols(term: &SyGuSTerm, out: &mut Vec<String>) {
+    match term {
+        SyGuSTerm::Identifier(id) => out.push(id.get_name().to_string()),
+        SyGuSTerm::Application(id, args) => {
+            out.push(id.get_name().to_string());
+            for arg in args {
+                collect_term_symbols(arg, out);
+            }
+        }
+        SyGuSTerm::Annotated(inner, _) => collect_term_symbols(inner, out),
+        SyGuSTerm::Let(bindings, body) => {
+            for binding in bindings {
+                collect_term_symbols(&binding.term, out);
+            }
+            collect_term_symbols(body, out);
+        }
+        SyGuSTerm::Forall(_, body) | SyGuSTerm::Exists(_, body) => collect_term_symbols(body, out),
+        SyGuSTerm::Literal(_) => {}
+    }
+}
 
 fn summarize_expr(expr: &OwnedExpr, limit: usize) -> String {
     let rendered = expr.to_string();
@@ -592,17 +613,14 @@ impl Environ {
     }
 
     pub fn parse_from_view(&self, view: &ProblemView<'_>) -> Result<(), Error> {
-        // SyGuS 2.1 §3.7: define-fun bodies may reference any signature
-        // symbol except themselves — including other synth-funs. We support
-        // references to closure-shaped synth-funs (those with a `(Constant T)`
-        // grammar, used as LFP placeholders by the encoder). They're appended
-        // to each define-fun's parsing env as additional Var slots after the
-        // real args; callers of `eval_defined` must supply the current value
-        // of each one.
-        let closure_args: Vec<(&'static str, u64)> = view
+        // SyGuS 2.1 §3.7: define-fun bodies may reference synth-funs.
+        // We append referenced nullary synth-funs to the parsing env as
+        // closure slots after the real args; callers of `eval_defined` must
+        // supply the current value of each referenced synth-fun in this order.
+        let synth_candidates: Vec<(&'static str, u64)> = view
             .synth_funs
             .iter()
-            .filter(|sf| sf.grammar.is_some_and(is_constant_grammar))
+            .filter(|sf| sf.args.is_empty())
             .filter_map(|sf| {
                 let bits = view.sort_aliases.parse_sort_width(sf.ret)? as u64;
                 let name: &'static str = Box::leak(sf.name.to_string().into_boxed_str());
@@ -633,6 +651,13 @@ impl Environ {
                     pest::Span::new("", 0, 0).unwrap(),
                 )
             })?;
+            let mut symbols = Vec::new();
+            collect_term_symbols(def.body, &mut symbols);
+            let closure_args = synth_candidates
+                .iter()
+                .copied()
+                .filter(|(candidate, _)| *candidate != name && symbols.iter().any(|sym| sym == candidate))
+                .collect::<Vec<_>>();
             let mut extended_env = args.clone();
             extended_env.extend(closure_args.iter().copied());
             let expr = OwnedExpr::from_term(def.body, extended_env.as_slice())?;

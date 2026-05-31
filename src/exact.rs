@@ -105,22 +105,22 @@ pub fn search_nullary(
     search_nullary_multi_nt(&grammar, spec, min, mitm)
 }
 
-type NodeId = usize;
+pub(crate) type NodeId = usize;
 
-struct Node {
-    nt_idx: usize,
-    rule_idx: usize,
-    children: Vec<NodeId>,
+pub(crate) struct Node {
+    pub(crate) nt_idx: usize,
+    pub(crate) rule_idx: usize,
+    pub(crate) children: Vec<NodeId>,
 }
 
 #[derive(Clone)]
-struct ExactGrammar<'a> {
-    nts: Vec<(&'a str, Vec<ExactRule>)>,
-    start: usize,
+pub(crate) struct ExactGrammar<'a> {
+    pub(crate) nts: Vec<(&'a str, Vec<ExactRule>)>,
+    pub(crate) start: usize,
 }
 
 #[derive(Clone)]
-enum ExactRule {
+pub(crate) enum ExactRule {
     Alias(usize),
     Leaf(OwnedExpr),
     Unary {
@@ -144,8 +144,8 @@ enum ExactRule {
 }
 
 #[derive(Default)]
-struct ExactEvalCache {
-    leaves: FxHashMap<OwnedExpr, Option<Value>>,
+pub(crate) struct ExactEvalCache {
+    pub(crate) leaves: FxHashMap<OwnedExpr, Option<Value>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -779,13 +779,17 @@ fn project_value(value: &Value, bits: &[usize]) -> ProjectionKey {
     ProjectionKey(value.project_bits(bits))
 }
 
-fn intern_node(nodes: &mut Vec<Node>, node: Node) -> NodeId {
+pub(crate) fn intern_node(nodes: &mut Vec<Node>, node: Node) -> NodeId {
     let id = nodes.len();
     nodes.push(node);
     id
 }
 
-fn materialize_node(id: NodeId, grammar: &ExactGrammar<'_>, nodes: &[Node]) -> Option<OwnedExpr> {
+pub(crate) fn materialize_node(
+    id: NodeId,
+    grammar: &ExactGrammar<'_>,
+    nodes: &[Node],
+) -> Option<OwnedExpr> {
     let node = &nodes[id];
     match &grammar.nts[node.nt_idx].1[node.rule_idx] {
         ExactRule::Alias(_) => materialize_node(node.children[0], grammar, nodes),
