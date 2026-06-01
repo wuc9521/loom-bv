@@ -737,13 +737,6 @@ impl Environ {
 
 /// True iff the grammar is just `((<NT> <Sort> ((Constant <Sort>))))` — the
 /// LFP-placeholder shape used for closure synth-funs.
-fn is_constant_grammar(grammar: &sygus_parser::ast::GrammarDef) -> bool {
-    if grammar.grouped_rule_lists.len() != 1 {
-        return false;
-    }
-    let rules = &grammar.grouped_rule_lists[0].terms;
-    rules.len() == 1 && matches!(&rules[0], sygus_parser::ast::SyGuSGTerm::Constant(_))
-}
 
 unsafe impl Sync for Environ {}
 

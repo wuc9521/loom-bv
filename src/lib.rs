@@ -33,7 +33,8 @@ mod tree_learning;
 
 type SolverResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-fn grammar_has_ite(problem: &SynthProblem<'_>) -> bool {
+impl SynthProblem<'_> {
+    fn has_ite(&self) -> bool {
     fn term_has_ite(term: &sygus_parser::ast::SyGuSTerm) -> bool {
         match term {
             sygus_parser::ast::SyGuSTerm::Application(id, args) => {
@@ -49,12 +50,13 @@ fn grammar_has_ite(problem: &SynthProblem<'_>) -> bool {
         }
     }
 
-    problem.cfg.iter().any(|nt| {
+    self.cfg.iter().any(|nt| {
         nt.1.iter().any(|rule| match rule {
             sygus_parser::ast::SyGuSGTerm::SyGuSTerm(term) => term_has_ite(term),
             _ => false,
         })
     })
+}
 }
 
 fn run_cegis_with_large_stack(
@@ -89,34 +91,18 @@ fn solve_file_inner(
     deffun::ENV.clear();
     deffun::ENV.parse_from_view(&view)?;
 
-    // CYK pattern (two synth-funs + closure constraint): handle before
-    // SynthProblem construction, since SynthProblem assumes a single synth-fun.
-    if let Some(spec) = exact::multisynth::MultiSynthSpec::detect(&view) {
+    // LFP pattern: either one self-referencing synth-fun, or two synth-funs
+    // joined by a closure constraint. Handle before SynthProblem construction
+    // because the latter assumes a single synth-fun.
+    if let Some(spec) = exact::closure::LfpSpec::detect(&view) {
         info!(
-            "Using exact multi-synth closure search (bits={}, labels={})",
-            spec.bits,
-            spec.labels.len()
+            "Using LFP closure search ({}, bits={}, labels={})",
+            spec.variant_tag(),
+            spec.bits(),
+            spec.labels().len()
         );
-        const MULTISYNTH_MAX_G_SIZE: usize = 30;
-        let result = exact::multisynth::search(file, &spec, &deffun::ENV, MULTISYNTH_MAX_G_SIZE)?;
-        return result
-            .ok_or_else(|| "CYK: no solution within size bound".to_string().into());
-    }
-
-    if let Some(spec) = exact::multisynth::SingleSynthSpec::detect(&view) {
-        info!(
-            "Using single-synth closure search for {} (bits={}, labels={})",
-            spec.synth.name,
-            spec.bits,
-            spec.labels.len()
-        );
-        let result = exact::multisynth::search_single(&spec, &deffun::ENV)?;
-        let Some(expr) = result else {
-            return Err("single-closure: no solution".to_string().into());
-        };
-        let mut problem = SynthProblem::parse_from_view(&view)?;
-        problem.description = description;
-        return Ok(problem.format_solution(&expr));
+        return exact::closure::search(&spec, &deffun::ENV)?
+            .ok_or_else(|| "lfp: no solution".to_string().into());
     }
 
     let mut problem = SynthProblem::parse_from_view(&view)?;
@@ -147,7 +133,7 @@ fn solve_file_inner(
         RefImplConstraint::parse_from_view(&view, problem.name, problem.args.len())?
     {
         let original_problem = problem.clone();
-        let defaults = if grammar_has_ite(&problem) {
+        let defaults = if problem.has_ite() {
             SearchConfig::default_refimpl()
         } else {
             SearchConfig::default_refimpl_classic()

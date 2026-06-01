@@ -2,7 +2,7 @@ use std::collections::hash_map::Entry;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-pub mod multisynth;
+pub mod closure;
 mod eval;
 mod grammar;
 mod relevance;
@@ -97,7 +97,7 @@ pub fn search_nullary(
         cfg_start.elapsed()
     );
     let grammar_start = Instant::now();
-    let grammar = grammar::compile_exact_grammar(&multi);
+    let grammar = ExactGrammar::from_config(&multi);
     info!(
         "exact-nullary setup exact-grammar completed in {:?}",
         grammar_start.elapsed()
@@ -660,7 +660,7 @@ fn build_projected_seen(
     for (nt_idx, size_buckets) in by_size.iter().enumerate() {
         for (size, bucket) in size_buckets.iter().enumerate() {
             for candidate in bucket {
-                let key = project_value(&candidate.value, &relevant_bits[nt_idx]);
+                let key = candidate.value.project(&relevant_bits[nt_idx]);
                 maps[nt_idx].entry(key).or_insert(size);
             }
         }
@@ -760,7 +760,7 @@ fn seen_contains_or_insert(
             relevant_bits,
             maps,
         } => {
-            let key = project_value(value, &relevant_bits[nt_idx]);
+            let key = value.project(&relevant_bits[nt_idx]);
             match maps[nt_idx].entry(key) {
                 Entry::Occupied(_) => {
                     pressure.collisions += 1;
@@ -775,9 +775,12 @@ fn seen_contains_or_insert(
     }
 }
 
-fn project_value(value: &Value, bits: &[usize]) -> ProjectionKey {
-    ProjectionKey(value.project_bits(bits))
+impl Value {
+    fn project(&self, bits: &[usize]) -> ProjectionKey {
+    ProjectionKey(self.project_bits(bits))
+    }
 }
+
 
 pub(crate) fn intern_node(nodes: &mut Vec<Node>, node: Node) -> NodeId {
     let id = nodes.len();

@@ -320,6 +320,7 @@ impl<'a> LazyRelevance<'a> {
                     return false;
                 };
                 self.propagate_dep(&dep, 0, *child_nt);
+                self.propagate_closure_deps(*fid, 1, &dep);
                 true
             }
             ExactRule::Binary { fid, lhs_nt, rhs_nt } => {
@@ -329,6 +330,7 @@ impl<'a> LazyRelevance<'a> {
                 };
                 self.propagate_dep(&dep, 0, *lhs_nt);
                 self.propagate_dep(&dep, 1, *rhs_nt);
+                self.propagate_closure_deps(*fid, 2, &dep);
                 true
             }
             ExactRule::Nary { fid, child_nts } => {
@@ -340,6 +342,7 @@ impl<'a> LazyRelevance<'a> {
                 for (arg_idx, child_nt) in child_nts.iter().enumerate() {
                     self.propagate_dep(&dep, arg_idx, *child_nt);
                 }
+                self.propagate_closure_deps(*fid, child_nts.len(), &dep);
                 true
             }
             ExactRule::GenericTemplate {
@@ -392,6 +395,37 @@ impl<'a> LazyRelevance<'a> {
         };
         self.propagate_bits(child_nt, bits);
     }
+
+    /// `dep.per_arg` was computed with extended arg_bits (user args followed
+    /// by closure-synth-fun arg slots). The user-arg slots are already
+    /// consumed by `propagate_dep`; the trailing closure-arg slots feed the
+    /// `closure_relevant` set and, by the closure constraint `g = aux`,
+    /// re-trigger demand on the start NT.
+    fn propagate_closure_deps(&mut self, fid: usize, nargs: usize, dep: &BitDep) {
+        if self.closure_param.is_none() {
+            return;
+        }
+        let closure_arg_bits = deffun::ENV.closure_arg_bits(fid, nargs);
+        if closure_arg_bits.is_empty() {
+            return;
+        }
+        let start = self.grammar.start;
+        for offset in 0..closure_arg_bits.len() {
+            let Some(bits) = dep.per_arg.get(nargs + offset) else {
+                continue;
+            };
+            if bits.is_empty() {
+                continue;
+            }
+            // Clone the BitSet so we can mutate self.closure_relevant and
+            // self.relevant independently.
+            let bits = bits.clone();
+            if let Some(cr) = self.closure_relevant.as_mut() {
+                cr.union_inplace(&bits);
+            }
+            self.propagate_bits(start, &bits);
+        }
+    }
 }
 
 pub fn compute_relevant_bits_for_spec(
@@ -428,7 +462,9 @@ fn get_deffun_dep_bit(
     if let Some(dep) = cache.get(&(fid, nargs, bit)) {
         return dep.clone();
     }
-    let arg_bits = deffun::ENV.arg_bits(fid, nargs).to_vec();
+    // See `get_deffun_dep_bits` — same extended-arg_bits reason.
+    let mut arg_bits = deffun::ENV.arg_bits(fid, nargs).to_vec();
+    arg_bits.extend_from_slice(deffun::ENV.closure_arg_bits(fid, nargs));
     let dep = match deffun::ENV.plan(fid, nargs) {
         DefineFunPlan::BitCircuit(plan) => compute_bit_circuit_dep_bit(plan, &arg_bits, bit),
         DefineFunPlan::Generic {
@@ -448,7 +484,13 @@ fn get_deffun_dep_bits(
     demanded: &BitSet,
     cache: &mut DepCache,
 ) -> Option<BitDep> {
-    let arg_bits = deffun::ENV.arg_bits(fid, nargs).to_vec();
+    // Use EXTENDED arg_bits = user args + closure-synth-fun args. Define-fun
+    // bodies may reference closure synth-funs (SyGuS 2.1 §3.7); their
+    // identifiers were resolved to Var slots beyond the real arity at parse
+    // time. Without this extension, dependency walks treat synth-arg slots
+    // as instructions and quietly mis-attribute demand.
+    let mut arg_bits = deffun::ENV.arg_bits(fid, nargs).to_vec();
+    arg_bits.extend_from_slice(deffun::ENV.closure_arg_bits(fid, nargs));
     match deffun::ENV.plan(fid, nargs) {
         DefineFunPlan::BitCircuit(plan) => Some(compute_bit_circuit_dep_bits(plan, &arg_bits, demanded)),
         DefineFunPlan::Generic {

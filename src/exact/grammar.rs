@@ -5,7 +5,8 @@ use crate::{
 
 use super::{ExactGrammar, ExactRule};
 
-pub fn compile_exact_grammar(grammar: &MultiConfig<'static>) -> ExactGrammar<'static> {
+impl ExactGrammar<'static> {
+    pub fn from_config(grammar: &MultiConfig<'static>) -> Self {
     let nts = grammar
         .nts
         .iter()
@@ -25,9 +26,10 @@ pub fn compile_exact_grammar(grammar: &MultiConfig<'static>) -> ExactGrammar<'st
             (*name, compiled)
         })
         .collect();
-    ExactGrammar {
-        nts,
-        start: grammar.start,
+    Self {
+            nts,
+            start: grammar.start,
+        }
     }
 }
 

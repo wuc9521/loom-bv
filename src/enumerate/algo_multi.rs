@@ -339,7 +339,7 @@ impl<'a, const N: usize> Algo<'a, N> {
                 }
             }
             OwnedExpr::Concat(a, b) => {
-                let rhs_bits = owned_expr_bit_width(b);
+                let rhs_bits = b.bit_width();
                 let a = self.eval_owned_abs(a, vars, depth + 1)?;
                 let b = self.eval_owned_abs(b, vars, depth + 1)?;
                 AbsSummary {
@@ -452,16 +452,17 @@ impl<'a, const N: usize> Algo<'a, N> {
     }
 }
 
-fn owned_expr_bit_width(expr: &OwnedExpr) -> usize {
-    match expr {
-        OwnedExpr::Concat(a, b) => owned_expr_bit_width(a) + owned_expr_bit_width(b),
-        OwnedExpr::Extract(_, hi, lo) => (hi - lo + 1) as usize,
+impl OwnedExpr {
+    fn bit_width(&self) -> usize {
+    match self {
+        OwnedExpr::Concat(a, b) => a.bit_width() + b.bit_width(),
+        OwnedExpr::Extract(_, hi, lo) => (*hi - *lo + 1) as usize,
         OwnedExpr::Fop0Dyn(id) => crate::parse::deffun::ENV.ret_bits(*id, 0),
         OwnedExpr::FopDyn(id, args) => crate::parse::deffun::ENV.ret_bits(*id, args.len()),
         OwnedExpr::Const(v) => v.bits(),
         OwnedExpr::Var(_, width) => *width,
-        OwnedExpr::Let(_, _, body) => owned_expr_bit_width(body),
-        OwnedExpr::Not(a) | OwnedExpr::Neg(a) | OwnedExpr::Fop1Dyn(_, a) => owned_expr_bit_width(a),
+        OwnedExpr::Let(_, _, body) => body.bit_width(),
+        OwnedExpr::Not(a) | OwnedExpr::Neg(a) | OwnedExpr::Fop1Dyn(_, a) => a.bit_width(),
         OwnedExpr::Add(a, _)
         | OwnedExpr::Xor(a, _)
         | OwnedExpr::And(a, _)
@@ -475,11 +476,11 @@ fn owned_expr_bit_width(expr: &OwnedExpr) -> usize {
         | OwnedExpr::UDiv(a, _)
         | OwnedExpr::URem(a, _)
         | OwnedExpr::SDiv(a, _)
-        | OwnedExpr::SRem(a, _) => owned_expr_bit_width(a),
-        OwnedExpr::Ite(_, a, _) => owned_expr_bit_width(a),
+        | OwnedExpr::SRem(a, _) => a.bit_width(),
+        OwnedExpr::Ite(_, a, _) => a.bit_width(),
+    }
     }
 }
-
 fn extract_bv<const N: usize>(value: Bv<N>, hi: u64, lo: u64) -> Bv<N> {
     if lo >= 64 {
         return Bv::ZEROS;
