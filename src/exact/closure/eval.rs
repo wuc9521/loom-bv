@@ -1,152 +1,125 @@
-//! Value-level evaluation against `deffun::ENV` with a closure parameter.
-//!
-//! All eval functions take a single `closure_value` that is bound to every
-//! reference of the closure synth-fun (named by `closure_name`) encountered
-//! during evaluation — either via `closure_arg_values` resolving the env's
-//! recorded closure-arg slots, or via direct substitution in `OwnedExpr::Var`.
-
+//! Closure-aware evaluation: like `OwnedExpr::eval` but with `closure_value`
+//! bound to every reference of the closure synth-fun named `closure_name`
+//! (either as a bare `Var` placeholder or via the env-tracked closure-arg
+//! slots that `Environ::eval_defined` expects). All `Fop*Dyn` sites go
+//! through `eval::eval_defined_with_closure`, which handles closure-arg
+//! assembly + cross-call memoization in one place.
 
 use crate::enumerate::expr::OwnedExpr;
 use crate::enumerate::value::Value;
+use crate::exact::{eval_defined_with_closure, util::empty_span};
 use crate::parse::{self, deffun, new_custom_error_span};
 
-
-use crate::exact::util::empty_span;
-
 impl OwnedExpr {
-    /// Evaluate this OwnedExpr at the value level, substituting `closure_value`
-    /// for every reference to the closure synth-fun named `closure_name`
-    /// (either as a bare `Var` placeholder or via the env-tracked closure-arg
-    /// slots of defined functions).
+    /// Closure-aware evaluation. `closure_value` substitutes for both
+    /// (a) bare `Var` placeholders that the parser emits when the operator's
+    /// grammar references the closure synth-fun by name, and (b) the
+    /// env-tracked closure-arg slots that each `define-fun` body uses.
     pub fn eval_with_closure(
         &self,
         env: &deffun::Environ,
         closure_value: &Value,
         closure_name: &str,
     ) -> parse::Result<Value> {
-        eval_owned_with_closure(self, env, closure_value, closure_name)
-    }
-}
-
-pub fn eval_owned_with_closure(
-    expr: &OwnedExpr,
-    env: &deffun::Environ,
-    closure_value: &Value,
-    closure_name: &str,
-) -> parse::Result<Value> {
-    match expr {
-        OwnedExpr::Const(v) => Ok(v.clone()),
-        OwnedExpr::Var(_, _) => Ok(closure_value.clone()),
-        OwnedExpr::Concat(a, b) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .concat(&eval_owned_with_closure(b, env, closure_value, closure_name)?)),
-        OwnedExpr::Extract(a, hi, lo) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .extract(*hi, *lo)),
-        OwnedExpr::Not(a) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?.bitnot()),
-        OwnedExpr::Neg(a) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?.neg()),
-        OwnedExpr::Add(a, b) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .add(eval_owned_with_closure(b, env, closure_value, closure_name)?)),
-        OwnedExpr::Xor(a, b) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .bitxor(eval_owned_with_closure(b, env, closure_value, closure_name)?)),
-        OwnedExpr::And(a, b) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .bitand(eval_owned_with_closure(b, env, closure_value, closure_name)?)),
-        OwnedExpr::Or(a, b) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .bitor(eval_owned_with_closure(b, env, closure_value, closure_name)?)),
-        OwnedExpr::Mul(a, b) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .mul(eval_owned_with_closure(b, env, closure_value, closure_name)?)),
-        OwnedExpr::Sub(a, b) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .sub(eval_owned_with_closure(b, env, closure_value, closure_name)?)),
-        OwnedExpr::LShr(a, b) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .lshr(eval_owned_with_closure(b, env, closure_value, closure_name)?)),
-        OwnedExpr::AShr(a, b) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .ashr(eval_owned_with_closure(b, env, closure_value, closure_name)?)),
-        OwnedExpr::Shl(a, b) => Ok(eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .shl(eval_owned_with_closure(b, env, closure_value, closure_name)?)),
-        OwnedExpr::UDiv(a, b) => eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .udiv(eval_owned_with_closure(b, env, closure_value, closure_name)?)
-            .ok_or_else(|| new_custom_error_span("lfp: divide-by-zero".into(), empty_span())),
-        OwnedExpr::URem(a, b) => eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .urem(eval_owned_with_closure(b, env, closure_value, closure_name)?)
-            .ok_or_else(|| new_custom_error_span("lfp: divide-by-zero".into(), empty_span())),
-        OwnedExpr::SDiv(a, b) => eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .sdiv(eval_owned_with_closure(b, env, closure_value, closure_name)?)
-            .ok_or_else(|| new_custom_error_span("lfp: divide-by-zero".into(), empty_span())),
-        OwnedExpr::SRem(a, b) => eval_owned_with_closure(a, env, closure_value, closure_name)?
-            .srem(eval_owned_with_closure(b, env, closure_value, closure_name)?)
-            .ok_or_else(|| new_custom_error_span("lfp: divide-by-zero".into(), empty_span())),
-        OwnedExpr::Fop0Dyn(id) => {
-            let args = closure_arg_values(env, *id, 0, closure_value, closure_name);
-            env.eval_defined(*id, 0, &args)
-                .map_err(|_| new_custom_error_span(format!("lfp: divide-by-zero in {}", env.name(*id, 0)), empty_span()))
-        }
-        OwnedExpr::Fop1Dyn(id, a) => {
-            let mut args = vec![eval_owned_with_closure(a, env, closure_value, closure_name)?];
-            args.extend(closure_arg_values(env, *id, 1, closure_value, closure_name));
-            env.eval_defined(*id, 1, &args)
-                .map_err(|_| new_custom_error_span(format!("lfp: divide-by-zero in {}", env.name(*id, 1)), empty_span()))
-        }
-        OwnedExpr::Fop2Dyn(id, a, b) => {
-            let mut args = vec![
-                eval_owned_with_closure(a, env, closure_value, closure_name)?,
-                eval_owned_with_closure(b, env, closure_value, closure_name)?,
-            ];
-            args.extend(closure_arg_values(env, *id, 2, closure_value, closure_name));
-            env.eval_defined(*id, 2, &args)
-                .map_err(|_| new_custom_error_span(format!("lfp: divide-by-zero in {}", env.name(*id, 2)), empty_span()))
-        }
-        OwnedExpr::FopDyn(id, exprs) => {
-            let nargs = exprs.len();
-            let mut args = exprs
-                .iter()
-                .map(|arg| eval_owned_with_closure(arg, env, closure_value, closure_name))
-                .collect::<parse::Result<Vec<_>>>()?;
-            args.extend(closure_arg_values(env, *id, nargs, closure_value, closure_name));
-            env.eval_defined(*id, nargs, &args)
-                .map_err(|_| new_custom_error_span(format!("lfp: divide-by-zero in {}", env.name(*id, nargs)), empty_span()))
-        }
-        OwnedExpr::Ite(cond, then_e, else_e) => {
-            let c = eval_owned_with_closure(cond, env, closure_value, closure_name)?;
-            if c.as_bool().holds() {
-                eval_owned_with_closure(then_e, env, closure_value, closure_name)
-            } else {
-                eval_owned_with_closure(else_e, env, closure_value, closure_name)
+        let closure = Some((closure_name, closure_value));
+        let div_by_zero = || new_custom_error_span("lfp: divide-by-zero".into(), empty_span());
+        let fn_div_by_zero = |id: usize, nargs: usize| {
+            new_custom_error_span(
+                format!("lfp: divide-by-zero in {}", env.name(id, nargs)),
+                empty_span(),
+            )
+        };
+        match self {
+            OwnedExpr::Const(v) => Ok(v.clone()),
+            OwnedExpr::Var(_, _) => Ok(closure_value.clone()),
+            OwnedExpr::Concat(a, b) => Ok(a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .concat(&b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::Extract(a, hi, lo) => Ok(a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .extract(*hi, *lo)),
+            OwnedExpr::Not(a) => Ok(a.eval_with_closure(env, closure_value, closure_name)?.bitnot()),
+            OwnedExpr::Neg(a) => Ok(a.eval_with_closure(env, closure_value, closure_name)?.neg()),
+            OwnedExpr::Add(a, b) => Ok(a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .add(b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::Xor(a, b) => Ok(a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .bitxor(b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::And(a, b) => Ok(a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .bitand(b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::Or(a, b) => Ok(a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .bitor(b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::Mul(a, b) => Ok(a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .mul(b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::Sub(a, b) => Ok(a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .sub(b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::LShr(a, b) => Ok(a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .lshr(b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::AShr(a, b) => Ok(a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .ashr(b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::Shl(a, b) => Ok(a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .shl(b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::UDiv(a, b) => a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .udiv(b.eval_with_closure(env, closure_value, closure_name)?)
+                .ok_or_else(div_by_zero),
+            OwnedExpr::URem(a, b) => a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .urem(b.eval_with_closure(env, closure_value, closure_name)?)
+                .ok_or_else(div_by_zero),
+            OwnedExpr::SDiv(a, b) => a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .sdiv(b.eval_with_closure(env, closure_value, closure_name)?)
+                .ok_or_else(div_by_zero),
+            OwnedExpr::SRem(a, b) => a
+                .eval_with_closure(env, closure_value, closure_name)?
+                .srem(b.eval_with_closure(env, closure_value, closure_name)?)
+                .ok_or_else(div_by_zero),
+            OwnedExpr::Fop0Dyn(id) => {
+                eval_defined_with_closure(*id, 0, &[], closure).map_err(|_| fn_div_by_zero(*id, 0))
             }
-        }
-        OwnedExpr::Let(_, _, _) => expr
-            .eval(std::slice::from_ref(closure_value))
-            .map_err(|_| new_custom_error_span("lfp: let-eval failed".into(), empty_span())),
-    }
-}
-
-/// Resolve the value of each closure synth-fun the define-fun references.
-/// The closure path knows only one closure synth-fun (the LFP target);
-/// any others are bound to zero as a placeholder.
-pub fn closure_arg_values(
-    env: &deffun::Environ,
-    id: usize,
-    nargs: usize,
-    closure_value: &Value,
-    closure_name: &str,
-) -> Vec<Value> {
-    let names = env.closure_args(id, nargs);
-    let bits = env.closure_arg_bits(id, nargs);
-    names
-        .iter()
-        .zip(bits.iter())
-        .map(|(n, b)| {
-            if *n == closure_name {
-                closure_value.clone()
-            } else {
-                Value::from_u64(0, *b)
+            OwnedExpr::Fop1Dyn(id, a) => {
+                let args = [a.eval_with_closure(env, closure_value, closure_name)?];
+                eval_defined_with_closure(*id, 1, &args, closure).map_err(|_| fn_div_by_zero(*id, 1))
             }
-        })
-        .collect()
-}
+            OwnedExpr::Fop2Dyn(id, a, b) => {
+                let args = [
+                    a.eval_with_closure(env, closure_value, closure_name)?,
+                    b.eval_with_closure(env, closure_value, closure_name)?,
+                ];
+                eval_defined_with_closure(*id, 2, &args, closure).map_err(|_| fn_div_by_zero(*id, 2))
+            }
+            OwnedExpr::FopDyn(id, exprs) => {
+                let nargs = exprs.len();
+                let args = exprs
+                    .iter()
+                    .map(|arg| arg.eval_with_closure(env, closure_value, closure_name))
+                    .collect::<parse::Result<Vec<_>>>()?;
+                eval_defined_with_closure(*id, nargs, &args, closure)
+                    .map_err(|_| fn_div_by_zero(*id, nargs))
+            }
+            OwnedExpr::Ite(cond, then_e, else_e) => {
+                let c = cond.eval_with_closure(env, closure_value, closure_name)?;
+                if c.as_bool().holds() {
+                    then_e.eval_with_closure(env, closure_value, closure_name)
+                } else {
+                    else_e.eval_with_closure(env, closure_value, closure_name)
+                }
+            }
+            OwnedExpr::Let(_, _, _) => self
+                .eval(std::slice::from_ref(closure_value))
+                .map_err(|_| new_custom_error_span("lfp: let-eval failed".into(), empty_span())),
+        }
+    }
 
-
-
-
-
-impl OwnedExpr {
     /// Iterate `self` as the body of a closure synth-fun until reaching a
     /// `bits`-wide fixpoint, starting from all-zeros. Bounded by `bits + 1`
     /// iterations (monotone Boolean lattice height).

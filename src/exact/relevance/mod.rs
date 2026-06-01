@@ -113,21 +113,6 @@ impl<'a> Relevance<'a> {
         })
     }
 
-    /// Variant of [`Self::new`] that wires a "closure feedback" edge.  When
-    /// `closure_param` is set, processing a `Leaf(Var(closure_param, _))`
-    /// rule propagates its demanded bits back to the start NT, modeling the
-    /// closure constraint of cyk-style synthesis (`param = g`).
-    pub fn new_with_closure(
-        grammar: &'a ExactGrammar<'a>,
-        spec: &NullarySpec,
-        closure_param: usize,
-    ) -> Option<Self> {
-        let mut this = Self::new(grammar, spec)?;
-        this.closure_param = Some(closure_param);
-        this.closure_relevant = Some(BitSet::new(this.nt_bits[grammar.start]));
-        Some(this)
-    }
-
     pub fn advance(&mut self, budget: usize) -> bool {
         if self.complete {
             return true;

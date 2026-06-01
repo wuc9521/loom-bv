@@ -8,8 +8,6 @@ mod relevance;
 mod spec;
 mod util;
 
-use num_bigint::BigUint;
-use num_traits::One;
 use rustc_hash::FxHashMap;
 use sygus_parser::ast::SyGuSFile;
 
@@ -36,16 +34,35 @@ pub enum NullarySpec {
     },
 }
 
-/// Evaluate a define-fun, transparently appending closure-arg values when the
-/// define-fun's body references closure synth-funs.
-///
-/// `closure = None` is the direct-mode fast path: a problem with no closure
-/// synth-funs at all (every LTL/Reg/FO benchmark) — we bypass the
-/// `closure_args` metadata lookup entirely so the hot loop is identical to a
-/// direct `eval_defined` call. `closure = Some((name, value))` binds the named
-/// closure synth-fun to `value`; any other closure synth-funs the body
-/// references fall back to zero (mirroring the original `closure_arg_values`
-/// policy).
+// -- LFP-path define-fun evaluation (single entry point) -------------------
+//
+// `Environ::eval_defined` takes `args.len() + closure_args.len()` values:
+// the real args first, then the current value of each closure synth-fun the
+// body references. `eval_defined_with_closure` is the search-side wrapper
+// that owns three concerns at once:
+//
+//   1. *Closure-arg assembly*: build the appended-closure args list when the
+//      define-fun reads any closure synth-funs. `closure = None` (direct mode
+//      problems with no closures anywhere) is a fast pass-through.
+//   2. *Cross-call memoization*: in the fixpoint search the same `(fid, args)`
+//      tuple recurs ~40× across candidates and Kleene iterations. The cache
+//      catches them; enabled by `LfpSpec::search`, disabled in direct mode.
+//   3. *Dispatch* to `Environ::eval_defined`.
+//
+// Lives in `exact.rs` because the cache state is owned here.
+
+thread_local! {
+    static EVAL_CACHE: std::cell::RefCell<EvalCache> = std::cell::RefCell::new(EvalCache::default());
+}
+
+#[derive(Default)]
+struct EvalCache {
+    map: FxHashMap<(usize, usize, Box<[Value]>), Value>,
+    hits: u64,
+    misses: u64,
+    enabled: bool,
+}
+
 #[inline]
 pub fn eval_defined_with_closure(
     fid: usize,
@@ -53,24 +70,78 @@ pub fn eval_defined_with_closure(
     args: &[Value],
     closure: Option<(&str, &Value)>,
 ) -> Result<Value, ()> {
-    let Some((closure_name, closure_value)) = closure else {
+    // Build the full args vector (children + closure values) once. The
+    // common direct-mode and no-closure-ref cases avoid allocation.
+    let names = deffun::ENV.closure_args(fid, nargs);
+    let full: Vec<Value> = if let Some((closure_name, closure_value)) = closure {
+        if names.is_empty() {
+            args.to_vec()
+        } else {
+            let bits = deffun::ENV.closure_arg_bits(fid, nargs);
+            let mut full = Vec::with_capacity(args.len() + names.len());
+            full.extend_from_slice(args);
+            for (name, b) in names.iter().zip(bits.iter()) {
+                if *name == closure_name {
+                    full.push(closure_value.clone());
+                } else {
+                    full.push(Value::from_u64(0, *b));
+                }
+            }
+            full
+        }
+    } else {
         return deffun::ENV.eval_defined(fid, nargs, args).map_err(|_| ());
     };
-    let names = deffun::ENV.closure_args(fid, nargs);
-    if names.is_empty() {
-        return deffun::ENV.eval_defined(fid, nargs, args).map_err(|_| ());
-    }
-    let bits = deffun::ENV.closure_arg_bits(fid, nargs);
-    let mut full = Vec::with_capacity(args.len() + names.len());
-    full.extend_from_slice(args);
-    for (name, b) in names.iter().zip(bits.iter()) {
-        if *name == closure_name {
-            full.push(closure_value.clone());
-        } else {
-            full.push(Value::from_u64(0, *b));
+
+    EVAL_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if !c.enabled {
+            return deffun::ENV.eval_defined(fid, nargs, &full).map_err(|_| ());
         }
-    }
-    deffun::ENV.eval_defined(fid, nargs, &full).map_err(|_| ())
+        let key = (fid, nargs, full.into_boxed_slice());
+        if let Some(v) = c.map.get(&key).cloned() {
+            c.hits += 1;
+            return Ok(v);
+        }
+        c.misses += 1;
+        let v = deffun::ENV.eval_defined(fid, nargs, &key.2).map_err(|_| ())?;
+        c.map.insert(key, v.clone());
+        Ok(v)
+    })
+}
+
+pub fn enable_eval_cache() {
+    EVAL_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        c.map.clear();
+        c.hits = 0;
+        c.misses = 0;
+        c.enabled = true;
+    });
+}
+
+pub fn dump_and_disable_eval_cache(tag: &str) {
+    EVAL_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let total = c.hits + c.misses;
+        let rate = if total > 0 {
+            c.hits as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
+        info!(
+            "{}: eval_defined memo: {} calls, {} hits ({:.1}%), {} cached entries",
+            tag,
+            total,
+            c.hits,
+            rate,
+            c.map.len()
+        );
+        c.map.clear();
+        c.hits = 0;
+        c.misses = 0;
+        c.enabled = false;
+    });
 }
 
 impl NullarySpec {
@@ -94,6 +165,30 @@ impl NullarySpec {
             }));
         }
         Ok(None)
+    }
+
+    /// Split label bit-indices into the "must be 1" and "must be 0" sets.
+    /// `None` if the spec isn't bit-constraint-shaped (the only shape the
+    /// LFP search currently uses).
+    ///
+    /// Returned as plain index slices rather than `Value` masks so the
+    /// per-iter check in Kleene can use cheap `Value::bit(i)` lookups
+    /// instead of allocating BigUint AND/OR on every step.
+    fn label_indices(&self) -> Option<(Vec<usize>, Vec<usize>)> {
+        let known_bits = match self {
+            NullarySpec::BitConstraints { known_bits, .. } => known_bits,
+            NullarySpec::Exact(_) => return None,
+        };
+        let mut pos = Vec::new();
+        let mut neg = Vec::new();
+        for (idx, expected) in known_bits {
+            if *expected {
+                pos.push(*idx);
+            } else {
+                neg.push(*idx);
+            }
+        }
+        Some((pos, neg))
     }
 
     fn matches(&self, value: &Value) -> bool {
@@ -728,27 +823,6 @@ impl<'a> ExactGrammar<'a> {
     }
 }
 
-/// Split label bit-indices into the "must be 1" and "must be 0" sets. Used
-/// for allocation-free bitwise checks on Kleene iterates — at the typical
-/// label counts (single digits per CEGIS round) iterating these slices and
-/// calling `Value::bit(i)` is much cheaper than building masks as `Value`s
-/// and doing BigUint AND/OR per check.
-fn label_indices(spec: &NullarySpec) -> Option<(Vec<usize>, Vec<usize>)> {
-    let known_bits = match spec {
-        NullarySpec::BitConstraints { known_bits, .. } => known_bits,
-        NullarySpec::Exact(_) => return None,
-    };
-    let mut pos = Vec::new();
-    let mut neg = Vec::new();
-    for (idx, expected) in known_bits {
-        if *expected {
-            pos.push(*idx);
-        } else {
-            neg.push(*idx);
-        }
-    }
-    Some((pos, neg))
-}
 
 /// Compute the candidate's LFP via Kleene from `aux = 0`, with two sound
 /// early-rejection checks driven by the label masks. Returns
@@ -792,7 +866,7 @@ fn materialize_and_kleene(
         NullarySpec::BitConstraints { bits, .. } => *bits,
         NullarySpec::Exact(v) => v.bits(),
     };
-    let (_pos_indices, neg_indices) = label_indices(spec)?;
+    let (_pos_indices, neg_indices) = spec.label_indices()?;
     let env = &deffun::ENV;
 
     let mut aux = Value::zero(bits);

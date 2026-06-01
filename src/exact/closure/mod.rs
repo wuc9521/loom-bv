@@ -62,7 +62,9 @@ impl<'a> LfpSpec<'a> {
             self.bits(),
             self.labels().len()
         );
+        crate::exact::enable_eval_cache();
         let expr = spec.search(&problem, true, Some(closure_name))?;
+        crate::exact::dump_and_disable_eval_cache(self.variant_tag());
         Ok(Some(self.finalize(env, expr)?))
     }
 }
