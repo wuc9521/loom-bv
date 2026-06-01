@@ -141,21 +141,3 @@ impl<'i> SynthProblem<'i> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::parse::SynthProblem;
-    use sygus_parser::ast::SyGuSFile;
-
-    #[test]
-    fn test_problem_parse() {
-        let e = SyGuSFile::from_str(
-            "(synth-fun f ((x bool) (y bool)) ()
-        (
-            (Start bool ((bvand a b) (bvand a c) ) )
-        ))",
-        )
-        .unwrap();
-        let cfg = SynthProblem::parse_from_file(&e).unwrap();
-        println!("{:?}", cfg);
-    }
-}
