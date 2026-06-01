@@ -101,7 +101,7 @@ fn solve_file_inner(
             spec.bits(),
             spec.labels().len()
         );
-        return exact::closure::search(&spec, &deffun::ENV)?
+        return spec.search(&deffun::ENV)?
             .ok_or_else(|| "lfp: no solution".to_string().into());
     }
 
@@ -115,7 +115,7 @@ fn solve_file_inner(
             problem.bits,
             file.cmds.len()
         );
-        let result = exact::search_nullary(&problem, &spec, min, mitm)?;
+        let result = spec.search(&problem, min, mitm)?;
         return Ok(problem.format_solution(&result));
     }
     if pbecstr.len() > 0 {

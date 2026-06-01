@@ -82,6 +82,32 @@ impl<const N: usize> Bv<N> {
     pub fn any_eq(&self, other: &Self) -> bool {
         self.iter().zip(other.iter()).any(|(a, b)| a == b)
     }
+
+    /// Extract bits `[lo..=hi]` from each lane independently. Bits above 63
+    /// don't exist within a single lane, so requesting them yields zeros.
+    pub fn extract(self, hi: u64, lo: u64) -> Self {
+        if lo >= 64 {
+            return Self::ZEROS;
+        }
+        let width = hi.saturating_sub(lo).saturating_add(1).min(64);
+        let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+        Bv(self.map(|lane| (lane >> lo) & mask))
+    }
+
+    /// Concatenate `self` (high bits) with `rhs` (low bits), where `rhs`
+    /// occupies the bottom `rhs_bits`. Per-lane: `(self << rhs_bits) | rhs`.
+    pub fn concat_low(self, rhs: Self, rhs_bits: usize) -> Self {
+        if rhs_bits >= 64 {
+            return rhs;
+        }
+        let shift = rhs_bits as u32;
+        let mask = if rhs_bits == 0 { 0 } else { (1u64 << shift) - 1 };
+        Bv(self
+            .into_iter_fixed()
+            .zip(rhs.into_iter_fixed())
+            .map(|(l, r)| (l << shift) | (r & mask))
+            .collect())
+    }
 }
 
 #[cfg(test)]

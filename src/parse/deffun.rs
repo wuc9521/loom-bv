@@ -35,15 +35,6 @@ fn collect_term_symbols(term: &SyGuSTerm, out: &mut Vec<String>) {
     }
 }
 
-fn summarize_expr(expr: &OwnedExpr, limit: usize) -> String {
-    let rendered = expr.to_string();
-    let total = rendered.chars().count();
-    if total <= limit {
-        return rendered;
-    }
-    let prefix = rendered.chars().take(limit).collect::<String>();
-    format!("{prefix}... <{} chars total>", total)
-}
 
 #[derive(Clone, DebugCustom)]
 #[debug(fmt = "define-fun {} {:?}", name, args)]
@@ -65,7 +56,7 @@ pub struct DefineFun {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum DefineFunPlan {
+pub enum DefineFunPlan {
     Generic {
         root: usize,
         slot_count: usize,
@@ -76,14 +67,14 @@ pub(crate) enum DefineFunPlan {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct BitCircuitPlan {
-    pub(crate) bindings: Vec<BoolNode>,
-    pub(crate) output_bits: Vec<BoolAtom>,
-    pub(crate) ret_bits: usize,
+pub struct BitCircuitPlan {
+    pub bindings: Vec<BoolNode>,
+    pub output_bits: Vec<BoolAtom>,
+    pub ret_bits: usize,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum BoolNode {
+pub enum BoolNode {
     Atom(BoolAtom),
     Not(BoolAtom),
     And(BoolAtom, BoolAtom),
@@ -93,14 +84,14 @@ pub(crate) enum BoolNode {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum BoolAtom {
+pub enum BoolAtom {
     Const(bool),
     InputBit { arg: usize, bit: usize },
     Temp(usize),
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum PlanInstr {
+pub enum PlanInstr {
     Const(Value),
     Concat { lhs: usize, rhs: usize },
     Extract { src: usize, hi: u64, lo: u64 },
@@ -265,28 +256,39 @@ impl BoolAtom {
         }
     }
 
-    fn try_leaf(expr: &OwnedExpr, nargs: usize) -> Option<Self> {
+    fn try_leaf(expr: &OwnedExpr, nargs: usize, let_offsets: &[usize]) -> Option<Self> {
         match expr {
             OwnedExpr::Const(value) if value.bits() == 1 => Some(Self::Const(!value.is_zero())),
             OwnedExpr::Var(idx, _) if *idx < nargs => None,
-            OwnedExpr::Var(idx, _) => Some(Self::Temp(idx.checked_sub(nargs)?)),
+            OwnedExpr::Var(idx, _) => {
+                let let_idx = idx.checked_sub(nargs)?;
+                let_offsets.get(let_idx).copied().map(Self::Temp)
+            }
             OwnedExpr::Extract(src, hi, lo) if hi == lo => match src.as_ref() {
                 OwnedExpr::Var(idx, _) if *idx < nargs => Some(Self::InputBit {
                     arg: *idx,
                     bit: *lo as usize,
                 }),
-                OwnedExpr::Var(idx, _) => Some(Self::Temp(idx.checked_sub(nargs)?)),
+                OwnedExpr::Var(idx, _) => {
+                    let let_idx = idx.checked_sub(nargs)?;
+                    let_offsets.get(let_idx).copied().map(Self::Temp)
+                }
                 _ => None,
             },
             _ => None,
         }
     }
 
-    fn compile(expr: &OwnedExpr, nargs: usize, bindings: &mut Vec<BoolNode>) -> Option<Self> {
-        if let Some(atom) = Self::try_leaf(expr, nargs) {
+    fn compile(
+        expr: &OwnedExpr,
+        nargs: usize,
+        bindings: &mut Vec<BoolNode>,
+        let_offsets: &[usize],
+    ) -> Option<Self> {
+        if let Some(atom) = Self::try_leaf(expr, nargs, let_offsets) {
             return Some(atom);
         }
-        let node = BoolNode::compile(expr, nargs, bindings)?;
+        let node = BoolNode::compile(expr, nargs, bindings, let_offsets)?;
         let idx = bindings.len();
         bindings.push(node);
         Some(BoolAtom::Temp(idx))
@@ -294,33 +296,41 @@ impl BoolAtom {
 }
 
 impl BoolNode {
-    fn compile(expr: &OwnedExpr, nargs: usize, bindings: &mut Vec<BoolNode>) -> Option<Self> {
+    fn compile(
+        expr: &OwnedExpr,
+        nargs: usize,
+        bindings: &mut Vec<BoolNode>,
+        let_offsets: &[usize],
+    ) -> Option<Self> {
         match expr {
             OwnedExpr::Const(value) if value.bits() == 1 => {
                 Some(Self::Atom(BoolAtom::Const(!value.is_zero())))
             }
             OwnedExpr::Var(_, _) | OwnedExpr::Extract(_, _, _) => {
-                Some(Self::Atom(BoolAtom::try_leaf(expr, nargs)?))
+                Some(Self::Atom(BoolAtom::try_leaf(expr, nargs, let_offsets)?))
             }
-            OwnedExpr::Not(inner) => {
-                Some(Self::Not(BoolAtom::compile(inner, nargs, bindings)?))
-            }
+            OwnedExpr::Not(inner) => Some(Self::Not(BoolAtom::compile(
+                inner,
+                nargs,
+                bindings,
+                let_offsets,
+            )?)),
             OwnedExpr::And(lhs, rhs) => Some(Self::And(
-                BoolAtom::compile(lhs, nargs, bindings)?,
-                BoolAtom::compile(rhs, nargs, bindings)?,
+                BoolAtom::compile(lhs, nargs, bindings, let_offsets)?,
+                BoolAtom::compile(rhs, nargs, bindings, let_offsets)?,
             )),
             OwnedExpr::Or(lhs, rhs) => Some(Self::Or(
-                BoolAtom::compile(lhs, nargs, bindings)?,
-                BoolAtom::compile(rhs, nargs, bindings)?,
+                BoolAtom::compile(lhs, nargs, bindings, let_offsets)?,
+                BoolAtom::compile(rhs, nargs, bindings, let_offsets)?,
             )),
             OwnedExpr::Xor(lhs, rhs) => Some(Self::Xor(
-                BoolAtom::compile(lhs, nargs, bindings)?,
-                BoolAtom::compile(rhs, nargs, bindings)?,
+                BoolAtom::compile(lhs, nargs, bindings, let_offsets)?,
+                BoolAtom::compile(rhs, nargs, bindings, let_offsets)?,
             )),
             OwnedExpr::Ite(cond, then_expr, else_expr) => Some(Self::Ite(
-                BoolAtom::compile(cond, nargs, bindings)?,
-                BoolAtom::compile(then_expr, nargs, bindings)?,
-                BoolAtom::compile(else_expr, nargs, bindings)?,
+                BoolAtom::compile(cond, nargs, bindings, let_offsets)?,
+                BoolAtom::compile(then_expr, nargs, bindings, let_offsets)?,
+                BoolAtom::compile(else_expr, nargs, bindings, let_offsets)?,
             )),
             _ => None,
         }
@@ -356,41 +366,64 @@ fn flatten_concat_bits<'a>(expr: &'a OwnedExpr, out: &mut Vec<&'a OwnedExpr>) ->
     }
 }
 
-fn try_compile_bit_circuit(expr: &OwnedExpr, nargs: usize, ret_bits: usize) -> Option<BitCircuitPlan> {
-    let mut bindings = Vec::new();
-    let mut current = expr;
-    while let OwnedExpr::Let(_, value, body) = current {
-        if value.width() != 1 {
+impl BitCircuitPlan {
+    /// Try to compile a 1-bit-output, let-bindings-then-concat OwnedExpr
+    /// shape directly into a flat boolean circuit. Returns `None` for any
+    /// shape we don't recognize (callers fall back to `DefineFunPlan::compile`'s
+    /// Generic path).
+    pub fn try_compile(expr: &OwnedExpr, nargs: usize, ret_bits: usize) -> Option<Self> {
+        let mut bindings = Vec::new();
+        // `let_offsets[k]` is the index into `bindings` where the value node for
+        // the k-th let-binding (Var(nargs + k) in source order) lives. We can't
+        // use `k` directly because compiling a value may push auxiliary nodes
+        // into `bindings` first, shifting the let's own slot past `k`.
+        let mut let_offsets: Vec<usize> = Vec::new();
+        let mut current = expr;
+        while let OwnedExpr::Let(_, value, body) = current {
+            if value.width() != 1 {
+                return None;
+            }
+            let node = BoolNode::compile(value, nargs, &mut bindings, &let_offsets)?;
+            let pos = bindings.len();
+            bindings.push(node);
+            let_offsets.push(pos);
+            current = body;
+        }
+        let mut raw_bits = Vec::new();
+        if !flatten_concat_bits(current, &mut raw_bits) {
             return None;
         }
-        let node = BoolNode::compile(value, nargs, &mut bindings)?;
-        bindings.push(node);
-        current = body;
+        if raw_bits.len() != ret_bits {
+            return None;
+        }
+        let output_bits = raw_bits
+            .into_iter()
+            .map(|bit| BoolAtom::compile(bit, nargs, &mut bindings, &let_offsets))
+            .collect::<Option<Vec<_>>>()?;
+        Some(BitCircuitPlan {
+            bindings,
+            output_bits,
+            ret_bits,
+        })
     }
-    let mut raw_bits = Vec::new();
-    if !flatten_concat_bits(current, &mut raw_bits) {
-        return None;
-    }
-    if raw_bits.len() != ret_bits {
-        return None;
-    }
-    let output_bits = raw_bits
-        .into_iter()
-        .map(|bit| BoolAtom::compile(bit, nargs, &mut bindings))
-        .collect::<Option<Vec<_>>>()?;
-    Some(BitCircuitPlan {
-        bindings,
-        output_bits,
-        ret_bits,
-    })
 }
 
-fn compile_plan(expr: &OwnedExpr, arg_bits: &[usize]) -> DefineFunPlan {
-    let nargs = arg_bits.len();
-    let ret_bits = expr.width();
-    if let Some(plan) = try_compile_bit_circuit(expr, nargs, ret_bits) {
-        return DefineFunPlan::BitCircuit(plan);
+impl DefineFunPlan {
+    /// Compile an OwnedExpr to an executable plan. Prefers the
+    /// boolean-circuit fast-path when possible, otherwise falls back to a
+    /// generic stack-machine plan.
+    pub fn compile(expr: &OwnedExpr, arg_bits: &[usize]) -> Self {
+        let nargs = arg_bits.len();
+        let ret_bits = expr.width();
+        if let Some(plan) = BitCircuitPlan::try_compile(expr, nargs, ret_bits) {
+            return DefineFunPlan::BitCircuit(plan);
+        }
+        compile_generic(expr, arg_bits, ret_bits)
     }
+}
+
+fn compile_generic(expr: &OwnedExpr, arg_bits: &[usize], _ret_bits: usize) -> DefineFunPlan {
+    let nargs = arg_bits.len();
     fn compile_expr(
         expr: &OwnedExpr,
         env_slots: &mut Vec<usize>,
@@ -669,12 +702,12 @@ impl Environ {
                 .iter()
                 .map(|(_, bits)| *bits as usize)
                 .collect::<Vec<_>>();
-            let plan = compile_plan(&expr, &extended_arg_bits);
+            let plan = DefineFunPlan::compile(&expr, &extended_arg_bits);
             info!(
                 "DefineFun: {} {} -> {}",
                 name,
                 args.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "),
-                summarize_expr(&expr, 160)
+                expr.summarize(160)
             );
             self.inner()[args.len()].push(DefineFun {
                 name,
@@ -704,7 +737,7 @@ impl Environ {
     pub fn apply(&self, id: usize, nargs: usize) -> &OwnedExpr {
         &self.inner()[nargs][id].expr
     }
-    pub(crate) fn plan(&self, id: usize, nargs: usize) -> &DefineFunPlan {
+    pub fn plan(&self, id: usize, nargs: usize) -> &DefineFunPlan {
         &self.inner()[nargs][id].plan
     }
     pub fn ret_bits(&self, id: usize, nargs: usize) -> usize {

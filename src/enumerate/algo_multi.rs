@@ -343,15 +343,15 @@ impl<'a, const N: usize> Algo<'a, N> {
                 let a = self.eval_owned_abs(a, vars, depth + 1)?;
                 let b = self.eval_owned_abs(b, vars, depth + 1)?;
                 AbsSummary {
-                    may_one: concat_bv(a.may_one, b.may_one, rhs_bits),
-                    may_zero: concat_bv(a.may_zero, b.may_zero, rhs_bits),
+                    may_one: a.may_one.concat_low(b.may_one, rhs_bits),
+                    may_zero: a.may_zero.concat_low(b.may_zero, rhs_bits),
                 }
             }
             OwnedExpr::Extract(a, hi, lo) => {
                 let a = self.eval_owned_abs(a, vars, depth + 1)?;
                 AbsSummary {
-                    may_one: extract_bv(a.may_one, *hi, *lo),
-                    may_zero: extract_bv(a.may_zero, *hi, *lo),
+                    may_one: a.may_one.extract(*hi, *lo),
+                    may_zero: a.may_zero.extract(*hi, *lo),
                 }
             }
             OwnedExpr::Ite(_, b, c) => {
@@ -405,8 +405,8 @@ impl<'a, const N: usize> Algo<'a, N> {
                 may_zero: (a.may_one & b.may_one) | (a.may_zero & b.may_zero),
             },
             ("concat", [a, b]) => AbsSummary {
-                may_one: concat_bv(a.may_one, b.may_one, 64),
-                may_zero: concat_bv(a.may_zero, b.may_zero, 64),
+                may_one: a.may_one.concat_low(b.may_one, 64),
+                may_zero: a.may_zero.concat_low(b.may_zero, 64),
             },
             _ => {
                 if let Some(fid) = crate::parse::deffun::ENV.lookup(op, args.len()) {
@@ -481,32 +481,5 @@ impl OwnedExpr {
     }
     }
 }
-fn extract_bv<const N: usize>(value: Bv<N>, hi: u64, lo: u64) -> Bv<N> {
-    if lo >= 64 {
-        return Bv::ZEROS;
-    }
-    let width = hi.saturating_sub(lo).saturating_add(1).min(64);
-    let mask = if width >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << width) - 1
-    };
-    Bv(value.map(|lane| (lane >> lo) & mask))
-}
-
-fn concat_bv<const N: usize>(lhs: Bv<N>, rhs: Bv<N>, rhs_bits: usize) -> Bv<N> {
-    if rhs_bits >= 64 {
-        return rhs;
-    }
-    let shift = rhs_bits as u32;
-    let mask = if rhs_bits == 0 {
-        0
-    } else {
-        (1u64 << shift) - 1
-    };
-    Bv(lhs
-        .into_iter_fixed()
-        .zip(rhs.into_iter_fixed())
-        .map(|(l, r)| (l << shift) | (r & mask))
-        .collect())
-}
+// (extract / concat helpers were duplicated here; see `Bv::extract` and
+// `Bv::concat_low` in `enumerate/mod.rs`.)

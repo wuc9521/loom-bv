@@ -21,50 +21,31 @@ enum_expr!();
 #[error("divided by zero")]
 pub struct DivideByZero;
 
-fn bv_extract<const N: usize>(value: Bv<N>, hi: u64, lo: u64) -> Bv<N> {
-    let width = hi - lo + 1;
-    let mask = if width >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << width) - 1
-    };
-    Bv(value.map(|lane| (lane >> lo) & mask))
-}
-
-fn bv_concat<const N: usize>(lhs: Bv<N>, rhs: Bv<N>, rhs_bits: usize) -> Bv<N> {
-    let shift = rhs_bits.min(63) as u32;
-    Bv(lhs
-        .into_iter_fixed()
-        .zip(rhs.into_iter_fixed())
-        .map(|(l, r)| (l << shift) | r)
-        .collect())
-}
-
-fn expr_width(expr: &Expr<'_>) -> usize {
-    match expr {
-        Expr::Concat(a, b) => expr_width(a) + expr_width(b),
-        Expr::Extract(_, hi, lo) => (hi - lo + 1) as usize,
-        Expr::Fop0Dyn(id) => deffun::ENV.ret_bits(*id, 0),
-        Expr::Const(v) => v.bits(),
-        Expr::Var(_, width) => *width,
-        Expr::Not(a)
-        | Expr::Neg(a)
-        | Expr::Fop1Dyn(_, a) => expr_width(a),
-        Expr::Add(a, _)
-        | Expr::Xor(a, _)
-        | Expr::And(a, _)
-        | Expr::Or(a, _)
-        | Expr::Mul(a, _)
-        | Expr::Sub(a, _)
-        | Expr::Fop2Dyn(_, a, _)
-        | Expr::LShr(a, _)
-        | Expr::AShr(a, _)
-        | Expr::Shl(a, _)
-        | Expr::UDiv(a, _)
-        | Expr::URem(a, _)
-        | Expr::SDiv(a, _)
-        | Expr::SRem(a, _) => expr_width(a),
-        Expr::Ite(_, a, _) => expr_width(a),
+impl<'a> Expr<'a> {
+    pub fn width(&self) -> usize {
+        match self {
+            Expr::Concat(a, b) => a.width() + b.width(),
+            Expr::Extract(_, hi, lo) => (hi - lo + 1) as usize,
+            Expr::Fop0Dyn(id) => deffun::ENV.ret_bits(*id, 0),
+            Expr::Const(v) => v.bits(),
+            Expr::Var(_, width) => *width,
+            Expr::Not(a) | Expr::Neg(a) | Expr::Fop1Dyn(_, a) => a.width(),
+            Expr::Add(a, _)
+            | Expr::Xor(a, _)
+            | Expr::And(a, _)
+            | Expr::Or(a, _)
+            | Expr::Mul(a, _)
+            | Expr::Sub(a, _)
+            | Expr::Fop2Dyn(_, a, _)
+            | Expr::LShr(a, _)
+            | Expr::AShr(a, _)
+            | Expr::Shl(a, _)
+            | Expr::UDiv(a, _)
+            | Expr::URem(a, _)
+            | Expr::SDiv(a, _)
+            | Expr::SRem(a, _) => a.width(),
+            Expr::Ite(_, a, _) => a.width(),
+        }
     }
 }
 
@@ -148,10 +129,10 @@ impl<'a> Expr<'a> {
             return args[*a];
         }
         if let Expr::Concat(a, b) = self {
-            return bv_concat(a.eval_bv(args), b.eval_bv(args), expr_width(b));
+            return a.eval_bv(args).concat_low(b.eval_bv(args), b.width());
         }
         if let Expr::Extract(a, hi, lo) = self {
-            return bv_extract(a.eval_bv(args), *hi, *lo);
+            return a.eval_bv(args).extract(*hi, *lo);
         }
         if let Expr::Fop0Dyn(id) = self {
             return deffun::ENV.apply(*id, 0).eval_bv(&[]);
@@ -290,13 +271,13 @@ impl<'a> Expr<'a> {
             let v2 = b.for_each_subexpr(f, args)?;
             let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
             f(b, v2)?;
-            return Ok(Some(bv_concat(v1, v2, expr_width(b))));
+            return Ok(Some(v1.concat_low(v2, b.width())));
         }
         if let Expr::Extract(a, hi, lo) = self {
             let v = a.for_each_subexpr(f, args)?;
             let v = if let Some(v) = v { v } else { return Ok(None) };
             f(a, v)?;
-            return Ok(Some(bv_extract(v, *hi, *lo)));
+            return Ok(Some(v.extract(*hi, *lo)));
         }
         if let Expr::Fop0Dyn(id) = self {
             return Ok(Some(deffun::ENV.apply(*id, 0).eval_bv(&[])));
@@ -819,6 +800,19 @@ impl OwnedExpr {
         }
     }
 
+    /// Render this expression as a string, truncated to roughly `limit`
+    /// characters with a `... <N chars total>` suffix when it overflows.
+    /// Used by deffun logging to keep huge compiled bodies grep-able.
+    pub fn summarize(&self, limit: usize) -> String {
+        let rendered = self.to_string();
+        let total = rendered.chars().count();
+        if total <= limit {
+            return rendered;
+        }
+        let prefix = rendered.chars().take(limit).collect::<String>();
+        format!("{prefix}... <{} chars total>", total)
+    }
+
     fn eval_let_chain(&self, args: &[Value]) -> Result<Value, DivideByZero> {
         let mut scoped = args.to_vec();
         let mut current = self;
@@ -925,10 +919,10 @@ impl OwnedExpr {
             return args[*a];
         }
         if let OwnedExpr::Concat(a, b) = self {
-            return bv_concat(a.eval_bv(args), b.eval_bv(args), b.width());
+            return a.eval_bv(args).concat_low(b.eval_bv(args), b.width());
         }
         if let OwnedExpr::Extract(a, hi, lo) = self {
-            return bv_extract(a.eval_bv(args), *hi, *lo);
+            return a.eval_bv(args).extract(*hi, *lo);
         }
         if let OwnedExpr::Fop0Dyn(id) = self {
             return deffun::ENV.apply(*id, 0).eval_bv(&[]);

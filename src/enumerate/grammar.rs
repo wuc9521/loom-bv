@@ -202,7 +202,7 @@ fn template_from_term(
             for arg in args {
                 let (template, mut nts, size) = template_from_term(arg, nt_lookup, env)?;
                 let offset = child_nts.len();
-                rendered_args.push(shift_slots(template, offset));
+                rendered_args.push(template.shift_slots(offset));
                 child_nts.append(&mut nts);
                 base_size += size;
             }
@@ -219,16 +219,19 @@ fn template_from_term(
     }
 }
 
-fn shift_slots(expr: TemplateExpr, offset: usize) -> TemplateExpr {
-    match expr {
-        TemplateExpr::Slot(i) => TemplateExpr::Slot(i + offset),
-        TemplateExpr::Leaf(expr) => TemplateExpr::Leaf(expr),
-        TemplateExpr::App(id, args) => TemplateExpr::App(
-            id,
-            args.into_iter()
-                .map(|arg| shift_slots(arg, offset))
-                .collect(),
-        ),
+impl TemplateExpr {
+    /// Renumber every `Slot(i)` reference in this template to `Slot(i + offset)`.
+    /// Used when stitching a child template into a parent that already
+    /// consumed `offset` slot indices.
+    pub fn shift_slots(self, offset: usize) -> TemplateExpr {
+        match self {
+            TemplateExpr::Slot(i) => TemplateExpr::Slot(i + offset),
+            TemplateExpr::Leaf(expr) => TemplateExpr::Leaf(expr),
+            TemplateExpr::App(id, args) => TemplateExpr::App(
+                id,
+                args.into_iter().map(|arg| arg.shift_slots(offset)).collect(),
+            ),
+        }
     }
 }
 

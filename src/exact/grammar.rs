@@ -20,7 +20,7 @@ impl ExactGrammar<'static> {
                         child_nts,
                         base_size,
                         ..
-                    } => compile_exact_rule(template, child_nts, *base_size),
+                    } => ExactRule::from_template(template, child_nts, *base_size),
                 })
                 .collect();
             (*name, compiled)
@@ -33,7 +33,12 @@ impl ExactGrammar<'static> {
     }
 }
 
-fn compile_exact_rule(template: &TemplateExpr, child_nts: &[usize], base_size: usize) -> ExactRule {
+impl ExactRule {
+    /// Try to fold a `MultiRule::Template`'s template into one of the dedicated
+    /// `ExactRule` variants (Leaf / Unary / Binary / Nary) that don't carry
+    /// the full TemplateExpr. Falls back to `GenericTemplate` whenever the
+    /// shape doesn't match `op(slot_0, slot_1, ...)` exactly.
+    pub fn from_template(template: &TemplateExpr, child_nts: &[usize], base_size: usize) -> ExactRule {
     if child_nts.is_empty() {
         if let TemplateExpr::Leaf(expr) = template {
             return ExactRule::Leaf(expr.clone());
@@ -85,5 +90,6 @@ fn compile_exact_rule(template: &TemplateExpr, child_nts: &[usize], base_size: u
             fid,
             child_nts: child_nts.to_vec(),
         },
+    }
     }
 }

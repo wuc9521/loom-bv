@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 
-use pest::Span;
 use sygus_parser::ast::{Identifier, Literal as SyGuSLiteral, SyGuSCmd, SyGuSFile, SyGuSTerm};
 
 use crate::{
     enumerate::{expr::OwnedExpr, value::Value},
     parse::{self, new_custom_error_span},
 };
+
+use super::util::{empty_span, extract_indices_from_identifier};
 
 pub fn parse_target_define_fun(
     file: &SyGuSFile,
@@ -198,51 +199,6 @@ fn rewrite_constraint_literals_for_owned_eval(term: &SyGuSTerm) -> SyGuSTerm {
     }
 }
 
-fn index_numeral(idx: &sygus_parser::ast::Index) -> Option<usize> {
-    match idx {
-        sygus_parser::ast::Index::Numeral(v) => Some(*v),
-        sygus_parser::ast::Index::Symbol(_) => None,
-    }
-}
-
-fn extract_indices_from_identifier(id: &Identifier) -> Option<(usize, usize)> {
-    match id {
-        Identifier::Indexed(sym, idxs) if sym == "extract" && idxs.len() >= 2 => {
-            match (index_numeral(&idxs[0]), index_numeral(&idxs[1])) {
-                (Some(hi), Some(lo)) => Some((hi, lo)),
-                _ => None,
-            }
-        }
-        Identifier::Indexed(sym, idxs) if sym == "_" && idxs.len() >= 3 => {
-            match (&idxs[0], index_numeral(&idxs[1]), index_numeral(&idxs[2])) {
-                (sygus_parser::ast::Index::Symbol(op), Some(hi), Some(lo)) if op == "extract" => {
-                    Some((hi, lo))
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-    .or_else(|| {
-        let text = id.to_string();
-        let parts = text
-            .trim_matches(|c| c == '(' || c == ')')
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        match parts.as_slice() {
-            ["_", "extract", hi, lo] => match (hi.parse::<usize>(), lo.parse::<usize>()) {
-                (Ok(hi), Ok(lo)) => Some((hi, lo)),
-                _ => None,
-            },
-            ["extract", hi, lo] => match (hi.parse::<usize>(), lo.parse::<usize>()) {
-                (Ok(hi), Ok(lo)) => Some((hi, lo)),
-                _ => None,
-            },
-            _ => None,
-        }
-    })
-}
-
 fn extract_on_phi_range(term: &SyGuSTerm, target: &str) -> Option<(usize, usize)> {
     match term {
         SyGuSTerm::Annotated(inner, _) => extract_on_phi_range(inner, target),
@@ -334,6 +290,3 @@ fn extract_bit_of_target(term: &SyGuSTerm, target_name: &str) -> Option<usize> {
     (hi == lo).then_some(hi)
 }
 
-fn empty_span() -> Span<'static> {
-    Span::new("", 0, 0).expect("empty span should be valid")
-}

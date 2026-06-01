@@ -66,6 +66,11 @@ pub fn srem(this: Value, that: Value) -> Result<Value, DivideByZero> {
 
 #[inline(always)]
 pub fn ite(v1: Value, v2: Value, v3: Value) -> Value {
+    // dryadsynth's internal Bool encoding is negative: a Bool expression is
+    // represented by a BV that is 0 iff the underlying SMT condition is
+    // *true* (e.g. SMT `(= A B)` is parsed as `Xor(A, B)`, which is 0 iff
+    // A == B). So when v1.is_zero() the SMT cond is true and we return the
+    // then-branch v2.
     if v1.is_zero() {
         v2
     } else {

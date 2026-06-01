@@ -61,6 +61,17 @@ impl Value {
         }
     }
 
+    /// Reinterpret this `Value` as a Bool in dryadsynth's negative-logic
+    /// internal encoding (SMT-true ↔ all bits 0, SMT-false ↔ any bit 1).
+    /// `(= a b)` is parsed as `Xor(a, b)` so the bit-zero result means
+    /// "equal" = "SMT-true"; `and`/`or` invert to internal `Or`/`And` for
+    /// the same reason. Use this whenever a `Value` should be read as a
+    /// SyGuS Bool — it makes the convention visible at the use site and
+    /// prevents accidental `!is_zero()` flips.
+    pub fn as_bool(&self) -> BoolValue<'_> {
+        BoolValue(self)
+    }
+
     pub fn as_u64_lossy(&self) -> u64 {
         match self {
             Value::Small { raw, .. } => *raw,
@@ -407,6 +418,18 @@ impl Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.to_smt_hex())
+    }
+}
+
+/// View of a `Value` interpreted as a SyGuS Bool under the internal
+/// negative-logic convention. Holds when the underlying value is zero.
+#[derive(Clone, Copy)]
+pub struct BoolValue<'a>(&'a Value);
+
+impl<'a> BoolValue<'a> {
+    /// `true` iff the wrapped value encodes SMT-true (bit pattern all-zero).
+    pub fn holds(&self) -> bool {
+        self.0.is_zero()
     }
 }
 

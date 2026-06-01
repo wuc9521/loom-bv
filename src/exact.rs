@@ -3,10 +3,10 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 pub mod closure;
-mod eval;
 mod grammar;
 mod relevance;
 mod spec;
+mod util;
 
 use rustc_hash::FxHashMap;
 use sygus_parser::ast::SyGuSFile;
@@ -14,11 +14,11 @@ use sygus_parser::ast::SyGuSFile;
 use crate::{
     enumerate::{
         expr::OwnedExpr,
-        grammar::{for_each_candidate_tuple, for_each_size_split, MultiConfig, TemplateExpr},
+        grammar::{build_owned_application, for_each_candidate_tuple, for_each_size_split, MultiConfig, TemplateExpr},
         value::Value,
     },
     info,
-    parse::{self, SynthProblem},
+    parse::{self, deffun, SynthProblem},
 };
 
 pub enum NullarySpec {
@@ -76,7 +76,7 @@ impl NullarySpec {
                 }
                 structural.iter().all(|expr| {
                     expr.eval(std::slice::from_ref(value))
-                        .map(|v| v.is_zero())
+                        .map(|v| v.as_bool().holds())
                         .unwrap_or(false)
                 })
             }
@@ -84,43 +84,47 @@ impl NullarySpec {
     }
 }
 
-pub fn search_nullary(
-    problem: &SynthProblem<'static>,
-    spec: &NullarySpec,
-    min: bool,
-    mitm: bool,
-) -> parse::Result<OwnedExpr> {
-    let cfg_start = Instant::now();
-    let multi = MultiConfig::from_problem(problem)?;
-    info!(
-        "exact-nullary setup multi-config completed in {:?}",
-        cfg_start.elapsed()
-    );
-    let grammar_start = Instant::now();
-    let grammar = ExactGrammar::from_config(&multi);
-    info!(
-        "exact-nullary setup exact-grammar completed in {:?}",
-        grammar_start.elapsed()
-    );
-    search_nullary_multi_nt(&grammar, spec, min, mitm)
+impl NullarySpec {
+    /// Search the problem grammar for a term matching this spec. Builds the
+    /// `ExactGrammar` from `problem`, then drives the multi-NT search loop.
+    pub fn search(
+        &self,
+        problem: &SynthProblem<'static>,
+        min: bool,
+        mitm: bool,
+    ) -> parse::Result<OwnedExpr> {
+        let cfg_start = Instant::now();
+        let multi = MultiConfig::from_problem(problem)?;
+        info!(
+            "exact-nullary setup multi-config completed in {:?}",
+            cfg_start.elapsed()
+        );
+        let grammar_start = Instant::now();
+        let grammar = ExactGrammar::from_config(&multi);
+        info!(
+            "exact-nullary setup exact-grammar completed in {:?}",
+            grammar_start.elapsed()
+        );
+        search_nullary_multi_nt(&grammar, self, min, mitm)
+    }
 }
 
-pub(crate) type NodeId = usize;
+pub type NodeId = usize;
 
-pub(crate) struct Node {
-    pub(crate) nt_idx: usize,
-    pub(crate) rule_idx: usize,
-    pub(crate) children: Vec<NodeId>,
+pub struct Node {
+    pub nt_idx: usize,
+    pub rule_idx: usize,
+    pub children: Vec<NodeId>,
 }
 
 #[derive(Clone)]
-pub(crate) struct ExactGrammar<'a> {
-    pub(crate) nts: Vec<(&'a str, Vec<ExactRule>)>,
-    pub(crate) start: usize,
+pub struct ExactGrammar<'a> {
+    pub nts: Vec<(&'a str, Vec<ExactRule>)>,
+    pub start: usize,
 }
 
 #[derive(Clone)]
-pub(crate) enum ExactRule {
+pub enum ExactRule {
     Alias(usize),
     Leaf(OwnedExpr),
     Unary {
@@ -144,8 +148,40 @@ pub(crate) enum ExactRule {
 }
 
 #[derive(Default)]
-pub(crate) struct ExactEvalCache {
-    pub(crate) leaves: FxHashMap<OwnedExpr, Option<Value>>,
+pub struct ExactEvalCache {
+    pub leaves: FxHashMap<OwnedExpr, Option<Value>>,
+}
+
+impl TemplateExpr {
+    /// Evaluate a `TemplateExpr` rule from the exact-search grammar at
+    /// concrete argument values. Caches the leaf evaluations because the
+    /// same constant leaf appears across many template instantiations.
+    pub fn evaluate(
+        &self,
+        args: &[Value],
+        cache: &mut ExactEvalCache,
+    ) -> Result<Value, ()> {
+        match self {
+            TemplateExpr::Slot(i) => Ok(args[*i].clone()),
+            TemplateExpr::Leaf(expr) => cache
+                .leaves
+                .entry(expr.clone())
+                .or_insert_with(|| expr.eval(&[]).ok())
+                .clone()
+                .ok_or(()),
+            TemplateExpr::App(id, parts) => {
+                let values = parts
+                    .iter()
+                    .map(|part| part.evaluate(args, cache))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let const_args = values.into_iter().map(OwnedExpr::Const).collect::<Vec<_>>();
+                build_owned_application(id, &const_args)
+                    .ok()
+                    .and_then(|expr| expr.eval(&[]).ok())
+                    .ok_or(())
+            }
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -203,7 +239,7 @@ fn search_nullary_multi_nt(
             relevance_start.elapsed()
         );
         if let Some(bits) = &eager_relevant_bits {
-            log_relevance_summary(grammar, bits);
+            grammar.log_relevance_summary(bits);
         }
     }
     let mut leaf_rules = 0usize;
@@ -311,7 +347,9 @@ fn search_nullary_multi_nt(
                             .to_vec();
                         for child in &children {
                             eval_attempted += 1;
-                            let value = eval::evaluate_fop1(*fid, &child.value);
+                            let value = deffun::ENV
+                                .eval_defined(*fid, 1, std::slice::from_ref(&child.value))
+                                .map_err(|_| ());
                             let Ok(value) = value else {
                                 eval_failed += 1;
                                 continue;
@@ -367,8 +405,9 @@ fn search_nullary_multi_nt(
                             for lhs in &lhs_pool {
                                 for rhs in &rhs_pool {
                                     eval_attempted += 1;
-                                    let value =
-                                        eval::evaluate_fop2(*fid, &lhs.value, &rhs.value);
+                                    let value = deffun::ENV
+                                        .eval_defined(*fid, 2, &[lhs.value.clone(), rhs.value.clone()])
+                                        .map_err(|_| ());
                                     let Ok(value) = value else {
                                         eval_failed += 1;
                                         continue;
@@ -427,7 +466,10 @@ fn search_nullary_multi_nt(
                                         .map(|cand| cand.value.clone())
                                         .collect::<Vec<_>>();
                                     eval_attempted += 1;
-                                    let Ok(value) = eval::evaluate_fopn(*fid, &child_values) else {
+                                    let Ok(value) = deffun::ENV
+                                        .eval_defined(*fid, child_values.len(), &child_values)
+                                        .map_err(|_| ())
+                                    else {
                                         eval_failed += 1;
                                         return;
                                     };
@@ -470,7 +512,7 @@ fn search_nullary_multi_nt(
                         if child_nts.is_empty() {
                             if child_total == 0 {
                                 if let Ok(value) =
-                                    eval::evaluate_template_value(template, &[], &mut eval_cache)
+                                    template.evaluate(&[], &mut eval_cache)
                                 {
                                     eval_attempted += 1;
                                     if let Some(found) = insert_multi_nt_candidate(
@@ -528,11 +570,7 @@ fn search_nullary_multi_nt(
                                         .map(|cand| cand.value.clone())
                                         .collect::<Vec<_>>();
                                     eval_attempted += 1;
-                                    let Ok(value) = eval::evaluate_template_value(
-                                        template,
-                                        &child_values,
-                                        &mut eval_cache,
-                                    ) else {
+                                    let Ok(value) = template.evaluate(&child_values, &mut eval_cache) else {
                                         eval_failed += 1;
                                         return;
                                     };
@@ -646,7 +684,7 @@ fn maybe_refine_lazy_relevance(
         "exact-nullary setup relevance completed lazily in {:?}",
         start.elapsed()
     );
-    log_relevance_summary(grammar, &relevant_bits);
+    grammar.log_relevance_summary(&relevant_bits);
     *seen = build_projected_seen(by_size, &relevant_bits);
 }
 
@@ -671,22 +709,24 @@ fn build_projected_seen(
     }
 }
 
-fn log_relevance_summary(grammar: &ExactGrammar<'_>, relevant_bits: &[Vec<usize>]) {
-    let total_kept: usize = relevant_bits.iter().map(Vec::len).sum();
-    let total_full: usize = grammar
-        .nts
-        .iter()
-        .map(|(_, rules)| relevance::nt_output_bits(rules))
-        .sum();
-    info!(
-        "exact-nullary relevance: {}/{} bits relevant ({:.1}%)",
-        total_kept,
-        total_full,
-        total_kept as f64 / total_full as f64 * 100.0
-    );
-    for (i, (bits, (_, rules))) in relevant_bits.iter().zip(grammar.nts.iter()).enumerate() {
-        let nt_total = relevance::nt_output_bits(rules);
-        info!("  nt[{}]: {}/{} bits relevant", i, bits.len(), nt_total);
+impl<'a> ExactGrammar<'a> {
+    pub fn log_relevance_summary(&self, relevant_bits: &[Vec<usize>]) {
+        let total_kept: usize = relevant_bits.iter().map(Vec::len).sum();
+        let total_full: usize = self
+            .nts
+            .iter()
+            .map(|(_, rules)| relevance::nt_output_bits(rules))
+            .sum();
+        info!(
+            "exact-nullary relevance: {}/{} bits relevant ({:.1}%)",
+            total_kept,
+            total_full,
+            total_kept as f64 / total_full as f64 * 100.0
+        );
+        for (i, (bits, (_, rules))) in relevant_bits.iter().zip(self.nts.iter()).enumerate() {
+            let nt_total = relevance::nt_output_bits(rules);
+            info!("  nt[{}]: {}/{} bits relevant", i, bits.len(), nt_total);
+        }
     }
 }
 
@@ -782,13 +822,13 @@ impl Value {
 }
 
 
-pub(crate) fn intern_node(nodes: &mut Vec<Node>, node: Node) -> NodeId {
+pub fn intern_node(nodes: &mut Vec<Node>, node: Node) -> NodeId {
     let id = nodes.len();
     nodes.push(node);
     id
 }
 
-pub(crate) fn materialize_node(
+pub fn materialize_node(
     id: NodeId,
     grammar: &ExactGrammar<'_>,
     nodes: &[Node],

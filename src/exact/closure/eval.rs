@@ -11,7 +11,22 @@ use crate::enumerate::value::Value;
 use crate::parse::{self, deffun, new_custom_error_span};
 
 
-use super::spec::empty_span;
+use crate::exact::util::empty_span;
+
+impl OwnedExpr {
+    /// Evaluate this OwnedExpr at the value level, substituting `closure_value`
+    /// for every reference to the closure synth-fun named `closure_name`
+    /// (either as a bare `Var` placeholder or via the env-tracked closure-arg
+    /// slots of defined functions).
+    pub fn eval_with_closure(
+        &self,
+        env: &deffun::Environ,
+        closure_value: &Value,
+        closure_name: &str,
+    ) -> parse::Result<Value> {
+        eval_owned_with_closure(self, env, closure_value, closure_name)
+    }
+}
 
 pub fn eval_owned_with_closure(
     expr: &OwnedExpr,
@@ -90,7 +105,7 @@ pub fn eval_owned_with_closure(
         }
         OwnedExpr::Ite(cond, then_e, else_e) => {
             let c = eval_owned_with_closure(cond, env, closure_value, closure_name)?;
-            if c.is_zero() {
+            if c.as_bool().holds() {
                 eval_owned_with_closure(then_e, env, closure_value, closure_name)
             } else {
                 eval_owned_with_closure(else_e, env, closure_value, closure_name)
@@ -131,22 +146,27 @@ pub fn closure_arg_values(
 
 
 
-pub fn compute_full_lfp(
-    env: &deffun::Environ,
-    g_expr: &OwnedExpr,
-    closure_name: &str,
-    bits: usize,
-) -> parse::Result<Value> {
-    let mut rhs_s = Value::from_u64(0, bits);
-    for _ in 0..=bits {
-        let next = eval_owned_with_closure(g_expr, env, &rhs_s, closure_name)?;
-        if next == rhs_s {
-            return Ok(next);
+impl OwnedExpr {
+    /// Iterate `self` as the body of a closure synth-fun until reaching a
+    /// `bits`-wide fixpoint, starting from all-zeros. Bounded by `bits + 1`
+    /// iterations (monotone Boolean lattice height).
+    pub fn full_lfp(
+        &self,
+        env: &deffun::Environ,
+        closure_name: &str,
+        bits: usize,
+    ) -> parse::Result<Value> {
+        let mut rhs_s = Value::from_u64(0, bits);
+        for _ in 0..=bits {
+            let next = self.eval_with_closure(env, &rhs_s, closure_name)?;
+            if next == rhs_s {
+                return Ok(next);
+            }
+            rhs_s = next;
         }
-        rhs_s = next;
+        Err(new_custom_error_span(
+            "lfp: full LFP did not converge".into(),
+            empty_span(),
+        ))
     }
-    Err(new_custom_error_span(
-        "lfp: full LFP did not converge".into(),
-        empty_span(),
-    ))
 }

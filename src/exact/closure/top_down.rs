@@ -13,7 +13,8 @@ use crate::info;
 use crate::parse::{self, deffun, new_custom_error_span};
 
 use super::eval::closure_arg_values;
-use super::spec::{empty_span, LfpSpec};
+use super::spec::LfpSpec;
+use crate::exact::util::empty_span;
 
 pub fn search(
     spec: &LfpSpec,

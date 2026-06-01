@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 
-use sygus_parser::ast::{GrammarDef, Identifier, Literal, Sort, SortedVar, SyGuSTerm};
+use sygus_parser::ast::{GrammarDef, Literal, Sort, SortedVar, SyGuSTerm};
 
 use crate::enumerate::expr::OwnedExpr;
 use crate::enumerate::grammar::MultiConfig;
@@ -27,7 +27,7 @@ use crate::exact::{relevance, ExactGrammar, NullarySpec};
 use crate::parse::cfg::Cfg;
 use crate::parse::{self, deffun, new_custom_error_span, ProblemView, SynthFunView, SynthProblem};
 
-use super::eval::compute_full_lfp;
+use crate::exact::util::{empty_span, extract_single_bit_idx};
 
 /// LFP synthesis pattern detected in a SyGuS problem.
 pub enum LfpSpec<'a> {
@@ -242,7 +242,7 @@ impl<'a> LfpSpec<'a> {
                 bits,
                 ..
             } => {
-                let fixpoint = compute_full_lfp(env, &expr, fixpoint_name, *bits)?;
+                let fixpoint = expr.full_lfp(env, fixpoint_name, *bits)?;
                 let value = format!("#b{}", fixpoint.to_binstr(*bits));
                 Ok(format!(
                     "(define-fun {} () {} {})\n(define-fun {} () {} {})",
@@ -329,25 +329,6 @@ fn parse_label_constraint(term: &SyGuSTerm, target: &str) -> Option<(usize, bool
     Some((bit_idx, expected))
 }
 
-fn extract_single_bit_idx(id: &Identifier) -> Option<usize> {
-    let Identifier::Indexed(name, idxs) = id else { return None; };
-    if name != "extract" || idxs.len() != 2 {
-        return None;
-    }
-    let hi = numeral_index(&idxs[0])?;
-    let lo = numeral_index(&idxs[1])?;
-    if hi != lo {
-        return None;
-    }
-    Some(hi)
-}
-
-fn numeral_index(idx: &sygus_parser::ast::Index) -> Option<usize> {
-    match idx {
-        sygus_parser::ast::Index::Numeral(n) => Some(*n),
-        sygus_parser::ast::Index::Symbol(_) => None,
-    }
-}
 
 fn term_mentions_symbol(term: &SyGuSTerm, target: &str) -> bool {
     match term {
@@ -365,9 +346,6 @@ fn term_mentions_symbol(term: &SyGuSTerm, target: &str) -> bool {
     }
 }
 
-pub fn empty_span() -> pest::Span<'static> {
-    pest::Span::new("", 0, 0).unwrap()
-}
 
 impl Value {
     fn to_binstr(&self, bits: usize) -> String {

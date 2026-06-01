@@ -17,16 +17,21 @@ mod top_down;
 
 pub use spec::LfpSpec;
 
-pub fn search(spec: &LfpSpec, env: &deffun::Environ) -> parse::Result<Option<String>> {
-    let (nt_bits, closure_bits) = spec.closure_relevant_bits()?;
-    info!(
-        "{}: closure bits = {}/{}; start output bits = {}/{}",
-        spec.variant_tag(),
-        closure_bits.len(),
-        spec.bits(),
-        nt_bits.first().map(Vec::len).unwrap_or(0),
-        spec.bits()
-    );
-    let start_relevant = nt_bits.into_iter().next().unwrap_or_default();
-    top_down::search(spec, env, &start_relevant)
+impl<'a> LfpSpec<'a> {
+    /// Drive the LFP-closure search for this spec: compute backward-relevance
+    /// over the closure bits, then enumerate operator terms via the top-down
+    /// engine and return the first one whose LFP satisfies the labels.
+    pub fn search(&self, env: &deffun::Environ) -> parse::Result<Option<String>> {
+        let (nt_bits, closure_bits) = self.closure_relevant_bits()?;
+        info!(
+            "{}: closure bits = {}/{}; start output bits = {}/{}",
+            self.variant_tag(),
+            closure_bits.len(),
+            self.bits(),
+            nt_bits.first().map(Vec::len).unwrap_or(0),
+            self.bits()
+        );
+        let start_relevant = nt_bits.into_iter().next().unwrap_or_default();
+        top_down::search(self, env, &start_relevant)
+    }
 }
