@@ -8,6 +8,8 @@ mod relevance;
 mod spec;
 mod util;
 
+use num_bigint::BigUint;
+use num_traits::One;
 use rustc_hash::FxHashMap;
 use sygus_parser::ast::SyGuSFile;
 
@@ -32,6 +34,43 @@ pub enum NullarySpec {
         /// (see boolean encoding in `enumerate/expr.rs` `from_term`).
         structural: Vec<OwnedExpr>,
     },
+}
+
+/// Evaluate a define-fun, transparently appending closure-arg values when the
+/// define-fun's body references closure synth-funs.
+///
+/// `closure = None` is the direct-mode fast path: a problem with no closure
+/// synth-funs at all (every LTL/Reg/FO benchmark) — we bypass the
+/// `closure_args` metadata lookup entirely so the hot loop is identical to a
+/// direct `eval_defined` call. `closure = Some((name, value))` binds the named
+/// closure synth-fun to `value`; any other closure synth-funs the body
+/// references fall back to zero (mirroring the original `closure_arg_values`
+/// policy).
+#[inline]
+pub fn eval_defined_with_closure(
+    fid: usize,
+    nargs: usize,
+    args: &[Value],
+    closure: Option<(&str, &Value)>,
+) -> Result<Value, ()> {
+    let Some((closure_name, closure_value)) = closure else {
+        return deffun::ENV.eval_defined(fid, nargs, args).map_err(|_| ());
+    };
+    let names = deffun::ENV.closure_args(fid, nargs);
+    if names.is_empty() {
+        return deffun::ENV.eval_defined(fid, nargs, args).map_err(|_| ());
+    }
+    let bits = deffun::ENV.closure_arg_bits(fid, nargs);
+    let mut full = Vec::with_capacity(args.len() + names.len());
+    full.extend_from_slice(args);
+    for (name, b) in names.iter().zip(bits.iter()) {
+        if *name == closure_name {
+            full.push(closure_value.clone());
+        } else {
+            full.push(Value::from_u64(0, *b));
+        }
+    }
+    deffun::ENV.eval_defined(fid, nargs, &full).map_err(|_| ())
 }
 
 impl NullarySpec {
@@ -87,11 +126,22 @@ impl NullarySpec {
 impl NullarySpec {
     /// Search the problem grammar for a term matching this spec. Builds the
     /// `ExactGrammar` from `problem`, then drives the multi-NT search loop.
+    ///
+    /// `fixpoint` selects the evaluation mode:
+    /// - `None` — direct mode. Each candidate's value is the bottom-up
+    ///   composition of its children's values via `eval_defined`, and
+    ///   `spec.matches` is applied directly to that value.
+    /// - `Some(closure_name)` — fixpoint mode. The candidate is treated as the
+    ///   body of a recursive synth-fun named `closure_name`; sub-NT candidates
+    ///   are deduped by their evaluation at closure = 0 (single-sample
+    ///   fingerprint), and at the start NT each candidate is materialized,
+    ///   iterated to its LFP via Kleene, and only then checked against
+    ///   `spec.matches`.
     pub fn search(
         &self,
         problem: &SynthProblem<'static>,
         min: bool,
-        mitm: bool,
+        fixpoint: Option<&str>,
     ) -> parse::Result<OwnedExpr> {
         let cfg_start = Instant::now();
         let multi = MultiConfig::from_problem(problem)?;
@@ -105,7 +155,7 @@ impl NullarySpec {
             "exact-nullary grammar built in {:?}",
             grammar_start.elapsed()
         );
-        search_nullary_multi_nt(&grammar, self, min, mitm)
+        search_nullary_multi_nt(&grammar, self, min, fixpoint)
     }
 }
 
@@ -201,33 +251,30 @@ struct Candidate {
     value: Value,
 }
 
-#[derive(Default)]
-struct RefinementPressure {
-    inserted: usize,
-    collisions: usize,
-}
-
-impl RefinementPressure {
-    fn credits(&self) -> usize {
-        self.inserted.saturating_add(self.collisions)
-    }
-}
-
 fn search_nullary_multi_nt(
     grammar: &ExactGrammar<'static>,
     spec: &NullarySpec,
     min: bool,
-    mitm: bool,
+    fixpoint: Option<&str>,
 ) -> parse::Result<OwnedExpr> {
+    // In fixpoint mode every sub-NT eval binds the closure synth-fun to
+    // `closure_zero` (all bits cleared). Two sub-terms that produce the same
+    // value at this single sample are taken to be equivalent for dedup
+    // purposes — a probabilistic fingerprint that catches most equivalences
+    // without the O(N²) cost of pairwise SMT equivalence checks. At the start
+    // NT we ignore the fingerprint and compute the actual LFP via Kleene.
+    let closure_zero: Option<Value> = match (fixpoint, spec) {
+        (Some(_), NullarySpec::BitConstraints { bits, .. }) => Some(Value::from_u64(0, *bits)),
+        _ => None,
+    };
+    let closure_binding: Option<(&str, &Value)> = match (fixpoint, &closure_zero) {
+        (Some(name), Some(v)) => Some((name, v)),
+        _ => None,
+    };
     let relevance_disabled = !min;
-    let interactive_relevance = min && mitm;
     let mut eager_relevant_bits = None;
-    let mut lazy_relevance = None;
     if relevance_disabled {
         debg!("exact-nullary relevance skipped (--min=false)");
-    } else if interactive_relevance {
-        lazy_relevance = relevance::LazyRelevance::new(grammar, spec).map(|engine| (Instant::now(), engine));
-        debg!("exact-nullary relevance: lazy (--mitm)");
     } else {
         let relevance_start = Instant::now();
         eager_relevant_bits = relevance::compute_relevant_bits_for_spec(grammar, spec);
@@ -269,7 +316,7 @@ fn search_nullary_multi_nt(
     );
     let nt_count = grammar.nts.len();
     let mut by_size = vec![vec![Vec::<Candidate>::new()]; nt_count];
-    let mut seen = if !relevance_disabled && !interactive_relevance {
+    let mut seen = if !relevance_disabled {
         if let Some(relevant_bits) = eager_relevant_bits {
             SeenMode::Projected {
                 relevant_bits,
@@ -285,12 +332,10 @@ fn search_nullary_multi_nt(
     };
     let mut nodes = Vec::<Node>::new();
     let mut eval_cache = ExactEvalCache::default();
-    let mut relevance_credit = 0usize;
 
     for size in 1.. {
         let mut eval_attempted = 0usize;
         let mut eval_failed = 0usize;
-        let mut pressure = RefinementPressure::default();
         for buckets in &mut by_size {
             buckets.push(Vec::new());
         }
@@ -303,10 +348,26 @@ fn search_nullary_multi_nt(
                         if size != 1 {
                             continue;
                         }
+                        // In fixpoint mode, a leaf may either (a) be a Var(0)
+                        // reference to the closure synth-fun, which the parser
+                        // emits because we wrapped the operator's synth-fun
+                        // with the closure as its single arg, or (b) be a
+                        // 0-arg constructor define-fun whose body extracts
+                        // from the closure via the closure-args metadata.
+                        // Both need the closure value bound. `eval_with_closure`
+                        // handles both: it substitutes `closure_zero` for
+                        // Var(0) and appends closure-arg values at each
+                        // define-fun call.
+                        let leaf_value = match closure_binding {
+                            None => expr.eval(&[]).ok(),
+                            Some((name, value)) => expr
+                                .eval_with_closure(&deffun::ENV, value, name)
+                                .ok(),
+                        };
                         if let Some(value) = eval_cache
                             .leaves
                             .entry(expr.clone())
-                            .or_insert_with(|| expr.eval(&[]).ok())
+                            .or_insert(leaf_value)
                             .clone()
                         {
                             if let Some(found) = insert_multi_nt_candidate(
@@ -318,7 +379,7 @@ fn search_nullary_multi_nt(
                                 &mut seen,
                                 &mut by_size,
                                 &mut nodes,
-                                &mut pressure,
+                                fixpoint,
                                 || Node {
                                     nt_idx,
                                     rule_idx,
@@ -344,9 +405,12 @@ fn search_nullary_multi_nt(
                             .to_vec();
                         for child in &children {
                             eval_attempted += 1;
-                            let value = deffun::ENV
-                                .eval_defined(*fid, 1, std::slice::from_ref(&child.value))
-                                .map_err(|_| ());
+                            let value = eval_defined_with_closure(
+                                *fid,
+                                1,
+                                std::slice::from_ref(&child.value),
+                                closure_binding,
+                            );
                             let Ok(value) = value else {
                                 eval_failed += 1;
                                 continue;
@@ -360,7 +424,7 @@ fn search_nullary_multi_nt(
                                 &mut seen,
                                 &mut by_size,
                                 &mut nodes,
-                                &mut pressure,
+                                fixpoint,
                                 || Node {
                                     nt_idx,
                                     rule_idx,
@@ -402,9 +466,12 @@ fn search_nullary_multi_nt(
                             for lhs in &lhs_pool {
                                 for rhs in &rhs_pool {
                                     eval_attempted += 1;
-                                    let value = deffun::ENV
-                                        .eval_defined(*fid, 2, &[lhs.value.clone(), rhs.value.clone()])
-                                        .map_err(|_| ());
+                                    let value = eval_defined_with_closure(
+                                        *fid,
+                                        2,
+                                        &[lhs.value.clone(), rhs.value.clone()],
+                                        closure_binding,
+                                    );
                                     let Ok(value) = value else {
                                         eval_failed += 1;
                                         continue;
@@ -418,7 +485,7 @@ fn search_nullary_multi_nt(
                                         &mut seen,
                                         &mut by_size,
                                         &mut nodes,
-                                        &mut pressure,
+                                                fixpoint,
                                         || Node {
                                             nt_idx,
                                             rule_idx,
@@ -463,10 +530,12 @@ fn search_nullary_multi_nt(
                                         .map(|cand| cand.value.clone())
                                         .collect::<Vec<_>>();
                                     eval_attempted += 1;
-                                    let Ok(value) = deffun::ENV
-                                        .eval_defined(*fid, child_values.len(), &child_values)
-                                        .map_err(|_| ())
-                                    else {
+                                    let Ok(value) = eval_defined_with_closure(
+                                        *fid,
+                                        child_values.len(),
+                                        &child_values,
+                                        closure_binding,
+                                    ) else {
                                         eval_failed += 1;
                                         return;
                                     };
@@ -486,7 +555,7 @@ fn search_nullary_multi_nt(
                                 &mut seen,
                                 &mut by_size,
                                 &mut nodes,
-                                &mut pressure,
+                                fixpoint,
                                 || Node {
                                     nt_idx,
                                     rule_idx,
@@ -521,7 +590,7 @@ fn search_nullary_multi_nt(
                                         &mut seen,
                                         &mut by_size,
                                         &mut nodes,
-                                        &mut pressure,
+                                                fixpoint,
                                         || Node {
                                             nt_idx,
                                             rule_idx,
@@ -587,7 +656,7 @@ fn search_nullary_multi_nt(
                                 &mut seen,
                                 &mut by_size,
                                 &mut nodes,
-                                &mut pressure,
+                                fixpoint,
                                 || Node {
                                     nt_idx,
                                     rule_idx,
@@ -621,7 +690,7 @@ fn search_nullary_multi_nt(
                             &mut seen,
                             &mut by_size,
                             &nodes,
-                            &mut pressure,
+                            fixpoint,
                         ) {
                             return Ok(found);
                         }
@@ -633,77 +702,9 @@ fn search_nullary_multi_nt(
                 break;
             }
         }
-        relevance_credit = relevance_credit.saturating_add(pressure.credits());
-        maybe_refine_lazy_relevance(
-            grammar,
-            &mut lazy_relevance,
-            &mut seen,
-            &by_size,
-            &mut relevance_credit,
-        );
     }
 
     unreachable!("nullary enumeration should either find a solution or diverge");
-}
-
-fn maybe_refine_lazy_relevance(
-    grammar: &ExactGrammar<'_>,
-    lazy_relevance: &mut Option<(Instant, relevance::LazyRelevance<'_>)>,
-    seen: &mut SeenMode,
-    by_size: &[Vec<Vec<Candidate>>],
-    relevance_credit: &mut usize,
-) {
-    let Some((_start, engine)) = lazy_relevance.as_mut() else {
-        return;
-    };
-    if *relevance_credit == 0 {
-        return;
-    }
-    loop {
-        if engine.advance(1) {
-            break;
-        }
-        *relevance_credit = relevance_credit.saturating_sub(1);
-        if *relevance_credit == 0 {
-            return;
-        }
-    }
-    *relevance_credit = 0;
-    let (start, engine) = lazy_relevance.take().unwrap();
-    let Some(relevant_bits) = engine.finish() else {
-        debg!(
-            "exact-nullary lazy relevance: no reduction in {:?}",
-            start.elapsed()
-        );
-        return;
-    };
-    debg!(
-        "exact-nullary lazy relevance completed in {:?}",
-        start.elapsed()
-    );
-    grammar.log_relevance_summary(&relevant_bits);
-    *seen = build_projected_seen(by_size, &relevant_bits);
-}
-
-fn build_projected_seen(
-    by_size: &[Vec<Vec<Candidate>>],
-    relevant_bits: &[Vec<usize>],
-) -> SeenMode {
-    let mut maps = (0..by_size.len())
-        .map(|_| FxHashMap::<ProjectionKey, usize>::default())
-        .collect::<Vec<_>>();
-    for (nt_idx, size_buckets) in by_size.iter().enumerate() {
-        for (size, bucket) in size_buckets.iter().enumerate() {
-            for candidate in bucket {
-                let key = candidate.value.project(&relevant_bits[nt_idx]);
-                maps[nt_idx].entry(key).or_insert(size);
-            }
-        }
-    }
-    SeenMode::Projected {
-        relevant_bits: relevant_bits.to_vec(),
-        maps,
-    }
 }
 
 impl<'a> ExactGrammar<'a> {
@@ -727,6 +728,87 @@ impl<'a> ExactGrammar<'a> {
     }
 }
 
+/// Split label bit-indices into the "must be 1" and "must be 0" sets. Used
+/// for allocation-free bitwise checks on Kleene iterates — at the typical
+/// label counts (single digits per CEGIS round) iterating these slices and
+/// calling `Value::bit(i)` is much cheaper than building masks as `Value`s
+/// and doing BigUint AND/OR per check.
+fn label_indices(spec: &NullarySpec) -> Option<(Vec<usize>, Vec<usize>)> {
+    let known_bits = match spec {
+        NullarySpec::BitConstraints { known_bits, .. } => known_bits,
+        NullarySpec::Exact(_) => return None,
+    };
+    let mut pos = Vec::new();
+    let mut neg = Vec::new();
+    for (idx, expected) in known_bits {
+        if *expected {
+            pos.push(*idx);
+        } else {
+            neg.push(*idx);
+        }
+    }
+    Some((pos, neg))
+}
+
+/// Compute the candidate's LFP via Kleene from `aux = 0`, with two sound
+/// early-rejection checks driven by the label masks. Returns
+/// `Some((expr, lfp))` if the candidate survives to convergence; `None` if
+/// it's rejected before then.
+///
+/// Both checks are sound by monotonicity of `F`:
+///   * **F(top) upper bound.** LFP ≤ GFP ≤ F(top). If F(top) doesn't include
+///     a positive-label bit, neither does LFP — reject after one extra eval,
+///     before iterating Kleene at all.
+///   * **Per-iteration negative-label check.** Every Kleene iterate
+///     `aux_n ≤ LFP`. If `aux_n` triggers a negative-label bit, LFP does too
+///     — reject without finishing convergence. The first iter rejects the
+///     bulk of "trivially-wrong" candidates that flip a forbidden bit
+///     immediately, collapsing Kleene from N iters down to 1 for failures.
+///
+/// Together these turn label-checking from a *post-convergence* test into a
+/// *during-search* prune — analogous in spirit to the existing
+/// backward-relevance optimization which uses the same labels to shrink the
+/// dedup keyspace.
+/// Compute the candidate's LFP via Kleene from `aux = 0`, with a sound
+/// per-iteration negative-label check. By monotonicity every Kleene iterate
+/// `aux_n ≤ LFP`, so if `aux_n` triggers any negative-label bit the LFP
+/// triggers it too — reject without running Kleene to convergence. The first
+/// iter catches the bulk of "trivially-wrong" candidates that flip a
+/// forbidden bit immediately.
+///
+/// Note: an F(top) upper-bound check for positive labels is also sound
+/// (LFP ≤ GFP ≤ F(top)), but in practice adds one extra eval per candidate
+/// that outweighs the savings when Kleene already converges in 1-5 iters.
+/// We rely on the post-convergence label match instead.
+fn materialize_and_kleene(
+    node: NodeId,
+    grammar: &ExactGrammar<'_>,
+    nodes: &[Node],
+    spec: &NullarySpec,
+    closure_name: &str,
+) -> Option<(OwnedExpr, Value)> {
+    let expr = materialize_node(node, grammar, nodes)?;
+    let bits = match spec {
+        NullarySpec::BitConstraints { bits, .. } => *bits,
+        NullarySpec::Exact(v) => v.bits(),
+    };
+    let (_pos_indices, neg_indices) = label_indices(spec)?;
+    let env = &deffun::ENV;
+
+    let mut aux = Value::zero(bits);
+    for _ in 0..=bits {
+        let next = expr.eval_with_closure(env, &aux, closure_name).ok()?;
+        if neg_indices.iter().any(|&i| next.bit(i)) {
+            return None;
+        }
+        if next == aux {
+            return Some((expr, next));
+        }
+        aux = next;
+    }
+    None
+}
+
 fn insert_existing_candidate(
     nt_idx: usize,
     candidate: Candidate,
@@ -736,16 +818,36 @@ fn insert_existing_candidate(
     seen: &mut SeenMode,
     by_size: &mut [Vec<Vec<Candidate>>],
     nodes: &[Node],
-    pressure: &mut RefinementPressure,
+    fixpoint: Option<&str>,
 ) -> Option<OwnedExpr> {
-    if nt_idx == grammar.start && spec.matches(&candidate.value) {
-        return materialize_node(candidate.node, grammar, nodes);
+    if nt_idx == grammar.start {
+        if let Some(closure_name) = fixpoint {
+            let (expr, lfp) =
+                materialize_and_kleene(candidate.node, grammar, nodes, spec, closure_name)?;
+            if spec.matches(&lfp) {
+                return Some(expr);
+            }
+            if seen_contains_or_insert(seen, nt_idx, &lfp, size) {
+                return None;
+            }
+            by_size[nt_idx][size].push(Candidate { node: candidate.node, value: lfp });
+            return None;
+        }
+        if spec.matches(&candidate.value) {
+            return materialize_node(candidate.node, grammar, nodes);
+        }
     }
-    if seen_contains_or_insert(seen, nt_idx, &candidate.value, size, pressure) {
+    // In fixpoint mode the sub-NT `value` is a single-sample fingerprint
+    // (eval at closure=0). It collapses recursive sub-terms (whose recursion
+    // hasn't fired at closure=0) into non-recursive ones — using it as a
+    // dedup key drops valid composites and the synthesizer can never
+    // assemble recursive answers. Skip the dedup step; pay enumeration cost.
+    // This matches the pre-refactor top_down search, which only deduped at
+    // the start NT.
+    if fixpoint.is_none() && seen_contains_or_insert(seen, nt_idx, &candidate.value, size) {
         return None;
     }
     by_size[nt_idx][size].push(candidate);
-    pressure.inserted += 1;
     None
 }
 
@@ -758,21 +860,43 @@ fn insert_multi_nt_candidate(
     seen: &mut SeenMode,
     by_size: &mut [Vec<Vec<Candidate>>],
     nodes: &mut Vec<Node>,
-    pressure: &mut RefinementPressure,
+    fixpoint: Option<&str>,
     build_node: impl FnOnce() -> Node,
 ) -> Option<OwnedExpr> {
-    if nt_idx == grammar.start && spec.matches(&value) {
-        let node = intern_node(nodes, build_node());
-        return materialize_node(node, grammar, nodes);
+    if nt_idx == grammar.start {
+        if let Some(closure_name) = fixpoint {
+            // Fixpoint mode at start NT: intern first (Kleene needs the
+            // OwnedExpr), then run Kleene to get the actual LFP, then check
+            // labels against the LFP. Dedup by LFP — sound, since equivalent
+            // LFPs mean semantically equivalent operators.
+            let node = intern_node(nodes, build_node());
+            let Some((expr, lfp)) =
+                materialize_and_kleene(node, grammar, nodes, spec, closure_name)
+            else {
+                return None;
+            };
+            if spec.matches(&lfp) {
+                return Some(expr);
+            }
+            if !seen_contains_or_insert(seen, nt_idx, &lfp, size) {
+                by_size[nt_idx][size].push(Candidate { node, value: lfp });
+            }
+            return None;
+        }
+        if spec.matches(&value) {
+            let node = intern_node(nodes, build_node());
+            return materialize_node(node, grammar, nodes);
+        }
     }
-    if seen_contains_or_insert(seen, nt_idx, &value, size, pressure) {
-        None
-    } else {
-        let node = intern_node(nodes, build_node());
-        by_size[nt_idx][size].push(Candidate { node, value });
-        pressure.inserted += 1;
-        None
+    // See the comment in `insert_existing_candidate` — sub-NT dedup is
+    // intentionally skipped in fixpoint mode because the fingerprint is
+    // unsound for dedup.
+    if fixpoint.is_none() && seen_contains_or_insert(seen, nt_idx, &value, size) {
+        return None;
     }
+    let node = intern_node(nodes, build_node());
+    by_size[nt_idx][size].push(Candidate { node, value });
+    None
 }
 
 fn seen_contains_or_insert(
@@ -780,14 +904,10 @@ fn seen_contains_or_insert(
     nt_idx: usize,
     value: &Value,
     size: usize,
-    pressure: &mut RefinementPressure,
 ) -> bool {
     match seen {
         SeenMode::Exact(maps) => match maps[nt_idx].entry(value.clone()) {
-            Entry::Occupied(_) => {
-                pressure.collisions += 1;
-                true
-            }
+            Entry::Occupied(_) => true,
             Entry::Vacant(entry) => {
                 entry.insert(size);
                 false
@@ -799,10 +919,7 @@ fn seen_contains_or_insert(
         } => {
             let key = value.project(&relevant_bits[nt_idx]);
             match maps[nt_idx].entry(key) {
-                Entry::Occupied(_) => {
-                    pressure.collisions += 1;
-                    true
-                }
+                Entry::Occupied(_) => true,
                 Entry::Vacant(entry) => {
                     entry.insert(size);
                     false

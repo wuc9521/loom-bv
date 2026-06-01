@@ -16,18 +16,13 @@
 //! Both encode the same LFP problem; the rest of the closure module is
 //! variant-agnostic.
 
-use std::collections::BTreeMap;
-
-use sygus_parser::ast::{GrammarDef, Literal, Sort, SortedVar, SyGuSTerm};
+use sygus_parser::ast::{GrammarDef, Literal, Sort, SyGuSTerm};
 
 use crate::enumerate::expr::OwnedExpr;
-use crate::enumerate::grammar::MultiConfig;
 use crate::enumerate::value::Value;
-use crate::exact::{relevance, ExactGrammar, NullarySpec};
-use crate::parse::cfg::Cfg;
-use crate::parse::{self, deffun, new_custom_error_span, ProblemView, SynthFunView, SynthProblem};
+use crate::parse::{self, deffun, ProblemView, SynthFunView};
 
-use crate::exact::util::{empty_span, extract_single_bit_idx};
+use crate::exact::util::extract_single_bit_idx;
 
 /// LFP synthesis pattern detected in a SyGuS problem.
 pub enum LfpSpec<'a> {
@@ -155,72 +150,11 @@ impl<'a> LfpSpec<'a> {
         }
     }
 
-    pub fn grammar_def(&self) -> Option<&GrammarDef> {
-        self.operator().grammar
-    }
-
     pub fn variant_tag(&self) -> &'static str {
         match self {
             Self::Recursive { .. } => "lfp-recursive",
             Self::Separate { .. } => "lfp-separate",
         }
-    }
-
-    /// Build the `ExactGrammar` used by relevance and bottom-up search.
-    /// The operator's synth-fun is rewrapped with a synthetic arg that names
-    /// the closure target, so `OwnedExpr::from_term` resolves the closure
-    /// leaf as `Var(0, bits)` instead of erroring on an unknown identifier.
-    pub fn build_grammar(&self) -> parse::Result<ExactGrammar<'static>> {
-        let op = self.operator();
-        let grammar_def = op.grammar.ok_or_else(|| {
-            new_custom_error_span("lfp: operator has no grammar".into(), empty_span())
-        })?;
-        let cfg = Cfg::from_grammar(grammar_def, None)?;
-        let closure_name: &'static str = Box::leak(self.closure_name().to_string().into_boxed_str());
-        let problem = SynthProblem {
-            name: Box::leak(op.name.to_string().into_boxed_str()),
-            args: vec![closure_name],
-            arg_decls: vec![SortedVar {
-                name: closure_name.to_string(),
-                sort: op.ret.clone(),
-            }],
-            cfg,
-            span: empty_span(),
-            description: String::new(),
-            chatgpt_exprs: Vec::new(),
-            bits: self.bits(),
-            ret_sort: op.ret.clone(),
-            axioms: None,
-        };
-        let multi = MultiConfig::from_problem(&problem)?;
-        Ok(ExactGrammar::from_config(&multi))
-    }
-
-    /// Backward relevance with the closure-feedback edge enabled. Returns
-    /// `(per-NT relevant bits, closure-relevant bits)`, defaulting both to
-    /// "all bits" if relevance reports nothing.
-    pub fn closure_relevant_bits(&self) -> parse::Result<(Vec<Vec<usize>>, Vec<usize>)> {
-        let exact = self.build_grammar()?;
-        let known: BTreeMap<usize, bool> = self.labels().iter().copied().collect();
-        let nullary = NullarySpec::BitConstraints {
-            bits: self.bits(),
-            known_bits: known,
-            structural: Vec::new(),
-        };
-        let nt_default = || {
-            exact
-                .nts
-                .iter()
-                .map(|(_, rules)| (0..relevance::nt_output_bits(rules)).collect::<Vec<_>>())
-                .collect::<Vec<_>>()
-        };
-        let closure_default = || (0..self.bits()).collect::<Vec<_>>();
-        let Some(mut lazy) = relevance::LazyRelevance::new_with_closure(&exact, &nullary, 0) else {
-            return Ok((nt_default(), closure_default()));
-        };
-        while !lazy.advance(1024) {}
-        let (nt_bits, closure_bits) = lazy.finish_with_closure();
-        Ok((nt_bits.unwrap_or_else(nt_default), closure_bits.unwrap_or_else(closure_default)))
     }
 
     /// Format a verified candidate term as one or two `define-fun`s. For

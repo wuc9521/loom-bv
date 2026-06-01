@@ -3,7 +3,7 @@
 //! Given a `BitCircuitPlan` or `Generic` `DefineFunPlan`, compute which
 //! input bits each output bit depends on (single-bit form) or, for a
 //! demanded subset of output bits, which input bits collectively feed
-//! them (set form). Used by the lazy relevance worklist in
+//! them (set form). Used by the relevance worklist in
 //! `relevance::mod` to backward-propagate demand from constraint bits to
 //! the leaves.
 

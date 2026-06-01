@@ -2,13 +2,11 @@
 //!
 //! Given the bit-constraints in a `NullarySpec`, walk the search grammar
 //! backward to determine which output bits at each non-terminal are
-//! *demanded* by the constraints. Bits no can prove irrelevant get
+//! *demanded* by the constraints. Bits we can prove irrelevant get
 //! projected out of the seen-map keys, increasing dedup hit rate.
 //!
-//! Two driving modes:
-//! * eager: run to completion up front via [`compute_relevant_bits_for_spec`].
-//! * lazy: drive incrementally via [`LazyRelevance::advance`] interleaved
-//!   with search; used by `--mitm`.
+//! Driven to completion eagerly via [`compute_relevant_bits_for_spec`];
+//! [`Relevance`] is the underlying worklist engine.
 
 mod bits;
 mod deps;
@@ -24,7 +22,7 @@ use deps::{
     compute_template_dep_bit, get_deffun_dep_bits, DepCache, TemplateDepCache,
 };
 
-pub struct LazyRelevance<'a> {
+pub struct Relevance<'a> {
     grammar: &'a ExactGrammar<'a>,
     nt_bits: Vec<usize>,
     dep_cache: DepCache,
@@ -43,7 +41,7 @@ pub struct LazyRelevance<'a> {
     closure_relevant: Option<BitSet>,
 }
 
-impl<'a> LazyRelevance<'a> {
+impl<'a> Relevance<'a> {
     pub fn new(grammar: &'a ExactGrammar<'a>, spec: &NullarySpec) -> Option<Self> {
         let NullarySpec::BitConstraints {
             bits,
@@ -319,7 +317,7 @@ pub fn compute_relevant_bits_for_spec(
     grammar: &ExactGrammar<'_>,
     spec: &NullarySpec,
 ) -> Option<Vec<Vec<usize>>> {
-    let mut lazy = LazyRelevance::new(grammar, spec)?;
+    let mut lazy = Relevance::new(grammar, spec)?;
     while !lazy.advance(1024) {}
     lazy.finish()
 }

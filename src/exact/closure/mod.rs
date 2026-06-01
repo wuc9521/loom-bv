@@ -1,37 +1,68 @@
-//! LFP synthesis backend. See `spec::LfpSpec` for the patterns this module
-//! recognizes; everything below the spec is variant-agnostic.
-//!
-//! Single search strategy: enumerate operator terms smallest-first, compute
-//! the LFP per candidate, dedup by start-NT-projected LFP, return the first
-//! candidate whose LFP satisfies the label constraints. This is the same
-//! shape the old multisynth had; the previous split into bottom_up/top_down
-//! was an ad-hoc optimization that dropped projection dedup on the
-//! non-tabulating path and caused the Reg-benchmark perf regression.
+//! LFP synthesis frontend. See `spec::LfpSpec` for the two SyGuS-IF patterns
+//! recognized (lfp-recursive: one self-referencing synth-fun; lfp-separate:
+//! two synth-funs joined by `(= op aux)`). After detection the work goes
+//! through the standard `NullarySpec::search` engine with
+//! `fixpoint = Some(closure_name)` — there is no longer a parallel
+//! enumeration / eval path. This module just builds the equivalent
+//! `SynthProblem` and `NullarySpec::BitConstraints`, then formats the
+//! returned operator term back into one or two `define-fun`s.
 
+use std::collections::BTreeMap;
+
+use crate::exact::NullarySpec;
 use crate::info;
-use crate::parse::{self, deffun};
+use crate::parse::cfg::Cfg;
+use crate::parse::{self, deffun, new_custom_error_span, SynthProblem};
 
 mod eval;
 mod spec;
-mod top_down;
 
 pub use spec::LfpSpec;
 
+use crate::exact::util::empty_span;
+
 impl<'a> LfpSpec<'a> {
-    /// Drive the LFP-closure search for this spec: compute backward-relevance
-    /// over the closure bits, then enumerate operator terms via the top-down
-    /// engine and return the first one whose LFP satisfies the labels.
+    /// Drive the LFP search: wrap the operator's grammar as a single-arg
+    /// SynthProblem (closure synth-fun = the arg), build the bit-constraint
+    /// spec from the labels, and hand off to the unified
+    /// `NullarySpec::search` with `fixpoint = Some(closure_name)`. Result is
+    /// formatted as one or two `define-fun`s.
     pub fn search(&self, env: &deffun::Environ) -> parse::Result<Option<String>> {
-        let (nt_bits, closure_bits) = self.closure_relevant_bits()?;
+        let op = self.operator();
+        let grammar_def = op.grammar.ok_or_else(|| {
+            new_custom_error_span(format!("{}: operator has no grammar", self.variant_tag()), empty_span())
+        })?;
+        let cfg = Cfg::from_grammar(grammar_def, None)?;
+        let closure_name: &'static str = Box::leak(self.closure_name().to_string().into_boxed_str());
+        let problem = SynthProblem {
+            name: Box::leak(op.name.to_string().into_boxed_str()),
+            args: vec![closure_name],
+            arg_decls: vec![sygus_parser::ast::SortedVar {
+                name: closure_name.to_string(),
+                sort: op.ret.clone(),
+            }],
+            cfg,
+            span: empty_span(),
+            description: String::new(),
+            chatgpt_exprs: Vec::new(),
+            bits: self.bits(),
+            ret_sort: op.ret.clone(),
+            axioms: None,
+        };
+        let labels: BTreeMap<usize, bool> = self.labels().iter().copied().collect();
+        let spec = NullarySpec::BitConstraints {
+            bits: self.bits(),
+            known_bits: labels,
+            structural: Vec::new(),
+        };
         info!(
-            "{}: closure bits = {}/{}; start output bits = {}/{}",
+            "{}: routing to exact-nullary with fixpoint='{}' (bits={}, labels={})",
             self.variant_tag(),
-            closure_bits.len(),
+            closure_name,
             self.bits(),
-            nt_bits.first().map(Vec::len).unwrap_or(0),
-            self.bits()
+            self.labels().len()
         );
-        let start_relevant = nt_bits.into_iter().next().unwrap_or_default();
-        top_down::search(self, env, &start_relevant)
+        let expr = spec.search(&problem, true, Some(closure_name))?;
+        Ok(Some(self.finalize(env, expr)?))
     }
 }
