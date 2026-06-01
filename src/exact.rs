@@ -12,12 +12,12 @@ use rustc_hash::FxHashMap;
 use sygus_parser::ast::SyGuSFile;
 
 use crate::{
+    debg, info,
     enumerate::{
         expr::OwnedExpr,
         grammar::{build_owned_application, for_each_candidate_tuple, for_each_size_split, MultiConfig, TemplateExpr},
         value::Value,
     },
-    info,
     parse::{self, deffun, SynthProblem},
 };
 
@@ -95,14 +95,14 @@ impl NullarySpec {
     ) -> parse::Result<OwnedExpr> {
         let cfg_start = Instant::now();
         let multi = MultiConfig::from_problem(problem)?;
-        info!(
-            "exact-nullary setup multi-config completed in {:?}",
+        debg!(
+            "exact-nullary multi-config built in {:?}",
             cfg_start.elapsed()
         );
         let grammar_start = Instant::now();
         let grammar = ExactGrammar::from_config(&multi);
-        info!(
-            "exact-nullary setup exact-grammar completed in {:?}",
+        debg!(
+            "exact-nullary grammar built in {:?}",
             grammar_start.elapsed()
         );
         search_nullary_multi_nt(&grammar, self, min, mitm)
@@ -224,18 +224,15 @@ fn search_nullary_multi_nt(
     let mut eager_relevant_bits = None;
     let mut lazy_relevance = None;
     if relevance_disabled {
-        info!(
-            "exact-nullary setup relevance skipped in {:?} (--min=false)",
-            Instant::now().elapsed()
-        );
+        debg!("exact-nullary relevance skipped (--min=false)");
     } else if interactive_relevance {
         lazy_relevance = relevance::LazyRelevance::new(grammar, spec).map(|engine| (Instant::now(), engine));
-        info!("exact-nullary setup relevance initialized lazily (--mitm)");
+        debg!("exact-nullary relevance: lazy (--mitm)");
     } else {
         let relevance_start = Instant::now();
         eager_relevant_bits = relevance::compute_relevant_bits_for_spec(grammar, spec);
-        info!(
-            "exact-nullary setup relevance completed in {:?}",
+        debg!(
+            "exact-nullary relevance computed in {:?}",
             relevance_start.elapsed()
         );
         if let Some(bits) = &eager_relevant_bits {
@@ -260,7 +257,7 @@ fn search_nullary_multi_nt(
             }
         }
     }
-    info!(
+    debg!(
         "exact-nullary grammar nts={} leaf={} alias={} unary={} binary={} nary={} generic={}",
         grammar.nts.len(),
         leaf_rules,
@@ -674,14 +671,14 @@ fn maybe_refine_lazy_relevance(
     *relevance_credit = 0;
     let (start, engine) = lazy_relevance.take().unwrap();
     let Some(relevant_bits) = engine.finish() else {
-        info!(
-            "exact-nullary setup relevance completed lazily in {:?} (no reduction)",
+        debg!(
+            "exact-nullary lazy relevance: no reduction in {:?}",
             start.elapsed()
         );
         return;
     };
-    info!(
-        "exact-nullary setup relevance completed lazily in {:?}",
+    debg!(
+        "exact-nullary lazy relevance completed in {:?}",
         start.elapsed()
     );
     grammar.log_relevance_summary(&relevant_bits);
@@ -725,7 +722,7 @@ impl<'a> ExactGrammar<'a> {
         );
         for (i, (bits, (_, rules))) in relevant_bits.iter().zip(self.nts.iter()).enumerate() {
             let nt_total = relevance::nt_output_bits(rules);
-            info!("  nt[{}]: {}/{} bits relevant", i, bits.len(), nt_total);
+            debg!("  nt[{}]: {}/{} bits relevant", i, bits.len(), nt_total);
         }
     }
 }

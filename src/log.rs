@@ -1,6 +1,13 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+/// Numeric log level shared across the crate.  Higher = more verbose.
+///   0 = silent       1 = `crit!`         2 = `warn!`
+///   3 = `info!`      4 = `debg!`         5 = `debg2!`
+///
+/// The caller (delis or the standalone binary) sets this via
+/// `log::set_log_level(verbose + 2)`, so `--verbose 0` keeps WARN; `-v`/`-vv`
+/// from delis enable INFO / DEBUG respectively.
 pub static LOGLEVEL: AtomicU8 = AtomicU8::new(2);
 thread_local! {
     pub static INDENT: RefCell<String> = RefCell::new(String::from(""));
@@ -13,12 +20,20 @@ pub fn log_level() -> u8 {
     LOGLEVEL.load(Ordering::Relaxed)
 }
 
+// Format conventions (matched to delis's env_logger format):
+//   info!  → bare message  (the bulk of useful output)
+//   warn!  → "warning: msg"
+//   crit!  → "error: msg"
+//   debg!  → "debug: msg (file:line)"
+//   debg2! → "trace: msg (file:line)"
+// No ANSI colors, no `{:?}` quoting of the message — pass-through.
+
 #[macro_export]
 macro_rules! info {
-    ($($fmt:expr),+) => {
+    ($($fmt:tt)+) => {
         if $crate::log::LOGLEVEL.load(std::sync::atomic::Ordering::Relaxed) >= 3 {
             $crate::log::INDENT.with_borrow(|s| {
-                eprintln!("{}\u{001b}[34;1m\u{001b}[1mINFO\u{001b}[0m \u{001b}[36m{:?}\u{001b}[0m {}:{}", s, format_args!($($fmt),+), file!(), line!())
+                eprintln!("{}{}", s, format_args!($($fmt)+))
             })
         }
     };
@@ -26,10 +41,10 @@ macro_rules! info {
 
 #[macro_export]
 macro_rules! debg {
-    ($($fmt:expr),+) => {
+    ($($fmt:tt)+) => {
         if $crate::log::LOGLEVEL.load(std::sync::atomic::Ordering::Relaxed) >= 4 {
             $crate::log::INDENT.with_borrow(|s| {
-                eprintln!("{}\u{001b}[32mDEBG\u{001b}[0m \u{001b}[36m{:?}\u{001b}[0m {}:{}", s, format_args!($($fmt),+), file!(), line!())
+                eprintln!("debug: {}{} ({}:{})", s, format_args!($($fmt)+), file!(), line!())
             })
         }
     };
@@ -37,10 +52,10 @@ macro_rules! debg {
 
 #[macro_export]
 macro_rules! debg2 {
-    ($($fmt:expr),+) => {
+    ($($fmt:tt)+) => {
         if $crate::log::LOGLEVEL.load(std::sync::atomic::Ordering::Relaxed) >= 5 {
             $crate::log::INDENT.with_borrow(|s| {
-                eprintln!("{}\u{001b}[32mDEBG\u{001b}[0m \u{001b}[36m{:?}\u{001b}[0m {}:{}", s, format_args!($($fmt),+), file!(), line!())
+                eprintln!("trace: {}{} ({}:{})", s, format_args!($($fmt)+), file!(), line!())
             })
         }
     };
@@ -48,21 +63,21 @@ macro_rules! debg2 {
 
 #[macro_export]
 macro_rules! crit {
-    ($($fmt:expr),+) => {
+    ($($fmt:tt)+) => {
         if $crate::log::LOGLEVEL.load(std::sync::atomic::Ordering::Relaxed) >= 1 {
-        $crate::log::INDENT.with_borrow(|s| {
-            eprintln!("{}\u{001b}[31;1m\u{001b}[1mCRIT\u{001b}[0m \u{001b}[36m{:?}\u{001b}[0m {}:{}", s, format_args!($($fmt),+), file!(), line!())
-        })
-    }
+            $crate::log::INDENT.with_borrow(|s| {
+                eprintln!("error: {}{}", s, format_args!($($fmt)+))
+            })
+        }
     };
 }
 
 #[macro_export]
 macro_rules! warn {
-    ($($fmt:expr),+) => {
+    ($($fmt:tt)+) => {
         if $crate::log::LOGLEVEL.load(std::sync::atomic::Ordering::Relaxed) >= 2 {
             $crate::log::INDENT.with_borrow(|s| {
-                eprintln!("{}\u{001b}[33;1m\u{001b}[1mWARN\u{001b}[0m \u{001b}[36m{:?}\u{001b}[0m {}:{}", s, format_args!($($fmt),+), file!(), line!())
+                eprintln!("warning: {}{}", s, format_args!($($fmt)+))
             })
         }
     };

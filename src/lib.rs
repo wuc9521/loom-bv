@@ -95,8 +95,8 @@ fn solve_file_inner(
     // joined by a closure constraint. Handle before SynthProblem construction
     // because the latter assumes a single synth-fun.
     if let Some(spec) = exact::closure::LfpSpec::detect(&view) {
-        info!(
-            "Using LFP closure search ({}, bits={}, labels={})",
+        debg!(
+            "lfp-closure search: {} (bits={}, labels={})",
             spec.variant_tag(),
             spec.bits(),
             spec.labels().len()
@@ -109,8 +109,8 @@ fn solve_file_inner(
     problem.description = description;
     let pbecstr = PbeConstraint::parse_from_view(problem.name, problem.args.len(), &view)?;
     if let Some(spec) = NullarySpec::from_file(file, &problem)? {
-        info!(
-            "Using exact nullary search for {} (bits={}, cmds={})",
+        debg!(
+            "exact-nullary search: {} (bits={}, cmds={})",
             problem.name,
             problem.bits,
             file.cmds.len()

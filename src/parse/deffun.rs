@@ -9,7 +9,7 @@ use crate::{
         op,
         value::Value,
     },
-    info,
+    debg,
 };
 
 use super::{new_custom_error_span, Error, ProblemView};
@@ -703,7 +703,7 @@ impl Environ {
                 .map(|(_, bits)| *bits as usize)
                 .collect::<Vec<_>>();
             let plan = DefineFunPlan::compile(&expr, &extended_arg_bits);
-            info!(
+            debg!(
                 "DefineFun: {} {} -> {}",
                 name,
                 args.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "),
