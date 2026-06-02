@@ -93,7 +93,7 @@ fn solve_file_inner(
     // LFP pattern: either one self-referencing synth-fun, or two synth-funs
     // joined by a closure constraint. Handle before SynthProblem construction
     // because the latter assumes a single synth-fun.
-    if let Some(spec) = exact::closure::LfpSpec::detect(&view) {
+    if let Some(spec) = exact::lfp::LfpSpec::detect(&view) {
         debg!(
             "lfp-closure search: {} (bits={}, labels={})",
             spec.variant_tag(),

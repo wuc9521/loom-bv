@@ -34,9 +34,9 @@ pub struct Relevance<'a> {
     complete: bool,
     /// If `Some(idx)`, the arg index of a "closure parameter" leaf: any Leaf
     /// rule of shape `Var(idx, _)` propagates its demanded bits back to the
-    /// start NT's demand, modeling a closure constraint `param = g`. This is
-    /// how cyk-style synthesis with a `cfg.rhs.S` LFP placeholder is
-    /// captured for backward-relevance purposes.
+    /// start NT's demand, modeling a closure constraint `param = g`. This
+    /// captures the LFP placeholder pattern (operator + fixpoint constant
+    /// joined by `(= op fp)`) for backward-relevance purposes.
     closure_param: Option<usize>,
     closure_relevant: Option<BitSet>,
 }

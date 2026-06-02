@@ -4,10 +4,115 @@ use sygus_parser::ast::{Identifier, Literal as SyGuSLiteral, SyGuSCmd, SyGuSFile
 
 use crate::{
     enumerate::{expr::OwnedExpr, value::Value},
-    parse::{self, new_custom_error_span},
+    parse::{self, new_custom_error_span, SynthProblem},
 };
 
+use super::search::search_problem;
 use super::util::{empty_span, extract_indices_from_identifier};
+
+// ---------------------------------------------------------------------------
+//  NullarySpec — the synthesis target for the exact-nullary engine
+// ---------------------------------------------------------------------------
+
+pub enum NullarySpec {
+    Exact(Value),
+    BitConstraints {
+        bits: usize,
+        known_bits: BTreeMap<usize, bool>,
+        /// Boolean / BV constraints over the synth function, compiled with
+        /// [`OwnedExpr::from_term`] (same path as PBE / ref-impl) and checked
+        /// via [`OwnedExpr::eval`]. A constraint holds when evaluation yields
+        /// zero (see boolean encoding in `enumerate/expr.rs` `from_term`).
+        structural: Vec<OwnedExpr>,
+    },
+}
+
+impl NullarySpec {
+    pub fn from_file(
+        file: &SyGuSFile,
+        problem: &SynthProblem<'static>,
+    ) -> parse::Result<Option<Self>> {
+        if !problem.args.is_empty() {
+            return Ok(None);
+        }
+        if let Some(value) = parse_target_define_fun(file, problem.name)? {
+            return Ok(Some(Self::Exact(value)));
+        }
+        if let Some((known_bits, structural)) =
+            parse_bit_constraints(file, problem.name, problem.bits)?
+        {
+            return Ok(Some(Self::BitConstraints {
+                bits: problem.bits,
+                known_bits,
+                structural,
+            }));
+        }
+        Ok(None)
+    }
+
+    /// Split label bit-indices into the "must be 1" and "must be 0" sets.
+    /// `None` if the spec isn't bit-constraint-shaped (the only shape the
+    /// LFP search currently uses).
+    pub(crate) fn label_indices(&self) -> Option<(Vec<usize>, Vec<usize>)> {
+        let known_bits = match self {
+            NullarySpec::BitConstraints { known_bits, .. } => known_bits,
+            NullarySpec::Exact(_) => return None,
+        };
+        let mut pos = Vec::new();
+        let mut neg = Vec::new();
+        for (idx, expected) in known_bits {
+            if *expected {
+                pos.push(*idx);
+            } else {
+                neg.push(*idx);
+            }
+        }
+        Some((pos, neg))
+    }
+
+    pub(crate) fn matches(&self, value: &Value) -> bool {
+        match self {
+            Self::Exact(expected) => value == expected,
+            Self::BitConstraints {
+                bits,
+                known_bits,
+                structural,
+            } => {
+                if value.bits() != *bits {
+                    return false;
+                }
+                if !known_bits
+                    .iter()
+                    .all(|(bit, expected)| value.bit(*bit) == *expected)
+                {
+                    return false;
+                }
+                structural.iter().all(|expr| {
+                    expr.eval(std::slice::from_ref(value))
+                        .map(|v| v.as_bool().holds())
+                        .unwrap_or(false)
+                })
+            }
+        }
+    }
+
+    /// Drive the bottom-up exact-nullary search. In `fixpoint = Some(name)`
+    /// mode each start-NT candidate is iterated to its LFP via Kleene; in
+    /// direct mode candidates are checked against the spec immediately.
+    pub fn search(
+        &self,
+        problem: &SynthProblem<'static>,
+        min: bool,
+        fixpoint: Option<&str>,
+    ) -> parse::Result<OwnedExpr> {
+        search_problem(problem, self, min, fixpoint)
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  SyGuS-file parsing helpers
+// ---------------------------------------------------------------------------
+
 
 pub fn parse_target_define_fun(
     file: &SyGuSFile,

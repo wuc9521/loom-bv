@@ -1,4 +1,4 @@
-//! Helpers shared between `exact/spec.rs` and `exact/closure/spec.rs`.
+//! Helpers shared between `exact/spec.rs` and `exact/lfp.rs`.
 
 use pest::Span;
 use sygus_parser::ast::{Identifier, Index};
