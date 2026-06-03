@@ -410,8 +410,35 @@ impl Value {
     fn concat_big(lhs: &Self, rhs: &Self) -> Self {
         let rhs_bits = rhs.bits();
         let total_bits = lhs.bits() + rhs_bits;
-        let raw = (lhs.to_biguint() << rhs_bits) | rhs.to_biguint();
-        Self::from_biguint(raw, total_bits)
+        // Build the result in place: `<<=` and `|=` mutate the local
+        // BigUint instead of allocating intermediates for `<<` and `|`.
+        // The result occupies exactly `total_bits` bits by construction
+        // (no high bits beyond), so the mask-and-truncate that
+        // `from_biguint` would do on its `bits > 64` branch is redundant —
+        // build the Big variant directly.
+        let mut raw = lhs.to_biguint();
+        raw <<= rhs_bits;
+        match rhs {
+            Value::Small { raw: rhs_raw, .. } => {
+                if *rhs_raw != 0 {
+                    raw |= BigUint::from(*rhs_raw);
+                }
+            }
+            Value::Big { raw: rhs_raw, .. } => {
+                raw |= rhs_raw.as_ref();
+            }
+        }
+        if total_bits <= 64 {
+            Value::Small {
+                bits: total_bits,
+                raw: raw.to_u64().unwrap_or(0) & mask_u64(total_bits),
+            }
+        } else {
+            Value::Big {
+                bits: total_bits,
+                raw: Arc::new(raw),
+            }
+        }
     }
 }
 

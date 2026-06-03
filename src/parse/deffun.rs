@@ -1,6 +1,8 @@
 use std::cell::UnsafeCell;
+use std::hash::{Hash, Hasher};
 
 use derive_more::DebugCustom;
+use rustc_hash::FxHasher;
 use sygus_parser::ast::{SyGuSFile, SyGuSTerm};
 
 use crate::{
@@ -53,6 +55,67 @@ pub struct DefineFun {
     /// current value of each closure synth-fun in this list's order.
     pub closure_args: Vec<&'static str>,
     pub closure_arg_bits: Vec<usize>,
+}
+
+impl DefineFun {
+    /// Evaluate this define-fun's plan on `args`, optionally with a
+    /// closure binding for the synth-fun named `closure_name`. The
+    /// define-fun's `closure_args` slots are filled with `closure_value`
+    /// for the matching name and zero elsewhere. Plan eval needs `&env`
+    /// because plan instructions can call other define-funs recursively.
+    pub fn eval(
+        &self,
+        env: &Environ,
+        args: &[Value],
+        closure: Option<(&str, &Value)>,
+    ) -> Result<Value, DivideByZero> {
+        match closure {
+            Some((closure_name, closure_value)) if !self.closure_args.is_empty() => {
+                // Matches the layout established at parse time: real args
+                // followed by one value per closure_args slot (see
+                // `extended_env` in `parse_from_view`).
+                let mut extended = Vec::with_capacity(args.len() + self.closure_args.len());
+                extended.extend_from_slice(args);
+                for (name, bits) in
+                    self.closure_args.iter().zip(self.closure_arg_bits.iter())
+                {
+                    if *name == closure_name {
+                        extended.push(closure_value.clone());
+                    } else {
+                        extended.push(Value::from_u64(0, *bits));
+                    }
+                }
+                self.plan.eval(env, &extended)
+            }
+            _ => self.plan.eval(env, args),
+        }
+    }
+
+    /// Hash for a `(self, args, closure)` call — used by the exact-nullary
+    /// search's eval cache. Mirrors the arg layout `eval` would build, so
+    /// two calls with the same observable inputs hash to the same key.
+    ///
+    /// Identity uses `self as *const _`: within one Environ the
+    /// `DefineFun` slots never move, so the pointer is a stable per-fun
+    /// id for the lifetime of a search.
+    pub fn hash_call(&self, args: &[Value], closure: Option<(&str, &Value)>) -> u64 {
+        let mut h = FxHasher::default();
+        h.write_usize(self as *const _ as usize);
+        h.write_usize(args.len());
+        for v in args {
+            v.hash(&mut h);
+        }
+        if let Some((closure_name, closure_value)) = closure {
+            for (name, bits) in self.closure_args.iter().zip(self.closure_arg_bits.iter()) {
+                if *name == closure_name {
+                    closure_value.hash(&mut h);
+                } else {
+                    Value::from_u64(0, *bits).hash(&mut h);
+                }
+            }
+        }
+        h.finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -734,6 +797,16 @@ impl Environ {
             .find(|(_, p)| p.name == name)
             .map(|(a, _)| a)
     }
+
+    /// Direct reference to a `DefineFun` slot. Prefer this when the caller
+    /// reads multiple fields — the older `closure_args(id, nargs)` /
+    /// `closure_arg_bits(id, nargs)` / `arg_bits(id, nargs)` accessors each
+    /// do an independent 2-level index lookup, which adds up on hot paths
+    /// like the eval cache key hash.
+    pub fn deffun(&self, id: usize, nargs: usize) -> &DefineFun {
+        &self.inner()[nargs][id]
+    }
+
     pub fn apply(&self, id: usize, nargs: usize) -> &OwnedExpr {
         &self.inner()[nargs][id].expr
     }

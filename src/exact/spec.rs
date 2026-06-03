@@ -105,6 +105,11 @@ impl NullarySpec {
         min: bool,
         fixpoint: Option<&str>,
     ) -> parse::Result<OwnedExpr> {
+        // Note: the `eval_defined` memo is only enabled in LFP mode (by
+        // `LfpSpec::search`). Tried turning it on for direct mode too;
+        // hit rate on Reg/0024 was 0.1% (define-fun calls in the
+        // bottom-up search rarely repeat with identical args), so it was
+        // pure overhead.
         search_problem(problem, self, min, fixpoint)
     }
 }
