@@ -92,15 +92,11 @@ impl Value {
         }
         match self {
             Value::Small { raw, .. } => ((*raw >> bit) & 1) == 1,
-            Value::Big { raw, .. } => {
-                let limb = bit / 64;
-                let offset = bit % 64;
-                raw.as_ref()
-                    .iter_u64_digits()
-                    .nth(limb)
-                    .map(|digit| ((digit >> offset) & 1) == 1)
-                    .unwrap_or(false)
-            }
+            // `BigUint::bit` is O(1) direct limb access. The previous
+            // `iter_u64_digits().nth(limb)` was O(limb) — iterated digits
+            // from the start every call. Showed up at ~3% self-time on
+            // Reg/0024 from the BitCircuit interpreter's per-bit input reads.
+            Value::Big { raw, .. } => raw.as_ref().bit(bit as u64),
         }
     }
 
