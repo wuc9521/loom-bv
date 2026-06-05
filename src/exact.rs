@@ -19,6 +19,7 @@
 //! [`eval::EvalCache`]; sub-NT dedup health can be inspected via
 //! [`stats::DedupStats`] (gated by `DELIS_DEDUP_STATS=1`).
 
+pub mod bitspec;
 pub mod closure;
 pub mod dedup;
 pub mod eval;
@@ -26,13 +27,12 @@ pub mod grammar;
 pub mod lfp;
 pub mod relevance;
 pub mod search;
-pub mod spec;
 pub mod stats;
 pub mod types;
 pub mod util;
 
+pub use bitspec::BitSpec;
 pub use eval::{eval_defined_with_closure, EvalCache};
-pub use spec::NullarySpec;
 pub use stats::DedupStats;
 pub use types::{ExactGrammar, ExactRule};
 

@@ -27,17 +27,17 @@ use crate::enumerate::{
     grammar::{for_each_candidate_tuple, for_each_size_split, MultiConfig},
     value::Value,
 };
+use crate::exact::bitspec::BitSpec;
 use crate::exact::closure::Closure;
 use crate::exact::dedup::SeenMode;
 use crate::exact::eval::eval_defined_with_closure;
 use crate::exact::stats::DedupStats;
 use crate::exact::types::{Candidate, ExactEvalCache, ExactGrammar, ExactRule, Node, NodeId};
-use crate::exact::{relevance, NullarySpec};
 use crate::parse::{self, deffun, SynthProblem};
 
 pub fn run_search<'a>(
     grammar: ExactGrammar<'a>,
-    spec: &NullarySpec,
+    spec: &BitSpec,
     min: bool,
     fixpoint: Option<&str>,
 ) -> parse::Result<OwnedExpr> {
@@ -46,7 +46,8 @@ pub fn run_search<'a>(
 
 struct Searcher<'a, 'g> {
     grammar: ExactGrammar<'a>,
-    spec: &'g NullarySpec,
+    spec: &'g BitSpec,
+    num_examples: usize,
     closure: Option<Closure>,
     nodes: Vec<Node>,
     by_size: Vec<Vec<Vec<Candidate>>>,
@@ -57,29 +58,28 @@ struct Searcher<'a, 'g> {
 impl<'a, 'g> Searcher<'a, 'g> {
     fn new(
         grammar: ExactGrammar<'a>,
-        spec: &'g NullarySpec,
+        spec: &'g BitSpec,
         min: bool,
         fixpoint: Option<&str>,
     ) -> Self {
-        let closure = match (fixpoint, spec) {
-            (Some(name), NullarySpec::BitConstraints { bits, .. }) => {
-                Some(Closure::new(name, *bits))
-            }
-            _ => None,
+        let num_examples = spec.num_examples();
+        let closure = match fixpoint {
+            Some(name) => Some(Closure::new(name, spec.bits)),
+            None => None,
         };
         let relevance_disabled = !min;
         let eager_relevant_bits = if relevance_disabled {
-            debg!("exact-nullary relevance skipped (--min=false)");
+            debg!("exact relevance skipped (--min=false)");
             None
         } else {
             let relevance_start = Instant::now();
-            let bits = relevance::compute_relevant_bits_for_spec(&grammar, spec);
+            let bits = spec.compute_relevant_bits(&grammar);
             debg!(
-                "exact-nullary relevance computed in {:?}",
+                "exact relevance computed in {:?}",
                 relevance_start.elapsed()
             );
             if let Some(b) = &bits {
-                grammar.log_relevance_summary(b);
+                grammar.log_relevance_summary(b, num_examples, spec.bits);
             }
             bits
         };
@@ -87,13 +87,14 @@ impl<'a, 'g> Searcher<'a, 'g> {
         let seen = if closure.is_some() {
             SeenMode::pair(nt_count, grammar.start)
         } else if let Some(relevant_bits) = eager_relevant_bits {
-            SeenMode::projected(relevant_bits)
+            SeenMode::multi_projected(relevant_bits, num_examples)
         } else {
-            SeenMode::exact(nt_count)
+            SeenMode::multi_exact(nt_count, num_examples)
         };
         Self {
             grammar,
             spec,
+            num_examples,
             closure,
             nodes: Vec::new(),
             by_size: vec![vec![Vec::<Candidate>::new()]; nt_count],
@@ -104,6 +105,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
 
     fn run(&mut self) -> parse::Result<OwnedExpr> {
         log_grammar_summary(&self.grammar);
+        let run_start = std::time::Instant::now();
         for size in 1.. {
             for buckets in &mut self.by_size {
                 buckets.push(Vec::new());
@@ -141,6 +143,24 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     break;
                 }
             }
+            let per_nt: Vec<usize> = self
+                .by_size
+                .iter()
+                .map(|buckets| buckets.get(size).map(|b| b.len()).unwrap_or(0))
+                .collect();
+            let total: usize = self
+                .by_size
+                .iter()
+                .map(|buckets| buckets.iter().map(|b| b.len()).sum::<usize>())
+                .sum();
+            debg!(
+                "exact-nullary size={} done: per-nt@size={:?} total-candidates={} elapsed={:?}",
+                size,
+                per_nt,
+                total,
+                run_start.elapsed()
+            );
+            DedupStats::snapshot_line(&format!("dedup@size={}", size));
         }
         unreachable!("nullary enumeration should either find a solution or diverge");
     }
@@ -151,8 +171,6 @@ impl<'a, 'g> Searcher<'a, 'g> {
         rule_idx: usize,
         size: usize,
     ) -> parse::Result<Option<OwnedExpr>> {
-        // Cloning the rule to release the grammar borrow before mutating
-        // by_size / seen / nodes.
         let rule = self.grammar.nts[nt_idx].1[rule_idx].clone();
         match rule {
             ExactRule::Alias(_) => Ok(None),
@@ -160,14 +178,14 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 if size != 1 {
                     return Ok(None);
                 }
-                let Some((value, value_top)) = self.eval_leaf(&expr) else {
+                let Some((values, values_top)) = self.eval_leaf(&expr) else {
                     return Ok(None);
                 };
                 Ok(self.try_push_new(
                     nt_idx,
                     size,
-                    value,
-                    value_top,
+                    values,
+                    values_top,
                     || Node { nt_idx, rule_idx, children: Vec::new() },
                 ))
             }
@@ -178,13 +196,13 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 let child_size = size - 1;
                 let children = self.by_size[child_nt].get(child_size).cloned().unwrap_or_default();
                 for child in &children {
-                    let Some((value, value_top)) = self.eval_unary(fid, child) else { continue; };
+                    let Some((values, values_top)) = self.eval_unary(fid, child) else { continue; };
                     let child_node = child.node;
                     if let Some(found) = self.try_push_new(
                         nt_idx,
                         size,
-                        value,
-                        value_top,
+                        values,
+                        values_top,
                         || Node { nt_idx, rule_idx, children: vec![child_node] },
                     ) {
                         return Ok(Some(found));
@@ -205,15 +223,15 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     }
                     for lhs in &lhs_pool {
                         for rhs in &rhs_pool {
-                            let Some((value, value_top)) = self.eval_binary(fid, lhs, rhs) else {
+                            let Some((values, values_top)) = self.eval_binary(fid, lhs, rhs) else {
                                 continue;
                             };
                             let (lhs_node, rhs_node) = (lhs.node, rhs.node);
                             if let Some(found) = self.try_push_new(
                                 nt_idx,
                                 size,
-                                value,
-                                value_top,
+                                values,
+                                values_top,
                                 || Node {
                                     nt_idx,
                                     rule_idx,
@@ -232,9 +250,10 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     return Ok(None);
                 }
                 let child_total = size - 1;
-                let mut staged: Vec<(Value, Option<Value>, Vec<NodeId>)> = Vec::new();
+                let mut staged: Vec<(Vec<Value>, Option<Vec<Value>>, Vec<NodeId>)> = Vec::new();
                 let by_size = &self.by_size;
                 let closure = self.closure.as_ref();
+                let num_examples = self.num_examples;
                 let mut splits = Vec::with_capacity(child_nts.len());
                 for_each_size_split(
                     child_total,
@@ -256,22 +275,22 @@ impl<'a, 'g> Searcher<'a, 'g> {
                         }
                         let mut tuple = Vec::with_capacity(child_nts.len());
                         for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
-                            let Some((value, value_top)) =
-                                Self::eval_nary_static(fid, tuple, closure)
+                            let Some((values, values_top)) =
+                                Self::eval_nary_static(fid, tuple, closure, num_examples)
                             else {
                                 return;
                             };
                             let children = tuple.iter().map(|c| c.node).collect();
-                            staged.push((value, value_top, children));
+                            staged.push((values, values_top, children));
                         });
                     },
                 );
-                for (value, value_top, children) in staged {
+                for (values, values_top, children) in staged {
                     if let Some(found) = self.try_push_new(
                         nt_idx,
                         size,
-                        value,
-                        value_top,
+                        values,
+                        values_top,
                         || Node { nt_idx, rule_idx, children },
                     ) {
                         return Ok(Some(found));
@@ -286,11 +305,21 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 let child_total = size - base_size;
                 if child_nts.is_empty() {
                     if child_total == 0 {
-                        if let Ok(value) = template.evaluate(&[], &mut self.leaf_cache) {
+                        let k = self.num_examples;
+                        let mut values = Vec::with_capacity(k);
+                        let mut ok = true;
+                        for i in 0..k {
+                            let args = &self.spec.examples[i].args;
+                            match template.evaluate_with_args(args, &mut self.leaf_cache) {
+                                Ok(v) => values.push(v),
+                                Err(_) => { ok = false; break; }
+                            }
+                        }
+                        if ok {
                             return Ok(self.try_push_new(
                                 nt_idx,
                                 size,
-                                value,
+                                values,
                                 None,
                                 || Node { nt_idx, rule_idx, children: Vec::new() },
                             ));
@@ -301,9 +330,11 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 if child_total < child_nts.len() {
                     return Ok(None);
                 }
-                let mut staged: Vec<(Value, Vec<NodeId>)> = Vec::new();
+                let mut staged: Vec<(Vec<Value>, Vec<NodeId>)> = Vec::new();
                 let by_size = &self.by_size;
                 let leaf_cache = &mut self.leaf_cache;
+                let num_examples = self.num_examples;
+                let spec_examples = &self.spec.examples;
                 let mut splits = Vec::with_capacity(child_nts.len());
                 for_each_size_split(
                     child_total,
@@ -325,21 +356,32 @@ impl<'a, 'g> Searcher<'a, 'g> {
                         }
                         let mut tuple = Vec::with_capacity(child_nts.len());
                         for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
-                            let child_values =
-                                tuple.iter().map(|c| c.value.clone()).collect::<Vec<_>>();
-                            let Ok(value) = template.evaluate(&child_values, leaf_cache) else {
-                                return;
-                            };
-                            let children = tuple.iter().map(|c| c.node).collect();
-                            staged.push((value, children));
+                            let mut all_values = Vec::with_capacity(num_examples);
+                            let mut ok = true;
+                            for i in 0..num_examples {
+                                let child_values: Vec<Value> =
+                                    tuple.iter().map(|c| c.values[i].clone()).collect();
+                                match template.evaluate_with_args_and_children(
+                                    &spec_examples[i].args,
+                                    &child_values,
+                                    leaf_cache,
+                                ) {
+                                    Ok(v) => all_values.push(v),
+                                    Err(_) => { ok = false; break; }
+                                }
+                            }
+                            if ok {
+                                let children = tuple.iter().map(|c| c.node).collect();
+                                staged.push((all_values, children));
+                            }
                         });
                     },
                 );
-                for (value, children) in staged {
+                for (values, children) in staged {
                     if let Some(found) = self.try_push_new(
                         nt_idx,
                         size,
-                        value,
+                        values,
                         None,
                         || Node { nt_idx, rule_idx, children },
                     ) {
@@ -351,56 +393,58 @@ impl<'a, 'g> Searcher<'a, 'g> {
         }
     }
 
-    // ----- Per-rule eval helpers: return (value@0, value@top? in fixpoint mode)
+    // ----- Per-rule eval helpers: return (values@0, values_top? in fixpoint mode)
+    //       For multi-example: values has K entries (one per example).
+    //       For LFP mode (always K=1): values_top has K entries at aux=top.
 
-    fn eval_leaf(&mut self, expr: &OwnedExpr) -> Option<(Value, Option<Value>)> {
-        let zero_binding = self.closure.as_ref().map(|c| c.binding_zero());
-        let leaf_value = match zero_binding {
-            None => expr.eval(&[]).ok(),
-            Some((name, v)) => expr.eval_with_closure(&deffun::ENV, v, name).ok(),
-        };
-        let value = self
-            .leaf_cache
-            .leaves
-            .entry(expr.clone())
-            .or_insert(leaf_value)
-            .clone()?;
-        let value_top = if let Some(closure) = self.closure.as_ref() {
-            expr.eval_with_closure(&deffun::ENV, &closure.top, &closure.name)
-                .ok()
-        } else {
-            None
-        };
-        if self.closure.is_some() && value_top.is_none() {
-            return None;
+    fn eval_leaf(&mut self, expr: &OwnedExpr) -> Option<(Vec<Value>, Option<Vec<Value>>)> {
+        if self.closure.is_some() {
+            let closure = self.closure.as_ref().unwrap();
+            let (name, v) = closure.binding_zero();
+            let value = self
+                .leaf_cache
+                .leaves
+                .entry(expr.clone())
+                .or_insert_with(|| expr.eval_with_closure(&deffun::ENV, v, name).ok())
+                .clone()?;
+            let value_top = expr
+                .eval_with_closure(&deffun::ENV, &closure.top, &closure.name)
+                .ok()?;
+            return Some((vec![value], Some(vec![value_top])));
         }
-        Some((value, value_top))
+        let k = self.num_examples;
+        let mut values = Vec::with_capacity(k);
+        for i in 0..k {
+            let args = &self.spec.examples[i].args;
+            let v = expr.eval(args).ok()?;
+            values.push(v);
+        }
+        Some((values, None))
     }
 
-    fn eval_unary(&self, fid: usize, child: &Candidate) -> Option<(Value, Option<Value>)> {
-        let zero_binding = self.closure.as_ref().map(|c| c.binding_zero());
-        let value = eval_defined_with_closure(
-            fid,
-            1,
-            std::slice::from_ref(&child.value),
-            zero_binding,
-        )
-        .ok()?;
-        let value_top = if let Some(closure) = self.closure.as_ref() {
-            let child_top = child.value_top.as_ref()?;
-            Some(
-                eval_defined_with_closure(
-                    fid,
-                    1,
-                    std::slice::from_ref(child_top),
-                    Some(closure.binding_top()),
-                )
-                .ok()?,
-            )
-        } else {
-            None
-        };
-        Some((value, value_top))
+    fn eval_unary(&self, fid: usize, child: &Candidate) -> Option<(Vec<Value>, Option<Vec<Value>>)> {
+        if self.closure.is_some() {
+            let closure = self.closure.as_ref().unwrap();
+            let value = eval_defined_with_closure(
+                fid, 1, std::slice::from_ref(&child.values[0]),
+                Some(closure.binding_zero()),
+            ).ok()?;
+            let child_top = child.values_top.as_ref()?;
+            let value_top = eval_defined_with_closure(
+                fid, 1, std::slice::from_ref(&child_top[0]),
+                Some(closure.binding_top()),
+            ).ok()?;
+            return Some((vec![value], Some(vec![value_top])));
+        }
+        let k = self.num_examples;
+        let mut values = Vec::with_capacity(k);
+        for i in 0..k {
+            let v = eval_defined_with_closure(
+                fid, 1, std::slice::from_ref(&child.values[i]), None,
+            ).ok()?;
+            values.push(v);
+        }
+        Some((values, None))
     }
 
     fn eval_binary(
@@ -408,72 +452,73 @@ impl<'a, 'g> Searcher<'a, 'g> {
         fid: usize,
         lhs: &Candidate,
         rhs: &Candidate,
-    ) -> Option<(Value, Option<Value>)> {
-        let zero_binding = self.closure.as_ref().map(|c| c.binding_zero());
-        let value = eval_defined_with_closure(
-            fid,
-            2,
-            &[lhs.value.clone(), rhs.value.clone()],
-            zero_binding,
-        )
-        .ok()?;
-        let value_top = if let Some(closure) = self.closure.as_ref() {
-            let lt = lhs.value_top.as_ref()?;
-            let rt = rhs.value_top.as_ref()?;
-            Some(
-                eval_defined_with_closure(
-                    fid,
-                    2,
-                    &[lt.clone(), rt.clone()],
-                    Some(closure.binding_top()),
-                )
-                .ok()?,
-            )
-        } else {
-            None
-        };
-        Some((value, value_top))
+    ) -> Option<(Vec<Value>, Option<Vec<Value>>)> {
+        if self.closure.is_some() {
+            let closure = self.closure.as_ref().unwrap();
+            let value = eval_defined_with_closure(
+                fid, 2,
+                &[lhs.values[0].clone(), rhs.values[0].clone()],
+                Some(closure.binding_zero()),
+            ).ok()?;
+            let lt = &lhs.values_top.as_ref()?[0];
+            let rt = &rhs.values_top.as_ref()?[0];
+            let value_top = eval_defined_with_closure(
+                fid, 2, &[lt.clone(), rt.clone()],
+                Some(closure.binding_top()),
+            ).ok()?;
+            return Some((vec![value], Some(vec![value_top])));
+        }
+        let k = self.num_examples;
+        let mut values = Vec::with_capacity(k);
+        for i in 0..k {
+            let v = eval_defined_with_closure(
+                fid, 2,
+                &[lhs.values[i].clone(), rhs.values[i].clone()],
+                None,
+            ).ok()?;
+            values.push(v);
+        }
+        Some((values, None))
     }
 
-    /// Static variant used inside the Nary callback so we don't hold a
-    /// mutable borrow of `self` while walking the pools.
     fn eval_nary_static(
         fid: usize,
         tuple: &[&Candidate],
         closure: Option<&Closure>,
-    ) -> Option<(Value, Option<Value>)> {
-        let zero_binding = closure.map(|c| c.binding_zero());
-        let values_zero: Vec<Value> = tuple.iter().map(|c| c.value.clone()).collect();
-        let value = eval_defined_with_closure(fid, values_zero.len(), &values_zero, zero_binding)
-            .ok()?;
-        let value_top = if let Some(closure) = closure {
-            let values_top: Option<Vec<Value>> =
-                tuple.iter().map(|c| c.value_top.clone()).collect();
-            let values_top = values_top?;
-            Some(
-                eval_defined_with_closure(
-                    fid,
-                    values_top.len(),
-                    &values_top,
-                    Some(closure.binding_top()),
-                )
-                .ok()?,
-            )
-        } else {
-            None
-        };
-        Some((value, value_top))
+        num_examples: usize,
+    ) -> Option<(Vec<Value>, Option<Vec<Value>>)> {
+        if let Some(closure) = closure {
+            let args_zero: Vec<Value> = tuple.iter().map(|c| c.values[0].clone()).collect();
+            let value = eval_defined_with_closure(
+                fid, args_zero.len(), &args_zero, Some(closure.binding_zero()),
+            ).ok()?;
+            let args_top: Option<Vec<Value>> = tuple.iter().map(|c| {
+                c.values_top.as_ref().map(|vt| vt[0].clone())
+            }).collect();
+            let args_top = args_top?;
+            let value_top = eval_defined_with_closure(
+                fid, args_top.len(), &args_top, Some(closure.binding_top()),
+            ).ok()?;
+            return Some((vec![value], Some(vec![value_top])));
+        }
+        let k = num_examples;
+        let mut values = Vec::with_capacity(k);
+        for i in 0..k {
+            let args: Vec<Value> = tuple.iter().map(|c| c.values[i].clone()).collect();
+            let v = eval_defined_with_closure(fid, args.len(), &args, None).ok()?;
+            values.push(v);
+        }
+        Some((values, None))
     }
 
-    // ----- Push helpers (the only place fixpoint/direct branching happens
-    //       beyond the eval_* helpers above)
+    // ----- Push helpers
 
     fn try_push_new(
         &mut self,
         nt_idx: usize,
         size: usize,
-        value: Value,
-        value_top: Option<Value>,
+        values: Vec<Value>,
+        values_top: Option<Vec<Value>>,
         build_node: impl FnOnce() -> Node,
     ) -> Option<OwnedExpr> {
         if nt_idx == self.grammar.start {
@@ -481,30 +526,28 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 let node = self.intern_node(build_node());
                 return self.start_nt_kleene(node, size);
             }
-            if self.spec.matches(&value) {
+            if self.spec.matches(&values) {
                 let node = self.intern_node(build_node());
                 return self.grammar.materialize_node(node, &self.nodes);
             }
         }
-        // Sub-NT push (or direct-mode start NT non-match).
-        if self.closure.is_none() && self.seen.contains_or_insert(nt_idx, &value, size) {
+        if self.closure.is_none()
+            && self.seen.contains_or_insert_multi(nt_idx, &values, size)
+        {
             return None;
         }
-        if let Some(value_top_ref) = value_top.as_ref() {
-            if self
-                .seen
-                .contains_or_insert_pair(nt_idx, &value, value_top_ref, size)
-            {
+        if let Some(vt) = values_top.as_ref() {
+            if self.seen.contains_or_insert_pair(nt_idx, &vt[0], &vt[0], size) {
                 return None;
             }
         }
         let node = self.intern_node(build_node());
         if let Some(closure) = self.closure.as_ref() {
             DedupStats::record_push(
-                nt_idx, size, node, &value, &self.grammar, &self.nodes, &closure.name,
+                nt_idx, size, node, &values[0], &self.grammar, &self.nodes, &closure.name,
             );
         }
-        self.by_size[nt_idx][size].push(Candidate { node, value, value_top });
+        self.by_size[nt_idx][size].push(Candidate { node, values, values_top });
         None
     }
 
@@ -518,37 +561,30 @@ impl<'a, 'g> Searcher<'a, 'g> {
             if self.closure.is_some() {
                 return self.start_nt_kleene(candidate.node, size);
             }
-            if self.spec.matches(&candidate.value) {
+            if self.spec.matches(&candidate.values) {
                 return self.grammar.materialize_node(candidate.node, &self.nodes);
             }
         }
-        if self.closure.is_none() && self.seen.contains_or_insert(nt_idx, &candidate.value, size) {
+        if self.closure.is_none()
+            && self.seen.contains_or_insert_multi(nt_idx, &candidate.values, size)
+        {
             return None;
         }
-        if let Some(value_top) = candidate.value_top.as_ref() {
-            if self
-                .seen
-                .contains_or_insert_pair(nt_idx, &candidate.value, value_top, size)
-            {
+        if let Some(vt) = candidate.values_top.as_ref() {
+            if self.seen.contains_or_insert_pair(nt_idx, &vt[0], &vt[0], size) {
                 return None;
             }
         }
         if let Some(closure) = self.closure.as_ref() {
             DedupStats::record_push(
-                nt_idx,
-                size,
-                candidate.node,
-                &candidate.value,
-                &self.grammar,
-                &self.nodes,
-                &closure.name,
+                nt_idx, size, candidate.node,
+                &candidate.values[0], &self.grammar, &self.nodes, &closure.name,
             );
         }
         self.by_size[nt_idx][size].push(candidate);
         None
     }
 
-    /// Start-NT fixpoint-mode push: run Kleene, check spec, dedup on LFP.
     fn start_nt_kleene(&mut self, node: NodeId, size: usize) -> Option<OwnedExpr> {
         let closure_name = self
             .closure
@@ -557,14 +593,14 @@ impl<'a, 'g> Searcher<'a, 'g> {
             .name
             .clone();
         let (expr, lfp) = self.kleene_lfp(node, &closure_name)?;
-        if self.spec.matches(&lfp) {
+        if self.spec.matches(std::slice::from_ref(&lfp)) {
             return Some(expr);
         }
-        if !self.seen.contains_or_insert(self.grammar.start, &lfp, size) {
+        if !self.seen.contains_or_insert_lfp(&lfp, size) {
             self.by_size[self.grammar.start][size].push(Candidate {
                 node,
-                value: lfp,
-                value_top: None,
+                values: vec![lfp],
+                values_top: None,
             });
         }
         None
@@ -576,24 +612,12 @@ impl<'a, 'g> Searcher<'a, 'g> {
         id
     }
 
-    /// Compute the candidate's LFP via Kleene from `aux = 0`, with a sound
-    /// per-iter negative-label early-reject. Returns `Some((materialized_expr,
-    /// lfp))` on convergence; `None` if rejected before convergence.
-    ///
-    /// By monotonicity every Kleene iterate `aux_n ≤ LFP`. If `aux_n`
-    /// triggers a negative-label bit, the LFP triggers it too — reject
-    /// without running Kleene to convergence. The first iter rejects the
-    /// bulk of "trivially-wrong" candidates that flip a forbidden bit
-    /// immediately, collapsing Kleene from N iters down to 1 for failures.
     fn kleene_lfp(
         &self,
         node: NodeId,
         closure_name: &str,
     ) -> Option<(OwnedExpr, Value)> {
-        let bits = match self.spec {
-            NullarySpec::BitConstraints { bits, .. } => *bits,
-            NullarySpec::Exact(v) => v.bits(),
-        };
+        let bits = self.spec.bits;
         let (_pos, neg_indices) = self.spec.label_indices()?;
         let mut aux = Value::zero(bits);
         for _ in 0..=bits {
@@ -648,20 +672,20 @@ fn log_grammar_summary(grammar: &ExactGrammar<'_>) {
 /// old free-function `search_nullary_multi_nt`.
 pub fn search_problem<'a>(
     problem: &'a SynthProblem<'static>,
-    spec: &NullarySpec,
+    spec: &BitSpec,
     min: bool,
     fixpoint: Option<&'a str>,
 ) -> parse::Result<OwnedExpr> {
     let cfg_start = Instant::now();
     let multi = MultiConfig::from_problem(problem)?;
     debg!(
-        "exact-nullary multi-config built in {:?}",
+        "exact multi-config built in {:?}",
         cfg_start.elapsed()
     );
     let grammar_start = Instant::now();
     let grammar = ExactGrammar::from_config(&multi);
     debg!(
-        "exact-nullary grammar built in {:?}",
+        "exact grammar built in {:?}",
         grammar_start.elapsed()
     );
     run_search(grammar, spec, min, fixpoint)

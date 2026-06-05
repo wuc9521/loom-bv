@@ -1,14 +1,3 @@
-//! Sub-NT dedup machinery for the exact-nullary search.
-//!
-//! Three modes:
-//! - `Exact`: dedup by raw `Value`. Direct (non-fixpoint) mode default.
-//! - `Projected`: dedup by `Value` projected onto a per-NT relevant-bit
-//!   index. Direct mode when backward-relevance is computed up-front.
-//! - `Pair`: dedup sub-NT candidates by `(value@aux=0, value@aux=top)`
-//!   pairs, while the start-NT pool dedups by single LFP value. Fixpoint
-//!   mode; recovers sub-NT sharing that single-sample `aux=0` would
-//!   incorrectly collapse for recursive sub-terms.
-
 use std::collections::hash_map::Entry;
 
 use rustc_hash::FxHashMap;
@@ -19,12 +8,18 @@ use crate::enumerate::value::Value;
 pub struct ProjectionKey(Vec<u64>);
 
 pub enum SeenMode {
-    Exact(Vec<FxHashMap<Value, usize>>),
-    Projected {
+    /// Dedup by flat-concat of all K example values. K=1 degenerates to exact
+    /// single-value dedup.
+    MultiExact {
+        maps: Vec<FxHashMap<Vec<Value>, usize>>,
+    },
+    /// Dedup by flat-concat of K projected values onto per-NT relevant bits.
+    MultiProjected {
         relevant_bits: Vec<Vec<usize>>,
+        num_examples: usize,
         maps: Vec<FxHashMap<ProjectionKey, usize>>,
     },
-    /// Fixpoint-mode dedup: sub-NTs use `(value@0, value@top)` pairs;
+    /// Fixpoint-mode dedup: sub-NTs use `(values@0, values@top)` pairs;
     /// the start-NT pool uses a single `Value` (the converged LFP).
     Pair {
         sub_maps: Vec<FxHashMap<(Value, Value), usize>>,
@@ -34,14 +29,17 @@ pub enum SeenMode {
 }
 
 impl SeenMode {
-    pub fn exact(nt_count: usize) -> Self {
-        SeenMode::Exact(vec![FxHashMap::default(); nt_count])
+    pub fn multi_exact(nt_count: usize, _num_examples: usize) -> Self {
+        SeenMode::MultiExact {
+            maps: vec![FxHashMap::default(); nt_count],
+        }
     }
 
-    pub fn projected(relevant_bits: Vec<Vec<usize>>) -> Self {
+    pub fn multi_projected(relevant_bits: Vec<Vec<usize>>, num_examples: usize) -> Self {
         let nt_count = relevant_bits.len();
-        SeenMode::Projected {
+        SeenMode::MultiProjected {
             relevant_bits,
+            num_examples,
             maps: (0..nt_count).map(|_| FxHashMap::default()).collect(),
         }
     }
@@ -54,19 +52,24 @@ impl SeenMode {
         }
     }
 
-    /// Single-value dedup. Used by direct mode for all NTs, and by Pair
-    /// mode at the start NT only (where `value` is the converged LFP).
-    pub fn contains_or_insert(&mut self, nt: usize, value: &Value, size: usize) -> bool {
+    pub fn contains_or_insert_multi(
+        &mut self,
+        nt: usize,
+        values: &[Value],
+        size: usize,
+    ) -> bool {
         match self {
-            SeenMode::Exact(maps) => match maps[nt].entry(value.clone()) {
-                Entry::Occupied(_) => true,
-                Entry::Vacant(e) => {
-                    e.insert(size);
-                    false
+            SeenMode::MultiExact { maps } => {
+                match maps[nt].entry(values.to_vec()) {
+                    Entry::Occupied(_) => true,
+                    Entry::Vacant(e) => {
+                        e.insert(size);
+                        false
+                    }
                 }
-            },
-            SeenMode::Projected { relevant_bits, maps } => {
-                let key = value.project(&relevant_bits[nt]);
+            }
+            SeenMode::MultiProjected { relevant_bits, num_examples, maps } => {
+                let key = project_multi(values, &relevant_bits[nt], *num_examples);
                 match maps[nt].entry(key) {
                     Entry::Occupied(_) => true,
                     Entry::Vacant(e) => {
@@ -75,22 +78,27 @@ impl SeenMode {
                     }
                 }
             }
-            SeenMode::Pair { start_lfp, start_nt, .. } => {
-                debug_assert_eq!(nt, *start_nt, "Pair mode: contains_or_insert is start-NT only");
-                match start_lfp.entry(value.clone()) {
-                    Entry::Occupied(_) => true,
-                    Entry::Vacant(e) => {
-                        e.insert(size);
-                        false
-                    }
-                }
+            SeenMode::Pair { .. } => {
+                panic!("contains_or_insert_multi should not be called in Pair mode");
             }
         }
     }
 
-    /// Two-sample pair dedup. Only valid in Pair mode; returns `false`
-    /// (i.e. "not seen, please push without dedup") in other modes so the
-    /// caller can use a uniform code path.
+    /// Single-value dedup for start-NT in Pair (LFP) mode.
+    pub fn contains_or_insert_lfp(&mut self, value: &Value, size: usize) -> bool {
+        let SeenMode::Pair { start_lfp, .. } = self else {
+            panic!("contains_or_insert_lfp called outside Pair mode");
+        };
+        match start_lfp.entry(value.clone()) {
+            Entry::Occupied(_) => true,
+            Entry::Vacant(e) => {
+                e.insert(size);
+                false
+            }
+        }
+    }
+
+    /// Two-sample pair dedup for sub-NTs in LFP mode.
     pub fn contains_or_insert_pair(
         &mut self,
         nt: usize,
@@ -109,8 +117,10 @@ impl SeenMode {
     }
 }
 
-impl Value {
-    pub(crate) fn project(&self, bits: &[usize]) -> ProjectionKey {
-        ProjectionKey(self.project_bits(bits))
+fn project_multi(values: &[Value], relevant_bits: &[usize], _num_examples: usize) -> ProjectionKey {
+    let mut words = Vec::new();
+    for value in values {
+        words.extend(value.project_bits(relevant_bits));
     }
+    ProjectionKey(words)
 }

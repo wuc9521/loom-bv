@@ -8,14 +8,14 @@
 //! Driven to completion eagerly via [`compute_relevant_bits_for_spec`];
 //! [`Relevance`] is the underlying worklist engine.
 
-mod bits;
+pub mod bits;
 mod deps;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::{enumerate::expr::OwnedExpr, info, parse::deffun};
 
-use super::{ExactGrammar, ExactRule, NullarySpec};
+use super::{ExactGrammar, ExactRule};
 
 use bits::{BitDep, BitSet, WorkItem};
 use deps::{
@@ -32,37 +32,26 @@ pub struct Relevance<'a> {
     queued: Vec<Vec<bool>>,
     worklist: VecDeque<WorkItem>,
     complete: bool,
-    /// If `Some(idx)`, the arg index of a "closure parameter" leaf: any Leaf
-    /// rule of shape `Var(idx, _)` propagates its demanded bits back to the
-    /// start NT's demand, modeling a closure constraint `param = g`. This
-    /// captures the LFP placeholder pattern (operator + fixpoint constant
-    /// joined by `(= op fp)`) for backward-relevance purposes.
-    closure_param: Option<usize>,
-    closure_relevant: Option<BitSet>,
+    pub closure_param: Option<usize>,
+    pub closure_relevant: Option<BitSet>,
 }
 
 impl<'a> Relevance<'a> {
-    pub fn new(grammar: &'a ExactGrammar<'a>, spec: &NullarySpec) -> Option<Self> {
-        let NullarySpec::BitConstraints {
-            bits,
-            known_bits,
-            structural,
-        } = spec
-        else {
-            return None;
-        };
-        if !structural.is_empty() || known_bits.is_empty() {
+    pub fn new(
+        grammar: &'a ExactGrammar<'a>,
+        bits: usize,
+        known_bits: &BTreeMap<usize, bool>,
+    ) -> Option<Self> {
+        if known_bits.is_empty() {
             return None;
         }
 
-        let nt_bits = grammar
+        let mut nt_bits: Vec<usize> = grammar
             .nts
             .iter()
             .map(|(_, rules)| nt_output_bits(rules))
-            .collect::<Vec<_>>();
-        if nt_bits.get(grammar.start).copied() != Some(*bits) {
-            return None;
-        }
+            .collect();
+        nt_bits[grammar.start] = bits;
 
         let mut relevant = nt_bits
             .iter()
@@ -85,7 +74,7 @@ impl<'a> Relevance<'a> {
             .map(|(_, rules)| vec![false; rules.len()])
             .collect::<Vec<_>>();
         let mut worklist = VecDeque::new();
-        let mut start_demand = BitSet::new(*bits);
+        let mut start_demand = BitSet::new(bits);
         for bit in known_bits.keys() {
             relevant[grammar.start].insert(*bit);
             start_demand.insert(*bit);
@@ -296,15 +285,6 @@ impl<'a> Relevance<'a> {
             self.propagate_bits(start, &bits);
         }
     }
-}
-
-pub fn compute_relevant_bits_for_spec(
-    grammar: &ExactGrammar<'_>,
-    spec: &NullarySpec,
-) -> Option<Vec<Vec<usize>>> {
-    let mut lazy = Relevance::new(grammar, spec)?;
-    while !lazy.advance(1024) {}
-    lazy.finish()
 }
 
 pub fn nt_output_bits(rules: &[ExactRule]) -> usize {

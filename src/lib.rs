@@ -15,7 +15,7 @@ use sygus_parser::ast::{SyGuSCmd, SyGuSFile};
 use std::sync::mpsc;
 use std::{env, thread};
 
-use crate::{exact::NullarySpec, parse::SynthProblem, search::search::SearchConfig};
+use crate::{parse::SynthProblem, search::search::SearchConfig};
 extern crate pest;
 
 mod cegis;
@@ -107,11 +107,12 @@ fn solve_file_inner(
     let mut problem = SynthProblem::parse_from_view(&view)?;
     problem.description = description;
     let pbecstr = PbeConstraint::parse_from_view(problem.name, problem.args.len(), &view)?;
-    if let Some(spec) = NullarySpec::from_file(file, &problem)? {
+    if let Some(spec) = exact::BitSpec::from_file(file, &problem)? {
         debg!(
-            "exact-nullary search: {} (bits={}, cmds={})",
+            "exact search: {} (bits={}, examples={}, cmds={})",
             problem.name,
             problem.bits,
+            spec.num_examples(),
             file.cmds.len()
         );
         let result = spec.search(&problem, min, None)?;

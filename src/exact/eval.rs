@@ -125,21 +125,34 @@ pub fn eval_defined_with_closure(
 // ---------------------------------------------------------------------------
 
 impl<'a> ExactGrammar<'a> {
-    pub fn log_relevance_summary(&self, relevant_bits: &[Vec<usize>]) {
+    pub fn log_relevance_summary(
+        &self,
+        relevant_bits: &[Vec<usize>],
+        num_examples: usize,
+        spec_bits: usize,
+    ) {
         let total_kept: usize = relevant_bits.iter().map(Vec::len).sum();
-        let total_full: usize = self
-            .nts
-            .iter()
-            .map(|(_, rules)| relevance::nt_output_bits(rules))
-            .sum();
+        let mut total_full: usize = 0;
+        for (i, (_, rules)) in self.nts.iter().enumerate() {
+            if i == self.start {
+                total_full += spec_bits;
+            } else {
+                total_full += relevance::nt_output_bits(rules);
+            }
+        }
         info!(
-            "exact-nullary relevance: {}/{} bits relevant ({:.1}%)",
+            "relevance: {}/{} bits relevant ({:.1}%), {} examples",
             total_kept,
             total_full,
-            total_kept as f64 / total_full as f64 * 100.0
+            total_kept as f64 / total_full as f64 * 100.0,
+            num_examples
         );
         for (i, (bits, (_, rules))) in relevant_bits.iter().zip(self.nts.iter()).enumerate() {
-            let nt_total = relevance::nt_output_bits(rules);
+            let nt_total = if i == self.start {
+                spec_bits
+            } else {
+                relevance::nt_output_bits(rules)
+            };
             debg!("  nt[{}]: {}/{} bits relevant", i, bits.len(), nt_total);
         }
     }

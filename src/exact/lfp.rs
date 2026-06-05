@@ -23,7 +23,7 @@ use sygus_parser::ast::{GrammarDef, Literal, Sort, SyGuSTerm};
 use crate::enumerate::expr::OwnedExpr;
 use crate::enumerate::value::Value;
 use crate::exact::util::{empty_span, extract_single_bit_idx};
-use crate::exact::{eval_defined_with_closure, NullarySpec};
+use crate::exact::{eval_defined_with_closure};
 use crate::info;
 use crate::parse::cfg::Cfg;
 use crate::parse::{self, deffun, new_custom_error_span, ProblemView, SynthFunView, SynthProblem};
@@ -197,13 +197,13 @@ impl<'a> LfpSpec<'a> {
             axioms: None,
         };
         let labels: BTreeMap<usize, bool> = self.labels().iter().copied().collect();
-        let spec = NullarySpec::BitConstraints {
-            bits: self.bits(),
-            known_bits: labels,
-            structural: Vec::new(),
-        };
+        let spec = super::bitspec::BitSpec::from_labels(
+            self.bits(),
+            labels,
+            closure_name.to_string(),
+        );
         info!(
-            "{}: routing to exact-nullary with fixpoint='{}' (bits={}, labels={})",
+            "{}: routing to exact search with fixpoint='{}' (bits={}, labels={})",
             self.variant_tag(),
             closure_name,
             self.bits(),

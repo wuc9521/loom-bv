@@ -50,6 +50,37 @@ impl DedupStats {
         });
     }
 
+    pub fn snapshot_line(tag: &str) {
+        STATE.with(|c| {
+            let c = c.borrow();
+            if !c.enabled {
+                return;
+            }
+            let mut total_pushed: u64 = 0;
+            let mut total_at_zero: u64 = 0;
+            let mut total_at_pair: u64 = 0;
+            let mut per_nt_pair: FxHashMap<usize, u64> = FxHashMap::default();
+            for ((nt, _size), b) in c.per_nt_size.iter() {
+                total_pushed += b.pushed;
+                total_at_zero += b.at_zero.len() as u64;
+                total_at_pair += b.at_pair.len() as u64;
+                *per_nt_pair.entry(*nt).or_default() += b.at_pair.len() as u64;
+            }
+            let collapse_pair = if total_at_pair > 0 {
+                total_pushed as f64 / total_at_pair as f64
+            } else {
+                0.0
+            };
+            let mut nts: Vec<usize> = per_nt_pair.keys().copied().collect();
+            nts.sort();
+            let per_nt: Vec<(usize, u64)> = nts.iter().map(|n| (*n, per_nt_pair[n])).collect();
+            info!(
+                "{}: pushed={} distinct@0={} distinct@(0,top)={} collapse@(0,top)={:.1}x  per-nt-distinct={:?}",
+                tag, total_pushed, total_at_zero, total_at_pair, collapse_pair, per_nt
+            );
+        });
+    }
+
     pub fn dump_and_disable(tag: &str) {
         STATE.with(|c| {
             let mut c = c.borrow_mut();

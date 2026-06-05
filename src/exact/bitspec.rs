@@ -4,60 +4,90 @@ use sygus_parser::ast::{Identifier, Literal as SyGuSLiteral, SyGuSCmd, SyGuSFile
 
 use crate::{
     enumerate::{expr::OwnedExpr, value::Value},
+    exact::{
+        relevance::{bits, Relevance},
+        search::search_problem,
+        types::ExactGrammar,
+        util::empty_span,
+    },
     parse::{self, new_custom_error_span, SynthProblem},
 };
 
-use super::search::search_problem;
-use super::util::{empty_span, extract_indices_from_identifier};
+use crate::exact::util::extract_indices_from_identifier;
 
-// ---------------------------------------------------------------------------
-//  NullarySpec — the synthesis target for the exact-nullary engine
-// ---------------------------------------------------------------------------
-
-pub enum NullarySpec {
-    Exact(Value),
-    BitConstraints {
-        bits: usize,
-        known_bits: BTreeMap<usize, bool>,
-        /// Boolean / BV constraints over the synth function, compiled with
-        /// [`OwnedExpr::from_term`] (same path as PBE / ref-impl) and checked
-        /// via [`OwnedExpr::eval`]. A constraint holds when evaluation yields
-        /// zero (see boolean encoding in `enumerate/expr.rs` `from_term`).
-        structural: Vec<OwnedExpr>,
-    },
+pub struct BitSpec {
+    pub bits: usize,
+    pub examples: Vec<Example>,
+    pub structural: Vec<OwnedExpr>,
+    pub closure: Option<ClosureInfo>,
 }
 
-impl NullarySpec {
+pub struct Example {
+    pub args: Vec<Value>,
+    pub known_bits: BTreeMap<usize, bool>,
+}
+
+pub struct ClosureInfo {
+    pub name: String,
+}
+
+impl BitSpec {
     pub fn from_file(
         file: &SyGuSFile,
         problem: &SynthProblem<'static>,
     ) -> parse::Result<Option<Self>> {
-        if !problem.args.is_empty() {
-            return Ok(None);
-        }
-        if let Some(value) = parse_target_define_fun(file, problem.name)? {
-            return Ok(Some(Self::Exact(value)));
-        }
-        if let Some((known_bits, structural)) =
-            parse_bit_constraints(file, problem.name, problem.bits)?
-        {
-            return Ok(Some(Self::BitConstraints {
+        if let Some(value) = parse_target_define_fun(file, problem.name, problem.args.len())? {
+            let mut known_bits = BTreeMap::new();
+            for bit in 0..value.bits() {
+                known_bits.insert(bit, value.bit(bit));
+            }
+            return Ok(Some(Self {
                 bits: problem.bits,
-                known_bits,
+                examples: vec![Example {
+                    args: vec![],
+                    known_bits,
+                }],
+                structural: vec![],
+                closure: None,
+            }));
+        }
+        if let Some((examples, structural)) =
+            parse_bit_constraints_grouped(file, problem.name, problem.bits, &problem.args)?
+        {
+            return Ok(Some(Self {
+                bits: problem.bits,
+                examples,
                 structural,
+                closure: None,
             }));
         }
         Ok(None)
     }
 
-    /// Split label bit-indices into the "must be 1" and "must be 0" sets.
-    /// `None` if the spec isn't bit-constraint-shaped (the only shape the
-    /// LFP search currently uses).
-    pub(crate) fn label_indices(&self) -> Option<(Vec<usize>, Vec<usize>)> {
-        let known_bits = match self {
-            NullarySpec::BitConstraints { known_bits, .. } => known_bits,
-            NullarySpec::Exact(_) => return None,
-        };
+    pub fn from_labels(
+        bits: usize,
+        known_bits: BTreeMap<usize, bool>,
+        closure_name: String,
+    ) -> Self {
+        Self {
+            bits,
+            examples: vec![Example {
+                args: vec![],
+                known_bits,
+            }],
+            structural: vec![],
+            closure: Some(ClosureInfo { name: closure_name }),
+        }
+    }
+
+    pub fn label_indices(&self) -> Option<(Vec<usize>, Vec<usize>)> {
+        if self.examples.len() != 1 {
+            return None;
+        }
+        let known_bits = &self.examples[0].known_bits;
+        if known_bits.is_empty() {
+            return None;
+        }
         let mut pos = Vec::new();
         let mut neg = Vec::new();
         for (idx, expected) in known_bits {
@@ -70,59 +100,79 @@ impl NullarySpec {
         Some((pos, neg))
     }
 
-    pub(crate) fn matches(&self, value: &Value) -> bool {
-        match self {
-            Self::Exact(expected) => value == expected,
-            Self::BitConstraints {
-                bits,
-                known_bits,
-                structural,
-            } => {
-                if value.bits() != *bits {
-                    return false;
-                }
-                if !known_bits
-                    .iter()
-                    .all(|(bit, expected)| value.bit(*bit) == *expected)
-                {
-                    return false;
-                }
-                structural.iter().all(|expr| {
-                    expr.eval(std::slice::from_ref(value))
-                        .map(|v| v.as_bool().holds())
-                        .unwrap_or(false)
-                })
+    pub fn matches(&self, values: &[Value]) -> bool {
+        debug_assert_eq!(values.len(), self.examples.len());
+        for (example, value) in self.examples.iter().zip(values.iter()) {
+            if value.bits() != self.bits {
+                return false;
+            }
+            if !example
+                .known_bits
+                .iter()
+                .all(|(bit, expected)| value.bit(*bit) == *expected)
+            {
+                return false;
             }
         }
+        self.structural.iter().all(|expr| {
+            expr.eval(values)
+                .map(|v| v.as_bool().holds())
+                .unwrap_or(false)
+        })
     }
 
-    /// Drive the bottom-up exact-nullary search. In `fixpoint = Some(name)`
-    /// mode each start-NT candidate is iterated to its LFP via Kleene; in
-    /// direct mode candidates are checked against the spec immediately.
+    pub fn demanded_bits(&self) -> BTreeMap<usize, bool> {
+        let mut union = BTreeMap::new();
+        for example in &self.examples {
+            for (bit, val) in &example.known_bits {
+                union.entry(*bit).or_insert(*val);
+            }
+        }
+        union
+    }
+
+    pub fn num_examples(&self) -> usize {
+        self.examples.len()
+    }
+
     pub fn search(
         &self,
         problem: &SynthProblem<'static>,
         min: bool,
         fixpoint: Option<&str>,
     ) -> parse::Result<OwnedExpr> {
-        // Note: the `eval_defined` memo is only enabled in LFP mode (by
-        // `LfpSpec::search`). Tried turning it on for direct mode too;
-        // hit rate on Reg/0024 was 0.1% (define-fun calls in the
-        // bottom-up search rarely repeat with identical args), so it was
-        // pure overhead.
         search_problem(problem, self, min, fixpoint)
+    }
+
+    pub fn compute_relevant_bits(
+        &self,
+        grammar: &ExactGrammar<'_>,
+    ) -> Option<Vec<Vec<usize>>> {
+        if !self.structural.is_empty() {
+            return None;
+        }
+        let demanded = self.demanded_bits();
+        if demanded.is_empty() {
+            return None;
+        }
+        let mut lazy = Relevance::new(grammar, self.bits, &demanded)?;
+        if self.closure.is_some() {
+            lazy.closure_param = Some(0);
+            lazy.closure_relevant = Some(bits::BitSet::new(self.bits));
+        }
+        while !lazy.advance(1024) {}
+        lazy.finish()
     }
 }
 
-// ---------------------------------------------------------------------------
-//  SyGuS-file parsing helpers
-// ---------------------------------------------------------------------------
-
-
-pub fn parse_target_define_fun(
+fn parse_target_define_fun(
     file: &SyGuSFile,
     target_name: &str,
+    arity: usize,
 ) -> parse::Result<Option<Value>> {
+    if arity != 0 {
+        return Ok(None);
+    }
     for cmd in &file.cmds {
         if let SyGuSCmd::DefineFun(name, args, _, body) = cmd {
             if name == target_name && args.is_empty() {
@@ -140,26 +190,77 @@ pub fn parse_target_define_fun(
     Ok(None)
 }
 
-pub fn parse_bit_constraints(
+fn parse_bit_constraints_grouped(
     file: &SyGuSFile,
     target_name: &str,
     target_bits: usize,
-) -> parse::Result<Option<(BTreeMap<usize, bool>, Vec<OwnedExpr>)>> {
-    let mut known_bits = BTreeMap::<usize, bool>::new();
+    args: &[&str],
+) -> parse::Result<Option<(Vec<Example>, Vec<OwnedExpr>)>> {
+    let arity = args.len();
+    let mut example_map: Vec<(Vec<Value>, BTreeMap<usize, bool>)> = Vec::new();
     let mut structural = Vec::new();
-    let synth_env = [(target_name, target_bits as u64)];
+    let synth_env: Vec<(&str, u64)> = if arity == 0 {
+        vec![(target_name, target_bits as u64)]
+    } else {
+        vec![]
+    };
     let mut found_any = false;
 
     for cmd in &file.cmds {
-        if let SyGuSCmd::Constraint(c) = cmd {
-            if let Some(bits) = collect_bit_constraints(c, target_name) {
+        let constraint_term = match cmd {
+            SyGuSCmd::Constraint(c) => c,
+            SyGuSCmd::Assume(c) => c,
+            _ => continue,
+        };
+
+        if arity == 0 {
+            if let Some(bits) = collect_bit_constraints(constraint_term, target_name) {
                 for (bit, value) in bits {
                     if bit >= target_bits {
                         continue;
                     }
                     found_any = true;
+                    let entry = example_map
+                        .iter_mut()
+                        .find(|(a, _)| a.is_empty());
+                    if let Some((_, known_bits)) = entry {
+                        if let Some(old) = known_bits.get(&bit).copied() {
+                            if old != value {
+                                return Err(new_custom_error_span(
+                                    format!(
+                                        "Conflicting constraints on bit {} of {}",
+                                        bit, target_name
+                                    ),
+                                    empty_span(),
+                                ));
+                            }
+                        } else {
+                            known_bits.insert(bit, value);
+                        }
+                    } else {
+                        let mut known_bits = BTreeMap::new();
+                        known_bits.insert(bit, value);
+                        example_map.push((vec![], known_bits));
+                    }
+                }
+            } else if constraint_mentions_target(constraint_term, target_name) {
+                validate_structural_shape(constraint_term, target_name)?;
+                let rewritten =
+                    rewrite_constraint_literals_for_owned_eval(constraint_term);
+                structural.push(OwnedExpr::from_term(&rewritten, &synth_env)?);
+                found_any = true;
+            }
+        } else {
+            if let Some((arg_values, bit, val)) =
+                parse_extract_call_constraint(constraint_term, target_name, arity, target_bits)
+            {
+                found_any = true;
+                let entry = example_map
+                    .iter_mut()
+                    .find(|(a, _)| *a == arg_values);
+                if let Some((_, known_bits)) = entry {
                     if let Some(old) = known_bits.get(&bit).copied() {
-                        if old != value {
+                        if old != val {
                             return Err(new_custom_error_span(
                                 format!(
                                     "Conflicting constraints on bit {} of {}",
@@ -169,27 +270,107 @@ pub fn parse_bit_constraints(
                             ));
                         }
                     } else {
-                        known_bits.insert(bit, value);
+                        known_bits.insert(bit, val);
                     }
+                } else {
+                    let mut known_bits = BTreeMap::new();
+                    known_bits.insert(bit, val);
+                    example_map.push((arg_values, known_bits));
                 }
-            } else if constraint_mentions_target(c, target_name) {
-                validate_structural_shape(c, target_name)?;
-                let rewritten = rewrite_constraint_literals_for_owned_eval(c);
-                structural.push(OwnedExpr::from_term(&rewritten, &synth_env)?);
-                found_any = true;
-            }
-        } else if let SyGuSCmd::Assume(c) = cmd {
-            if constraint_mentions_target(c, target_name) {
-                validate_structural_shape(c, target_name)?;
-                let rewritten = rewrite_constraint_literals_for_owned_eval(c);
-                structural.push(OwnedExpr::from_term(&rewritten, &synth_env)?);
-                found_any = true;
             }
         }
     }
 
-    Ok(found_any.then_some((known_bits, structural)))
+    if !found_any {
+        return Ok(None);
+    }
+    let examples = example_map
+        .into_iter()
+        .map(|(args, known_bits)| Example { args, known_bits })
+        .collect();
+    Ok(Some((examples, structural)))
 }
+
+/// Parse `(= ((_ extract i i) (f lit_1 ... lit_n)) #b0/#b1)` for non-nullary,
+/// or `(= ((_ extract i i) (f lit_1 ... lit_n)) #b0/#b1)` with negation.
+/// Returns (arg_values, bit_index, bit_value).
+fn parse_extract_call_constraint(
+    term: &SyGuSTerm,
+    target_name: &str,
+    arity: usize,
+    target_bits: usize,
+) -> Option<(Vec<Value>, usize, bool)> {
+    if let SyGuSTerm::Annotated(inner, _) = term {
+        return parse_extract_call_constraint(inner, target_name, arity, target_bits);
+    }
+    let SyGuSTerm::Application(op, args) = term else {
+        return None;
+    };
+    if op.get_name() != "=" || args.len() != 2 {
+        return None;
+    }
+    try_parse_extract_eq(&args[0], &args[1], target_name, arity, target_bits)
+        .or_else(|| try_parse_extract_eq(&args[1], &args[0], target_name, arity, target_bits))
+}
+
+fn try_parse_extract_eq(
+    extract_side: &SyGuSTerm,
+    lit_side: &SyGuSTerm,
+    target_name: &str,
+    arity: usize,
+    target_bits: usize,
+) -> Option<(Vec<Value>, usize, bool)> {
+    let SyGuSTerm::Application(extract_op, extract_args) = extract_side else {
+        return None;
+    };
+    if extract_args.len() != 1 {
+        return None;
+    }
+    let (hi, lo) = extract_indices_from_identifier(extract_op)?;
+    if hi != lo || hi >= target_bits {
+        return None;
+    }
+    let call = &extract_args[0];
+    let SyGuSTerm::Application(call_op, call_args) = call else {
+        return None;
+    };
+    if call_op.get_name() != target_name || call_args.len() != arity {
+        return None;
+    }
+    let mut arg_values = Vec::with_capacity(arity);
+    for arg in call_args {
+        let SyGuSTerm::Literal(lit) = arg else {
+            return None;
+        };
+        arg_values.push(literal_to_value(lit)?);
+    }
+    let bit_val = bit_literal(lit_side)?;
+    Some((arg_values, hi, bit_val))
+}
+
+fn literal_to_value(lit: &SyGuSLiteral) -> Option<Value> {
+    match lit {
+        SyGuSLiteral::Numeral(v) => Some(Value::from_u64(*v as u64, 64)),
+        SyGuSLiteral::Bool(v) => Some(Value::from_u64(if *v { 1 } else { 0 }, 1)),
+        SyGuSLiteral::HexConst(v) => {
+            let trimmed = v.trim_start_matches("#x");
+            let bits = trimmed.len() * 4;
+            let big = num_bigint::BigUint::parse_bytes(trimmed.as_bytes(), 16)?;
+            Some(Value::from_biguint(big, bits.max(1)))
+        }
+        SyGuSLiteral::BinConst(v) => {
+            let trimmed = v.trim_start_matches("#b");
+            let bits = trimmed.len();
+            let big = num_bigint::BigUint::parse_bytes(trimmed.as_bytes(), 2)?;
+            Some(Value::from_biguint(big, bits.max(1)))
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Shared parsing helpers (kept from spec.rs for nullary path)
+// ---------------------------------------------------------------------------
 
 fn constraint_mentions_target(term: &SyGuSTerm, target_name: &str) -> bool {
     match term {
@@ -322,9 +503,6 @@ fn extract_on_phi_range(term: &SyGuSTerm, target: &str) -> Option<(usize, usize)
     }
 }
 
-/// Try to extract a conjunction of bit constraints from a term.
-/// Handles `and`, `not`, and atomic `(= (extract i i) target) literal` patterns.
-/// Returns None if the term cannot be fully decomposed into bit constraints.
 fn collect_bit_constraints(
     term: &SyGuSTerm,
     target_name: &str,
@@ -399,4 +577,3 @@ fn extract_bit_of_target(term: &SyGuSTerm, target_name: &str) -> Option<usize> {
     let (hi, lo) = extract_on_phi_range(term, target_name)?;
     (hi == lo).then_some(hi)
 }
-
