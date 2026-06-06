@@ -24,19 +24,76 @@ Each define-fun is compiled to either:
 
 The Generic path dominates runtime for String/PROSE benchmarks where define-funs are 100K+ character bit-blasted expressions.
 
-### BitCircuitPlan Detection Gap
+### BitCircuit multi-bit constant handling (fixed)
 
-The delis frontend applies optimizations before emitting SyGuS:
+`flatten_concat_bits` previously rejected multi-bit constant leaves (width > 1),
+forcing any define-fun with grouped constant bits onto the slow Generic path.
+Fixed via a two-pass approach in `try_compile`:
 
-1. **BoolExpr::compact** (emit.rs) groups consecutive constant bits into multi-bit literals (e.g., `#b00101` instead of five 1-bit concats). This reduces Generic plan instruction count but breaks BitCircuit detection.
+1. `flatten_concat_bits` tries the strict 1-bit-only path (fast, unchanged hot path)
+2. On failure, `flatten_concat_bits_or_consts` accepts multi-bit `OwnedExpr::Const`
+   leaves, which are expanded bit-by-bit into `BoolAtom::Const` entries
 
-2. **try_lift_native_bv** (optim.rs) detects uniform/segmented bit patterns and replaces them with native BV ops (bvand, bvor, multi-bit extracts). This is a net win for the Generic path but prevents BitCircuit compilation entirely.
+A bare `OwnedExpr::Const` at the top level (no concat) is rejected — those
+all-constant define-funs are cheaper on the Generic path (one instruction).
 
-Both optimizations introduce multi-bit leaves into the concat tree, causing `flatten_concat_bits` to reject the expression. The define-funs are structurally boolean circuits (concat of ite-over-input-bit-extracts) but the multi-bit grouping hides this.
+### BitCircuit hash-consing (the big win)
 
-**Implication**: To enable BitCircuit compilation for the large String define-funs, either:
-- dryadsynth-bv's `flatten_concat_bits` must handle multi-bit constants/extracts by splitting them into individual bits
-- Or delis must emit a "BitCircuit-friendly" form (no multi-bit grouping) when targeting the in-process backend
+When multiple output bits share identical boolean sub-expression trees, the old
+code compiled each independently — creating duplicate `BoolNode` entries
+evaluated redundantly at runtime. Now `try_compile` uses an
+`FxHashMap<BoolNode, usize>` dedup map during the output-bit compilation phase.
+`BoolAtom::compile_dedup` / `BoolNode::compile_dedup` check the map before
+pushing, reusing existing indices for structurally identical nodes.
+
+Effect on String/0001.sl define-funs:
+- `int.indexof`: 639,804 → 26,661 bindings (**96% reduction**)
+- `str.++`: 135,360 → 61,326 bindings (55%)
+- `str.substr`: 132,573 → 35,274 bindings (73%)
+
+Required `Hash + PartialEq + Eq` derives on `BoolNode` and `BoolAtom`.
+
+## What didn't work (don't re-try)
+
+- **Thread-local `Vec<bool>` buffer for BitCircuit eval temps**: Replaced
+  `Vec::with_capacity(n)` with a TLS `RefCell<Vec<bool>>` that's cleared and
+  reused across calls. No measurable improvement — the allocation isn't the
+  bottleneck; the 61K `BoolNode::eval` iterations dominate. RefCell overhead
+  may have slightly regressed.
+
+- **Removing `try_lift_native_bv` from delis**: Caused 20% regression on Reg
+  benchmarks. The lift detects uniform bit patterns (all bits have the same
+  formula shifted by index) and emits a single native BV op (`bvand`, `bvor`).
+  For `re.union` this means 1 instruction vs 98 individual bit evaluations.
+  The lift is a genuine semantic compression for uniform patterns; removing it
+  forces BitCircuit to do O(n) work where O(1) sufficed. Keep in delis.
+
+## Responsibility boundary: delis vs dryadsynth-bv
+
+- **delis** owns problem-size reduction: bisim quotient, let-binding structure,
+  `try_lift_native_bv` for uniform patterns, `BoolExpr::compact` grouping
+  consecutive constants.
+- **dryadsynth-bv** owns efficient evaluation of whatever IR arrives:
+  BitCircuit detection (including multi-bit constants), hash-consing dedup,
+  backward relevance, eval caching, search strategies.
+- The SyGuS BV file is the contract between them. Neither side assumes
+  internal details of the other's implementation.
+
+## Regression test suite
+
+Run all on the remote server (`sync-rust-to-remote` then SSH). Baselines
+from clean builds of both repos at their respective main HEADs.
+
+| Benchmark | Baseline | After hash-cons | Notes |
+|---|---|---|---|
+| `Reg/0003.sl` | 5.33s | 3.86s | 1.4× faster |
+| `Reg/0019.sl` | 3.05s | 2.16s | 1.4× faster |
+| `String/0031.sl` | 6.70s | 2.75s | 2.4× faster |
+| `CTL/0002.sl` | 0.20s | 0.19s | unchanged |
+| `String/0001.sl` | >120s | >120s (size 8 @ 42s) | blocked on search space, not eval |
+
+All produce correct solutions (same output as baseline). CTL/0002 is fast
+because its search space is tiny (solved at size 3).
 
 ## Backward Relevance (exact/relevance/)
 
