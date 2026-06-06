@@ -26,7 +26,7 @@ impl<'a> Expr<'a> {
         match self {
             Expr::Concat(a, b) => a.width() + b.width(),
             Expr::Extract(_, hi, lo) => (hi - lo + 1) as usize,
-            Expr::Fop0Dyn(id) => deffun::ENV.ret_bits(*id, 0),
+            Expr::Fop0Dyn(id) => deffun::ENV.ret_bits(*id),
             Expr::Const(v) => v.bits(),
             Expr::Var(_, width) => *width,
             Expr::Not(a) | Expr::Neg(a) | Expr::Fop1Dyn(_, a) => a.width(),
@@ -59,7 +59,7 @@ pub fn format_owned_dyn_app(fid: usize, args: &[OwnedExpr]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(" ");
-    format!("({} {})", deffun::ENV.name(fid, args.len()), rendered_args)
+    format!("({} {})", deffun::ENV.name(fid), rendered_args)
 }
 
 impl<'a> Expr<'a> {
@@ -94,7 +94,7 @@ impl<'a> Expr<'a> {
             return Ok(value.extract(*hi, *lo));
         }
         if let Expr::Fop0Dyn(id) = self {
-            return deffun::ENV.eval_defined(*id, 0, &[]);
+            return deffun::ENV.eval_defined(*id, &[]);
         }
         if let Expr::Const(a) = self {
             return Ok(a.clone());
@@ -103,11 +103,11 @@ impl<'a> Expr<'a> {
             return Ok(op::ite(a.eval(args)?, b.eval(args)?, c.eval(args)?));
         }
         if let Expr::Fop1Dyn(id, e1) = self {
-            return deffun::ENV.eval_defined(*id, 1, &[e1.eval(args)?]);
+            return deffun::ENV.eval_defined(*id, &[e1.eval(args)?]);
         }
         if let Expr::Fop2Dyn(id, e1, e2) = self {
             return deffun::ENV
-                .eval_defined(*id, 2, &[e1.eval(args)?, e2.eval(args)?]);
+                .eval_defined(*id, &[e1.eval(args)?, e2.eval(args)?]);
         }
         all_ops!(arity nonzero);
         panic!("should not reach here. {:?}", self);
@@ -135,7 +135,7 @@ impl<'a> Expr<'a> {
             return a.eval_bv(args).extract(*hi, *lo);
         }
         if let Expr::Fop0Dyn(id) = self {
-            return deffun::ENV.apply(*id, 0).eval_bv(&[]);
+            return deffun::ENV.apply(*id).eval_bv(&[]);
         }
         if let Expr::Const(a) = self {
             return Bv([a.as_u64_lossy(); N].into());
@@ -144,11 +144,11 @@ impl<'a> Expr<'a> {
             return op::bv::ite(a.eval_bv(args), b.eval_bv(args), c.eval_bv(args));
         }
         if let Expr::Fop1Dyn(id, e1) = self {
-            return deffun::ENV.apply(*id, 1).eval_bv(&[e1.eval_bv(args)]);
+            return deffun::ENV.apply(*id).eval_bv(&[e1.eval_bv(args)]);
         }
         if let Expr::Fop2Dyn(id, e1, e2) = self {
             return deffun::ENV
-                .apply(*id, 2)
+                .apply(*id)
                 .eval_bv(&[e1.eval_bv(args), e2.eval_bv(args)]);
         }
         all_ops!(arity);
@@ -280,7 +280,7 @@ impl<'a> Expr<'a> {
             return Ok(Some(v.extract(*hi, *lo)));
         }
         if let Expr::Fop0Dyn(id) = self {
-            return Ok(Some(deffun::ENV.apply(*id, 0).eval_bv(&[])));
+            return Ok(Some(deffun::ENV.apply(*id).eval_bv(&[])));
         }
         if let Expr::Const(c) = self {
             return Ok(Some(Bv([c.as_u64_lossy(); N].into())));
@@ -289,7 +289,7 @@ impl<'a> Expr<'a> {
             let v1 = e1.for_each_subexpr(f, args)?;
             let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
             f(e1, v1)?;
-            return Ok(Some(deffun::ENV.apply(*id, 1).eval_bv(&[v1])));
+            return Ok(Some(deffun::ENV.apply(*id).eval_bv(&[v1])));
         }
         if let Expr::Fop2Dyn(id, e1, e2) = self {
             let v1 = e1.for_each_subexpr(f, args)?;
@@ -298,7 +298,7 @@ impl<'a> Expr<'a> {
             let v2 = e2.for_each_subexpr(f, args)?;
             let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
             f(e2, v2)?;
-            return Ok(Some(deffun::ENV.apply(*id, 2).eval_bv(&[v1, v2])));
+            return Ok(Some(deffun::ENV.apply(*id).eval_bv(&[v1, v2])));
         }
         all_ops!(arity nonzero);
         return Ok(None);
@@ -648,7 +648,7 @@ impl OwnedExpr {
             return format!("((_ extract {} {}) {})", hi, lo, a.to_sygus_with_env(names));
         }
         if let OwnedExpr::Fop0Dyn(id) = self {
-            return deffun::ENV.name(*id, 0).to_string();
+            return deffun::ENV.name(*id).to_string();
         }
         if let OwnedExpr::Const(c) = self {
             return c.to_string();
@@ -677,15 +677,15 @@ impl OwnedExpr {
                 .map(|arg| arg.to_sygus_with_env(names))
                 .collect::<Vec<_>>()
                 .join(" ");
-            return format!("({} {})", deffun::ENV.name(*id, args.len()), rendered_args);
+            return format!("({} {})", deffun::ENV.name(*id), rendered_args);
         }
         if let OwnedExpr::Fop1Dyn(id, a) = self {
-            return format!("({} {})", deffun::ENV.name(*id, 1), a.to_sygus_with_env(names));
+            return format!("({} {})", deffun::ENV.name(*id), a.to_sygus_with_env(names));
         }
         if let OwnedExpr::Fop2Dyn(id, a, b) = self {
             return format!(
                 "({} {} {})",
-                deffun::ENV.name(*id, 2),
+                deffun::ENV.name(*id),
                 a.to_sygus_with_env(names),
                 b.to_sygus_with_env(names)
             );
@@ -776,8 +776,8 @@ impl OwnedExpr {
         match self {
             OwnedExpr::Concat(a, b) => a.width() + b.width(),
             OwnedExpr::Extract(_, hi, lo) => (hi - lo + 1) as usize,
-            OwnedExpr::Fop0Dyn(id) => deffun::ENV.ret_bits(*id, 0),
-            OwnedExpr::FopDyn(id, args) => deffun::ENV.ret_bits(*id, args.len()),
+            OwnedExpr::Fop0Dyn(id) => deffun::ENV.ret_bits(*id),
+            OwnedExpr::FopDyn(id, ..) => deffun::ENV.ret_bits(*id),
             OwnedExpr::Const(v) => v.bits(),
             OwnedExpr::Var(_, width) => *width,
             OwnedExpr::Let(_, _, body) => body.width(),
@@ -874,7 +874,7 @@ impl OwnedExpr {
             return Ok(value.extract(*hi, *lo));
         }
         if let OwnedExpr::Fop0Dyn(id) = self {
-            return deffun::ENV.eval_defined(*id, 0, &[]);
+            return deffun::ENV.eval_defined(*id, &[]);
         }
         if let OwnedExpr::Const(a) = self {
             return Ok(a.clone());
@@ -887,17 +887,17 @@ impl OwnedExpr {
                 .iter()
                 .map(|expr| expr.eval(args))
                 .collect::<Result<Vec<_>, _>>()?;
-            return deffun::ENV.eval_defined(*id, exprs.len(), &values);
+            return deffun::ENV.eval_defined(*id, &values);
         }
         if let OwnedExpr::Ite(e1, e2, e3) = self {
             return Ok(op::ite(e1.eval(args)?, e2.eval(args)?, e3.eval(args)?));
         }
         if let OwnedExpr::Fop1Dyn(id, e1) = self {
-            return deffun::ENV.eval_defined(*id, 1, &[e1.eval(args)?]);
+            return deffun::ENV.eval_defined(*id, &[e1.eval(args)?]);
         }
         if let OwnedExpr::Fop2Dyn(id, e1, e2) = self {
             return deffun::ENV
-                .eval_defined(*id, 2, &[e1.eval(args)?, e2.eval(args)?]);
+                .eval_defined(*id, &[e1.eval(args)?, e2.eval(args)?]);
         }
         all_ops!(arity nonzero);
         panic!("should not reach here.");
@@ -925,7 +925,7 @@ impl OwnedExpr {
             return a.eval_bv(args).extract(*hi, *lo);
         }
         if let OwnedExpr::Fop0Dyn(id) = self {
-            return deffun::ENV.apply(*id, 0).eval_bv(&[]);
+            return deffun::ENV.apply(*id).eval_bv(&[]);
         }
         if let OwnedExpr::Const(a) = self {
             return Bv([a.as_u64_lossy(); N].into());
@@ -935,17 +935,17 @@ impl OwnedExpr {
         }
         if let OwnedExpr::FopDyn(id, exprs) = self {
             let values = exprs.iter().map(|expr| expr.eval_bv(args)).collect::<Vec<_>>();
-            return deffun::ENV.apply(*id, exprs.len()).eval_bv(&values);
+            return deffun::ENV.apply(*id).eval_bv(&values);
         }
         if let OwnedExpr::Ite(e1, e2, e3) = self {
             return op::bv::ite(e1.eval_bv(args), e2.eval_bv(args), e3.eval_bv(args));
         }
         if let OwnedExpr::Fop1Dyn(id, e1) = self {
-            return deffun::ENV.apply(*id, 1).eval_bv(&[e1.eval_bv(args)]);
+            return deffun::ENV.apply(*id).eval_bv(&[e1.eval_bv(args)]);
         }
         if let OwnedExpr::Fop2Dyn(id, e1, e2) = self {
             return deffun::ENV
-                .apply(*id, 2)
+                .apply(*id)
                 .eval_bv(&[e1.eval_bv(args), e2.eval_bv(args)]);
         }
         all_ops!(arity);

@@ -360,18 +360,18 @@ impl<'a, const N: usize> Algo<'a, N> {
                 b.union(c)
             }
             OwnedExpr::Fop0Dyn(fid) => {
-                let body = crate::parse::deffun::ENV.apply(*fid, 0);
+                let body = crate::parse::deffun::ENV.apply(*fid);
                 self.eval_owned_abs(body, &[], depth + 1)?
             }
             OwnedExpr::Fop1Dyn(fid, a) => {
                 let arg = self.eval_owned_abs(a, vars, depth + 1)?;
-                let body = crate::parse::deffun::ENV.apply(*fid, 1);
+                let body = crate::parse::deffun::ENV.apply(*fid);
                 self.eval_owned_abs(body, &[arg], depth + 1)?
             }
             OwnedExpr::Fop2Dyn(fid, a, b) => {
                 let a = self.eval_owned_abs(a, vars, depth + 1)?;
                 let b = self.eval_owned_abs(b, vars, depth + 1)?;
-                let body = crate::parse::deffun::ENV.apply(*fid, 2);
+                let body = crate::parse::deffun::ENV.apply(*fid);
                 self.eval_owned_abs(body, &[a, b], depth + 1)?
             }
             OwnedExpr::FopDyn(fid, args) => {
@@ -379,7 +379,7 @@ impl<'a, const N: usize> Algo<'a, N> {
                 for arg in args {
                     abs_args.push(self.eval_owned_abs(arg, vars, depth + 1)?);
                 }
-                let body = crate::parse::deffun::ENV.apply(*fid, args.len());
+                let body = crate::parse::deffun::ENV.apply(*fid);
                 self.eval_owned_abs(body, &abs_args, depth + 1)?
             }
             _ => AbsSummary::top(),
@@ -410,7 +410,7 @@ impl<'a, const N: usize> Algo<'a, N> {
             },
             _ => {
                 if let Some(fid) = crate::parse::deffun::ENV.lookup(op, args.len()) {
-                    let body = crate::parse::deffun::ENV.apply(fid, args.len());
+                    let body = crate::parse::deffun::ENV.apply(fid);
                     self.eval_owned_abs(body, args, 0)
                         .unwrap_or_else(AbsSummary::top)
                 } else {
@@ -457,8 +457,8 @@ impl OwnedExpr {
     match self {
         OwnedExpr::Concat(a, b) => a.bit_width() + b.bit_width(),
         OwnedExpr::Extract(_, hi, lo) => (*hi - *lo + 1) as usize,
-        OwnedExpr::Fop0Dyn(id) => crate::parse::deffun::ENV.ret_bits(*id, 0),
-        OwnedExpr::FopDyn(id, args) => crate::parse::deffun::ENV.ret_bits(*id, args.len()),
+        OwnedExpr::Fop0Dyn(id) => crate::parse::deffun::ENV.ret_bits(*id),
+        OwnedExpr::FopDyn(id, ..) => crate::parse::deffun::ENV.ret_bits(*id),
         OwnedExpr::Const(v) => v.bits(),
         OwnedExpr::Var(_, width) => *width,
         OwnedExpr::Let(_, _, body) => body.bit_width(),

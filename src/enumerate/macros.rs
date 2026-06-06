@@ -10,7 +10,7 @@ macro_rules! enum_expr {
             #[display(fmt = "((_ extract {} {}) {})", _1, _2, _0)]
             Extract(&'a Expr<'a>, u64, u64),
             #[debug(fmt = "f0{}", _0)]
-            #[display(fmt = "{}", "crate::parse::deffun::ENV.name(*_0, 0)")]
+            #[display(fmt = "{}", "crate::parse::deffun::ENV.name(*_0)")]
             Fop0Dyn(usize),
             #[debug(fmt = "!{:?}", _0)]
             #[display(fmt = "(bvnot {})", _0)]
@@ -58,10 +58,10 @@ macro_rules! enum_expr {
             #[display(fmt = "(bvsrem {} {})", _0, _1)]
             SRem(&'a Expr<'a>, &'a Expr<'a>),
             #[debug(fmt = "f1{}{:?}", _0, _1)]
-            #[display(fmt = "({} {})", "crate::parse::deffun::ENV.name(*_0, 1)", _1)]
+            #[display(fmt = "({} {})", "crate::parse::deffun::ENV.name(*_0)", _1)]
             Fop1Dyn(usize, &'a Expr<'a>),
             #[debug(fmt = "(f2{} {:?} {:?})", _0, _1, _2)]
-            #[display(fmt = "({} {} {})", "crate::parse::deffun::ENV.name(*_0, 2)", _1, _2)]
+            #[display(fmt = "({} {} {})", "crate::parse::deffun::ENV.name(*_0)", _1, _2)]
             Fop2Dyn(usize, &'a Expr<'a>, &'a Expr<'a>),
             #[debug(fmt = "(ite {:?} {:?} {:?})", _0, _1, _2)]
             #[display(fmt = "(ite (= {} #x0000000000000000) {} {})", _0, _1, _2)]
@@ -88,7 +88,7 @@ macro_rules! enum_ownedexpr {
             #[display(fmt = "((_ extract {} {}) {})", _1, _2, _0)]
             Extract(Box<OwnedExpr>, u64, u64),
             #[debug(fmt = "f0{}", _0)]
-            #[display(fmt = "{}", "crate::parse::deffun::ENV.name(*_0, 0)")]
+            #[display(fmt = "{}", "crate::parse::deffun::ENV.name(*_0)")]
             Fop0Dyn(usize),
             #[debug(fmt = "!{:?}", _0)]
             #[display(fmt = "(bvnot {})", _0)]
@@ -136,10 +136,10 @@ macro_rules! enum_ownedexpr {
             #[display(fmt = "(bvsrem {} {})", _0, _1)]
             SRem(Box<OwnedExpr>, Box<OwnedExpr>),
             #[debug(fmt = "f1{}{:?}", _0, _1)]
-            #[display(fmt = "({} {})", "crate::parse::deffun::ENV.name(*_0, 1)", _1)]
+            #[display(fmt = "({} {})", "crate::parse::deffun::ENV.name(*_0)", _1)]
             Fop1Dyn(usize, Box<OwnedExpr>),
             #[debug(fmt = "(f2{} {:?} {:?})", _0, _1, _2)]
-            #[display(fmt = "({} {} {})", "crate::parse::deffun::ENV.name(*_0, 2)", _1, _2)]
+            #[display(fmt = "({} {} {})", "crate::parse::deffun::ENV.name(*_0)", _1, _2)]
             Fop2Dyn(usize, Box<OwnedExpr>, Box<OwnedExpr>),
             #[debug(fmt = "{}", "crate::enumerate::expr::format_owned_dyn_app(*_0, _1)")]
             #[display(fmt = "{}", "crate::enumerate::expr::format_owned_dyn_app(*_0, _1)")]

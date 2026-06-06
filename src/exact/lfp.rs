@@ -200,7 +200,6 @@ impl<'a> LfpSpec<'a> {
         let spec = super::bitspec::BitSpec::from_labels(
             self.bits(),
             labels,
-            closure_name.to_string(),
         );
         info!(
             "{}: routing to exact search with fixpoint='{}' (bits={}, labels={})",
@@ -362,9 +361,9 @@ impl OwnedExpr {
     ) -> parse::Result<Value> {
         let closure = Some((closure_name, closure_value));
         let div_by_zero = || new_custom_error_span("lfp: divide-by-zero".into(), empty_span());
-        let fn_div_by_zero = |id: usize, nargs: usize| {
+        let fn_div_by_zero = |id: usize| {
             new_custom_error_span(
-                format!("lfp: divide-by-zero in {}", env.name(id, nargs)),
+                format!("lfp: divide-by-zero in {}", env.name(id)),
                 empty_span(),
             )
         };
@@ -425,29 +424,28 @@ impl OwnedExpr {
                 .srem(b.eval_with_closure(env, closure_value, closure_name)?)
                 .ok_or_else(div_by_zero),
             OwnedExpr::Fop0Dyn(id) => {
-                eval_defined_with_closure(*id, 0, &[], closure).map_err(|_| fn_div_by_zero(*id, 0))
+                eval_defined_with_closure(*id, &[], closure).map_err(|_| fn_div_by_zero(*id))
             }
             OwnedExpr::Fop1Dyn(id, a) => {
                 let args = [a.eval_with_closure(env, closure_value, closure_name)?];
-                eval_defined_with_closure(*id, 1, &args, closure)
-                    .map_err(|_| fn_div_by_zero(*id, 1))
+                eval_defined_with_closure(*id, &args, closure)
+                    .map_err(|_| fn_div_by_zero(*id))
             }
             OwnedExpr::Fop2Dyn(id, a, b) => {
                 let args = [
                     a.eval_with_closure(env, closure_value, closure_name)?,
                     b.eval_with_closure(env, closure_value, closure_name)?,
                 ];
-                eval_defined_with_closure(*id, 2, &args, closure)
-                    .map_err(|_| fn_div_by_zero(*id, 2))
+                eval_defined_with_closure(*id, &args, closure)
+                    .map_err(|_| fn_div_by_zero(*id))
             }
             OwnedExpr::FopDyn(id, exprs) => {
-                let nargs = exprs.len();
                 let args = exprs
                     .iter()
                     .map(|arg| arg.eval_with_closure(env, closure_value, closure_name))
                     .collect::<parse::Result<Vec<_>>>()?;
-                eval_defined_with_closure(*id, nargs, &args, closure)
-                    .map_err(|_| fn_div_by_zero(*id, nargs))
+                eval_defined_with_closure(*id, &args, closure)
+                    .map_err(|_| fn_div_by_zero(*id))
             }
             OwnedExpr::Ite(cond, then_e, else_e) => {
                 let c = cond.eval_with_closure(env, closure_value, closure_name)?;

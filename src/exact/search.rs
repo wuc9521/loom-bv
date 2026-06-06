@@ -100,7 +100,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     if pruned_plans.contains_key(&(nt_idx, fid, nargs)) {
                         continue;
                     }
-                    let Some(plan) = deffun::ENV.deffun(fid, nargs).bit_circuit_plan() else {
+                    let Some(plan) = deffun::ENV.deffun(fid).bit_circuit_plan() else {
                         continue;
                     };
                     if let Some(pruned) = plan.pruned(nt_relevant) {
@@ -116,7 +116,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
         }
         let nt_count = grammar.nts.len();
         let seen = if closure.is_some() {
-            SeenMode::pair(nt_count, grammar.start)
+            SeenMode::pair(nt_count)
         } else if let Some(relevant_bits) = eager_relevant_bits {
             SeenMode::multi_projected(relevant_bits, num_examples)
         } else {
@@ -230,7 +230,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 let owned_pruned = self.pruned_plans.get(&(nt_idx, fid, 1)).cloned();
                 let batch_plan = if self.closure.is_none() {
                     owned_pruned.as_deref()
-                        .or_else(|| deffun::ENV.deffun(fid, 1).bit_circuit_plan())
+                        .or_else(|| deffun::ENV.deffun(fid).bit_circuit_plan())
                 } else {
                     None
                 };
@@ -295,7 +295,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 let owned_pruned = self.pruned_plans.get(&(nt_idx, fid, 2)).cloned();
                 let batch_plan = if self.closure.is_none() {
                     owned_pruned.as_deref()
-                        .or_else(|| deffun::ENV.deffun(fid, 2).bit_circuit_plan())
+                        .or_else(|| deffun::ENV.deffun(fid).bit_circuit_plan())
                 } else {
                     None
                 };
@@ -568,12 +568,12 @@ impl<'a, 'g> Searcher<'a, 'g> {
         if self.closure.is_some() {
             let closure = self.closure.as_ref().unwrap();
             let value = eval_defined_with_closure(
-                fid, 1, std::slice::from_ref(&child.values[0]),
+                fid, std::slice::from_ref(&child.values[0]),
                 Some(closure.binding_zero()),
             ).ok()?;
             let child_top = child.values_top.as_ref()?;
             let value_top = eval_defined_with_closure(
-                fid, 1, std::slice::from_ref(&child_top[0]),
+                fid, std::slice::from_ref(&child_top[0]),
                 Some(closure.binding_top()),
             ).ok()?;
             return Some((vec![value], Some(vec![value_top])));
@@ -582,7 +582,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
         let mut values = Vec::with_capacity(k);
         for i in 0..k {
             let v = eval_defined_with_closure(
-                fid, 1, std::slice::from_ref(&child.values[i]), None,
+                fid, std::slice::from_ref(&child.values[i]), None,
             ).ok()?;
             values.push(v);
         }
@@ -598,14 +598,14 @@ impl<'a, 'g> Searcher<'a, 'g> {
         if self.closure.is_some() {
             let closure = self.closure.as_ref().unwrap();
             let value = eval_defined_with_closure(
-                fid, 2,
+                fid,
                 &[lhs.values[0].clone(), rhs.values[0].clone()],
                 Some(closure.binding_zero()),
             ).ok()?;
             let lt = &lhs.values_top.as_ref()?[0];
             let rt = &rhs.values_top.as_ref()?[0];
             let value_top = eval_defined_with_closure(
-                fid, 2, &[lt.clone(), rt.clone()],
+                fid, &[lt.clone(), rt.clone()],
                 Some(closure.binding_top()),
             ).ok()?;
             return Some((vec![value], Some(vec![value_top])));
@@ -614,22 +614,13 @@ impl<'a, 'g> Searcher<'a, 'g> {
         let mut values = Vec::with_capacity(k);
         for i in 0..k {
             let v = eval_defined_with_closure(
-                fid, 2,
+                fid,
                 &[lhs.values[i].clone(), rhs.values[i].clone()],
                 None,
             ).ok()?;
             values.push(v);
         }
         Some((values, None))
-    }
-
-    fn eval_nary_static(
-        fid: usize,
-        tuple: &[&Candidate],
-        closure: Option<&Closure>,
-        num_examples: usize,
-    ) -> Option<(Vec<Value>, Option<Vec<Value>>)> {
-        Self::eval_nary_with_plan(fid, tuple, closure, num_examples, None)
     }
 
     fn eval_nary_with_plan(
@@ -642,14 +633,14 @@ impl<'a, 'g> Searcher<'a, 'g> {
         if let Some(closure) = closure {
             let args_zero: Vec<Value> = tuple.iter().map(|c| c.values[0].clone()).collect();
             let value = eval_defined_with_closure(
-                fid, args_zero.len(), &args_zero, Some(closure.binding_zero()),
+                fid, &args_zero, Some(closure.binding_zero()),
             ).ok()?;
             let args_top: Option<Vec<Value>> = tuple.iter().map(|c| {
                 c.values_top.as_ref().map(|vt| vt[0].clone())
             }).collect();
             let args_top = args_top?;
             let value_top = eval_defined_with_closure(
-                fid, args_top.len(), &args_top, Some(closure.binding_top()),
+                fid, &args_top, Some(closure.binding_top()),
             ).ok()?;
             return Some((vec![value], Some(vec![value_top])));
         }
@@ -660,7 +651,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
             let v = if let Some(plan) = pruned_plan {
                 plan.eval(&args).ok()?
             } else {
-                eval_defined_with_closure(fid, args.len(), &args, None).ok()?
+                eval_defined_with_closure(fid, &args, None).ok()?
             };
             values.push(v);
         }

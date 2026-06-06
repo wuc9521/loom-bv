@@ -258,19 +258,18 @@ impl DefineFunPlan {
                             slots[*then_slot].clone(),
                             slots[*else_slot].clone(),
                         ),
-                        PlanInstr::Fop0Dyn { fid } => env.eval_defined(*fid, 0, &[])?,
+                        PlanInstr::Fop0Dyn { fid } => env.eval_defined(*fid, &[])?,
                         PlanInstr::Fop1Dyn { fid, arg } => {
-                            env.eval_defined(*fid, 1, &[slots[*arg].clone()])?
+                            env.eval_defined(*fid, &[slots[*arg].clone()])?
                         }
                         PlanInstr::Fop2Dyn { fid, lhs, rhs } => env.eval_defined(
                             *fid,
-                            2,
                             &[slots[*lhs].clone(), slots[*rhs].clone()],
                         )?,
                         PlanInstr::FopDyn { fid, args } => {
                             let dyn_args =
                                 args.iter().map(|slot| slots[*slot].clone()).collect::<Vec<_>>();
-                            env.eval_defined(*fid, args.len(), &dyn_args)?
+                            env.eval_defined(*fid, &dyn_args)?
                         }
                     };
                     slots.push(value);
@@ -1049,21 +1048,19 @@ fn compile_generic(expr: &OwnedExpr, arg_bits: &[usize], _ret_bits: usize) -> De
     }
 }
 
-pub struct Environ(UnsafeCell<Vec<Vec<DefineFun>>>);
+pub struct Environ(UnsafeCell<Vec<DefineFun>>);
 
 impl Environ {
     pub fn new() -> Self {
-        Environ(vec![Vec::new(), Vec::new(), Vec::new()].into())
+        Environ(Vec::new().into())
     }
 
-    pub fn inner(&self) -> &mut Vec<Vec<DefineFun>> {
+    pub fn inner(&self) -> &mut Vec<DefineFun> {
         unsafe { self.0.get().as_mut().unwrap() }
     }
 
     pub fn clear(&self) {
-        for defs in self.inner().iter_mut() {
-            defs.clear();
-        }
+        self.inner().clear();
     }
 
     pub fn parse_from_file(&self, file: &SyGuSFile) -> Result<(), Error> {
@@ -1120,9 +1117,6 @@ impl Environ {
             let mut extended_env = args.clone();
             extended_env.extend(closure_args.iter().copied());
             let expr = OwnedExpr::from_term(def.body, extended_env.as_slice())?;
-            if self.inner().len() <= args.len() {
-                self.inner().resize_with(args.len() + 1, Vec::new);
-            }
             let arg_bits = args.iter().map(|(_, bits)| *bits as usize).collect::<Vec<_>>();
             let extended_arg_bits = extended_env
                 .iter()
@@ -1135,7 +1129,7 @@ impl Environ {
                 args.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", "),
                 expr.summarize(160)
             );
-            self.inner()[args.len()].push(DefineFun {
+            self.inner().push(DefineFun {
                 name,
                 args: args.iter().map(|(name, _)| *name).collect(),
                 arg_bits,
@@ -1154,53 +1148,43 @@ impl Environ {
 
     pub fn lookup(&self, name: &str, nargs: usize) -> Option<usize> {
         self.inner()
-            .get(nargs)?
             .iter()
             .enumerate()
-            .find(|(_, p)| p.name == name)
-            .map(|(a, _)| a)
+            .find(|(_, p)| p.name == name && p.args.len() == nargs)
+            .map(|(i, _)| i)
     }
 
-    /// Direct reference to a `DefineFun` slot. Prefer this when the caller
-    /// reads multiple fields — the older `closure_args(id, nargs)` /
-    /// `closure_arg_bits(id, nargs)` / `arg_bits(id, nargs)` accessors each
-    /// do an independent 2-level index lookup, which adds up on hot paths
-    /// like the eval cache key hash.
-    pub fn deffun(&self, id: usize, nargs: usize) -> &DefineFun {
-        &self.inner()[nargs][id]
+    pub fn deffun(&self, id: usize) -> &DefineFun {
+        &self.inner()[id]
     }
 
-    pub fn apply(&self, id: usize, nargs: usize) -> &OwnedExpr {
-        &self.inner()[nargs][id].expr
+    pub fn apply(&self, id: usize) -> &OwnedExpr {
+        &self.inner()[id].expr
     }
-    pub fn plan(&self, id: usize, nargs: usize) -> &DefineFunPlan {
-        &self.inner()[nargs][id].plan
+    pub fn plan(&self, id: usize) -> &DefineFunPlan {
+        &self.inner()[id].plan
     }
-    pub fn ret_bits(&self, id: usize, nargs: usize) -> usize {
-        self.inner()[nargs][id].ret_bits
+    pub fn ret_bits(&self, id: usize) -> usize {
+        self.inner()[id].ret_bits
     }
-    pub fn arg_bits(&self, id: usize, nargs: usize) -> &[usize] {
-        &self.inner()[nargs][id].arg_bits
+    pub fn arg_bits(&self, id: usize) -> &[usize] {
+        &self.inner()[id].arg_bits
     }
-    pub fn name(&self, id: usize, nargs: usize) -> &'static str {
-        &self.inner()[nargs][id].name
+    pub fn name(&self, id: usize) -> &'static str {
+        &self.inner()[id].name
     }
-    /// Names of closure-shaped synth-funs that this define-fun's body may
-    /// reference (in SyGuS file order). Callers must append the current
-    /// value of each one to `args` when invoking `eval_defined`.
-    pub fn closure_args(&self, id: usize, nargs: usize) -> &[&'static str] {
-        &self.inner()[nargs][id].closure_args
+    pub fn closure_args(&self, id: usize) -> &[&'static str] {
+        &self.inner()[id].closure_args
     }
-    pub fn closure_arg_bits(&self, id: usize, nargs: usize) -> &[usize] {
-        &self.inner()[nargs][id].closure_arg_bits
+    pub fn closure_arg_bits(&self, id: usize) -> &[usize] {
+        &self.inner()[id].closure_arg_bits
     }
     pub fn eval_defined(
         &self,
         id: usize,
-        nargs: usize,
         args: &[Value],
     ) -> Result<Value, DivideByZero> {
-        self.plan(id, nargs).eval(self, args)
+        self.plan(id).eval(self, args)
     }
 }
 

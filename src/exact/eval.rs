@@ -97,11 +97,10 @@ impl EvalCache {
 #[inline]
 pub fn eval_defined_with_closure(
     fid: usize,
-    nargs: usize,
     args: &[Value],
     closure: Option<(&str, &Value)>,
 ) -> Result<Value, ()> {
-    let f = deffun::ENV.deffun(fid, nargs);
+    let f = deffun::ENV.deffun(fid);
 
     STATE.with(|c| {
         let mut c = c.borrow_mut();
@@ -211,7 +210,6 @@ impl<'a> ExactGrammar<'a> {
                 let c0 = self.eval_node_at(node.children[0], nodes, aux, closure_name)?;
                 eval_defined_with_closure(
                     *fid,
-                    1,
                     std::slice::from_ref(&c0),
                     Some((closure_name, aux)),
                 )
@@ -220,14 +218,14 @@ impl<'a> ExactGrammar<'a> {
             ExactRule::Binary { fid, .. } => {
                 let c0 = self.eval_node_at(node.children[0], nodes, aux, closure_name)?;
                 let c1 = self.eval_node_at(node.children[1], nodes, aux, closure_name)?;
-                eval_defined_with_closure(*fid, 2, &[c0, c1], Some((closure_name, aux))).ok()
+                eval_defined_with_closure(*fid, &[c0, c1], Some((closure_name, aux))).ok()
             }
             ExactRule::Nary { fid, .. } => {
                 let mut args = Vec::with_capacity(node.children.len());
                 for child in &node.children {
                     args.push(self.eval_node_at(*child, nodes, aux, closure_name)?);
                 }
-                eval_defined_with_closure(*fid, args.len(), &args, Some((closure_name, aux))).ok()
+                eval_defined_with_closure(*fid, &args, Some((closure_name, aux))).ok()
             }
             ExactRule::GenericTemplate { .. } => {
                 // Templates don't support closure binding in the DAG walk;

@@ -142,7 +142,7 @@ macro_rules! generate_rules_matching {
             Rule::Fop1(id) => match id {
                 _ => {
                     generate_op!(op1, |e1| Expr::Fop1Dyn(*id, e1), |v1| {
-                        crate::parse::deffun::ENV.apply(*id, 1).eval_bv(&[v1])
+                        crate::parse::deffun::ENV.apply(*id).eval_bv(&[v1])
                     });
                 }
             },
@@ -151,7 +151,7 @@ macro_rules! generate_rules_matching {
                     generate_op!(
                         op2_nonzero,
                         |e1, e2| Expr::Fop2Dyn(*id, e1, e2),
-                        |v1, v2| crate::parse::deffun::ENV.apply(*id, 2).eval_bv(&[v1, v2])
+                        |v1, v2| crate::parse::deffun::ENV.apply(*id).eval_bv(&[v1, v2])
                     );
                 }
             },

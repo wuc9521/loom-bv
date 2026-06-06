@@ -16,22 +16,21 @@ use crate::{
 
 use super::bits::{BitDep, BitSet};
 
-pub type DepCache = FxHashMap<(usize, usize, usize), Option<BitDep>>;
+pub type DepCache = FxHashMap<(usize, usize), Option<BitDep>>;
 pub type TemplateDepCache = FxHashMap<(usize, usize), Option<BitDep>>;
 
 pub fn get_deffun_dep_bit(
     fid: usize,
-    nargs: usize,
     bit: usize,
     cache: &mut DepCache,
 ) -> Option<BitDep> {
-    if let Some(dep) = cache.get(&(fid, nargs, bit)) {
+    if let Some(dep) = cache.get(&(fid, bit)) {
         return dep.clone();
     }
     // See `get_deffun_dep_bits` — same extended-arg_bits reason.
-    let mut arg_bits = deffun::ENV.arg_bits(fid, nargs).to_vec();
-    arg_bits.extend_from_slice(deffun::ENV.closure_arg_bits(fid, nargs));
-    let dep = match deffun::ENV.plan(fid, nargs) {
+    let mut arg_bits = deffun::ENV.arg_bits(fid).to_vec();
+    arg_bits.extend_from_slice(deffun::ENV.closure_arg_bits(fid));
+    let dep = match deffun::ENV.plan(fid) {
         DefineFunPlan::BitCircuit(plan) => compute_bit_circuit_dep_bit(plan, &arg_bits, bit),
         DefineFunPlan::Generic {
             root,
@@ -40,13 +39,12 @@ pub fn get_deffun_dep_bit(
             ..
         } => compute_generic_dep_bit(*root, slot_bits, instrs, &arg_bits, bit, cache),
     };
-    cache.insert((fid, nargs, bit), dep.clone());
+    cache.insert((fid, bit), dep.clone());
     dep
 }
 
 pub fn get_deffun_dep_bits(
     fid: usize,
-    nargs: usize,
     demanded: &BitSet,
     cache: &mut DepCache,
 ) -> Option<BitDep> {
@@ -55,9 +53,9 @@ pub fn get_deffun_dep_bits(
     // identifiers were resolved to Var slots beyond the real arity at parse
     // time. Without this extension, dependency walks treat synth-arg slots
     // as instructions and quietly mis-attribute demand.
-    let mut arg_bits = deffun::ENV.arg_bits(fid, nargs).to_vec();
-    arg_bits.extend_from_slice(deffun::ENV.closure_arg_bits(fid, nargs));
-    match deffun::ENV.plan(fid, nargs) {
+    let mut arg_bits = deffun::ENV.arg_bits(fid).to_vec();
+    arg_bits.extend_from_slice(deffun::ENV.closure_arg_bits(fid));
+    match deffun::ENV.plan(fid) {
         DefineFunPlan::BitCircuit(plan) => Some(compute_bit_circuit_dep_bits(plan, &arg_bits, demanded)),
         DefineFunPlan::Generic {
             root,
@@ -253,9 +251,9 @@ fn compute_generic_dep_bit(
                     )?);
                     Some(dep)
                 }
-                PlanInstr::Fop0Dyn { fid } => get_deffun_dep_bit(*fid, 0, bit, cache),
+                PlanInstr::Fop0Dyn { fid } => get_deffun_dep_bit(*fid, bit, cache),
                 PlanInstr::Fop1Dyn { fid, arg } => {
-                    let outer = get_deffun_dep_bit(*fid, 1, bit, cache)?;
+                    let outer = get_deffun_dep_bit(*fid, bit, cache)?;
                     let mut combined = BitDep::empty(arg_bits);
                     for inner_bit in outer.per_arg[0].iter_ones() {
                         combined.union_inplace(&slot_dep(
@@ -265,7 +263,7 @@ fn compute_generic_dep_bit(
                     Some(combined)
                 }
                 PlanInstr::Fop2Dyn { fid, lhs, rhs } => {
-                    let outer = get_deffun_dep_bit(*fid, 2, bit, cache)?;
+                    let outer = get_deffun_dep_bit(*fid, bit, cache)?;
                     let mut combined = BitDep::empty(arg_bits);
                     for inner_bit in outer.per_arg[0].iter_ones() {
                         combined.union_inplace(&slot_dep(
@@ -280,7 +278,7 @@ fn compute_generic_dep_bit(
                     Some(combined)
                 }
                 PlanInstr::FopDyn { fid, args } => {
-                    let outer = get_deffun_dep_bit(*fid, args.len(), bit, cache)?;
+                    let outer = get_deffun_dep_bit(*fid, bit, cache)?;
                     let mut combined = BitDep::empty(arg_bits);
                     for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
                         let arg_slot = *args.get(arg_idx)?;
@@ -391,19 +389,19 @@ fn compute_generic_dep_bits(
                 enqueue_slot(*else_slot, &delta, &mut demanded_by_slot, &mut stack);
             }
             PlanInstr::Fop0Dyn { fid } => {
-                let _ = get_deffun_dep_bits(*fid, 0, &delta, cache)?;
+                let _ = get_deffun_dep_bits(*fid, &delta, cache)?;
             }
             PlanInstr::Fop1Dyn { fid, arg } => {
-                let outer = get_deffun_dep_bits(*fid, 1, &delta, cache)?;
+                let outer = get_deffun_dep_bits(*fid, &delta, cache)?;
                 enqueue_slot(*arg, &outer.per_arg[0], &mut demanded_by_slot, &mut stack);
             }
             PlanInstr::Fop2Dyn { fid, lhs, rhs } => {
-                let outer = get_deffun_dep_bits(*fid, 2, &delta, cache)?;
+                let outer = get_deffun_dep_bits(*fid, &delta, cache)?;
                 enqueue_slot(*lhs, &outer.per_arg[0], &mut demanded_by_slot, &mut stack);
                 enqueue_slot(*rhs, &outer.per_arg[1], &mut demanded_by_slot, &mut stack);
             }
             PlanInstr::FopDyn { fid, args } => {
-                let outer = get_deffun_dep_bits(*fid, args.len(), &delta, cache)?;
+                let outer = get_deffun_dep_bits(*fid, &delta, cache)?;
                 for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
                     enqueue_slot(args[arg_idx], bits, &mut demanded_by_slot, &mut stack);
                 }
@@ -465,7 +463,7 @@ pub fn compute_template_dep_bit(
         TemplateExpr::Leaf(expr) => compute_expr_dep_bit(expr, slot_bits, bit, cache),
         TemplateExpr::App(id, parts) => {
             let fid = deffun::ENV.lookup(id.get_name(), parts.len())?;
-            let outer = get_deffun_dep_bit(fid, parts.len(), bit, cache)?;
+            let outer = get_deffun_dep_bit(fid, bit, cache)?;
             let mut combined = BitDep::empty(slot_bits);
             for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
                 let part = parts.get(arg_idx)?;
@@ -528,9 +526,9 @@ fn compute_expr_dep_bit(
             dep.union_inplace(&compute_expr_dep_bit(else_expr, arg_bits, bit, cache)?);
             Some(dep)
         }
-        OwnedExpr::Fop0Dyn(fid) => get_deffun_dep_bit(*fid, 0, bit, cache),
+        OwnedExpr::Fop0Dyn(fid) => get_deffun_dep_bit(*fid, bit, cache),
         OwnedExpr::Fop1Dyn(fid, arg) => {
-            let outer = get_deffun_dep_bit(*fid, 1, bit, cache)?;
+            let outer = get_deffun_dep_bit(*fid, bit, cache)?;
             let mut combined = BitDep::empty(arg_bits);
             for inner_bit in outer.per_arg[0].iter_ones() {
                 combined.union_inplace(&compute_expr_dep_bit(arg, arg_bits, inner_bit, cache)?);
@@ -538,7 +536,7 @@ fn compute_expr_dep_bit(
             Some(combined)
         }
         OwnedExpr::Fop2Dyn(fid, lhs, rhs) => {
-            let outer = get_deffun_dep_bit(*fid, 2, bit, cache)?;
+            let outer = get_deffun_dep_bit(*fid, bit, cache)?;
             let mut combined = BitDep::empty(arg_bits);
             for inner_bit in outer.per_arg[0].iter_ones() {
                 combined.union_inplace(&compute_expr_dep_bit(lhs, arg_bits, inner_bit, cache)?);
@@ -549,7 +547,7 @@ fn compute_expr_dep_bit(
             Some(combined)
         }
         OwnedExpr::FopDyn(fid, args) => {
-            let outer = get_deffun_dep_bit(*fid, args.len(), bit, cache)?;
+            let outer = get_deffun_dep_bit(*fid, bit, cache)?;
             let mut combined = BitDep::empty(arg_bits);
             for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
                 let arg = args.get(arg_idx)?;

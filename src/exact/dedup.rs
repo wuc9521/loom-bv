@@ -24,7 +24,6 @@ pub enum SeenMode {
     Pair {
         sub_maps: Vec<FxHashMap<(Value, Value), usize>>,
         start_lfp: FxHashMap<Value, usize>,
-        start_nt: usize,
     },
 }
 
@@ -44,11 +43,10 @@ impl SeenMode {
         }
     }
 
-    pub fn pair(nt_count: usize, start_nt: usize) -> Self {
+    pub fn pair(nt_count: usize) -> Self {
         SeenMode::Pair {
             sub_maps: (0..nt_count).map(|_| FxHashMap::default()).collect(),
             start_lfp: FxHashMap::default(),
-            start_nt,
         }
     }
 

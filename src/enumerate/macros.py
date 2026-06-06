@@ -138,7 +138,7 @@ def expr(mname, name, rec_type, l = [], owned = False):
         ["usize"],
         [
             'debug(fmt = "f0{}", _0)',
-            'display(fmt = "{}", "crate::parse::deffun::ENV.name(*_0, 0)")',
+            'display(fmt = "{}", "crate::parse::deffun::ENV.name(*_0)")',
         ],
     )
 
@@ -149,7 +149,7 @@ def expr(mname, name, rec_type, l = [], owned = False):
         ["usize", rec_type],
         [
             'debug(fmt = "f1{}{:?}", _0, _1)',
-            'display(fmt = "({} {})", "crate::parse::deffun::ENV.name(*_0, 1)", _1)',
+            'display(fmt = "({} {})", "crate::parse::deffun::ENV.name(*_0)", _1)',
         ],
     )
     expr.add(
@@ -157,7 +157,7 @@ def expr(mname, name, rec_type, l = [], owned = False):
         ["usize", rec_type, rec_type],
         [
             'debug(fmt = "(f2{} {:?} {:?})", _0, _1, _2)',
-            'display(fmt = "({} {} {})", "crate::parse::deffun::ENV.name(*_0, 2)", _1, _2)',
+            'display(fmt = "({} {} {})", "crate::parse::deffun::ENV.name(*_0)", _1, _2)',
         ],
     )
     if owned:

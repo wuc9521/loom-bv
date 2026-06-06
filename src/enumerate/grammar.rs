@@ -39,7 +39,7 @@ impl TemplateExpr {
             TemplateExpr::Leaf(expr) => expr.width(),
             TemplateExpr::App(id, parts) => deffun::ENV
                 .lookup(id.get_name(), parts.len())
-                .map(|fid| deffun::ENV.ret_bits(fid, parts.len()))
+                .map(|fid| deffun::ENV.ret_bits(fid))
                 .unwrap_or(1),
         }
     }

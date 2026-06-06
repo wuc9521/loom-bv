@@ -27,9 +27,7 @@ pub struct Example {
     pub known_bits: BTreeMap<usize, bool>,
 }
 
-pub struct ClosureInfo {
-    pub name: String,
-}
+pub struct ClosureInfo;
 
 impl BitSpec {
     pub fn from_file(
@@ -67,7 +65,6 @@ impl BitSpec {
     pub fn from_labels(
         bits: usize,
         known_bits: BTreeMap<usize, bool>,
-        closure_name: String,
     ) -> Self {
         Self {
             bits,
@@ -76,7 +73,7 @@ impl BitSpec {
                 known_bits,
             }],
             structural: vec![],
-            closure: Some(ClosureInfo { name: closure_name }),
+            closure: Some(ClosureInfo),
         }
     }
 

@@ -175,33 +175,33 @@ impl<'a> Relevance<'a> {
                 true
             }
             ExactRule::Unary { fid, child_nt } => {
-                let Some(dep) = get_deffun_dep_bits(*fid, 1, demanded, &mut self.dep_cache) else {
+                let Some(dep) = get_deffun_dep_bits(*fid, demanded, &mut self.dep_cache) else {
                     return false;
                 };
                 self.propagate_dep(&dep, 0, *child_nt);
-                self.propagate_closure_deps(*fid, 1, &dep);
+                self.propagate_closure_deps(*fid, &dep);
                 true
             }
             ExactRule::Binary { fid, lhs_nt, rhs_nt } => {
-                let Some(dep) = get_deffun_dep_bits(*fid, 2, demanded, &mut self.dep_cache)
+                let Some(dep) = get_deffun_dep_bits(*fid, demanded, &mut self.dep_cache)
                 else {
                     return false;
                 };
                 self.propagate_dep(&dep, 0, *lhs_nt);
                 self.propagate_dep(&dep, 1, *rhs_nt);
-                self.propagate_closure_deps(*fid, 2, &dep);
+                self.propagate_closure_deps(*fid, &dep);
                 true
             }
             ExactRule::Nary { fid, child_nts } => {
                 let Some(dep) =
-                    get_deffun_dep_bits(*fid, child_nts.len(), demanded, &mut self.dep_cache)
+                    get_deffun_dep_bits(*fid, demanded, &mut self.dep_cache)
                 else {
                     return false;
                 };
                 for (arg_idx, child_nt) in child_nts.iter().enumerate() {
                     self.propagate_dep(&dep, arg_idx, *child_nt);
                 }
-                self.propagate_closure_deps(*fid, child_nts.len(), &dep);
+                self.propagate_closure_deps(*fid, &dep);
                 true
             }
             ExactRule::GenericTemplate {
@@ -260,14 +260,15 @@ impl<'a> Relevance<'a> {
     /// consumed by `propagate_dep`; the trailing closure-arg slots feed the
     /// `closure_relevant` set and, by the closure constraint `g = aux`,
     /// re-trigger demand on the start NT.
-    fn propagate_closure_deps(&mut self, fid: usize, nargs: usize, dep: &BitDep) {
+    fn propagate_closure_deps(&mut self, fid: usize, dep: &BitDep) {
         if self.closure_param.is_none() {
             return;
         }
-        let closure_arg_bits = deffun::ENV.closure_arg_bits(fid, nargs);
+        let closure_arg_bits = deffun::ENV.closure_arg_bits(fid);
         if closure_arg_bits.is_empty() {
             return;
         }
+        let nargs = deffun::ENV.deffun(fid).args.len();
         let start = self.grammar.start;
         for offset in 0..closure_arg_bits.len() {
             let Some(bits) = dep.per_arg.get(nargs + offset) else {
@@ -292,10 +293,10 @@ pub fn nt_output_bits(rules: &[ExactRule]) -> usize {
         match rule {
             ExactRule::Alias(_) => {}
             ExactRule::Leaf(expr) => return expr.width(),
-            ExactRule::Unary { fid, .. } => return deffun::ENV.ret_bits(*fid, 1),
-            ExactRule::Binary { fid, .. } => return deffun::ENV.ret_bits(*fid, 2),
-            ExactRule::Nary { fid, child_nts } => {
-                return deffun::ENV.ret_bits(*fid, child_nts.len())
+            ExactRule::Unary { fid, .. } => return deffun::ENV.ret_bits(*fid),
+            ExactRule::Binary { fid, .. } => return deffun::ENV.ret_bits(*fid),
+            ExactRule::Nary { fid, .. } => {
+                return deffun::ENV.ret_bits(*fid)
             }
             ExactRule::GenericTemplate { template, .. } => return template.output_bits(),
         }
