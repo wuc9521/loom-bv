@@ -116,6 +116,13 @@ impl DefineFun {
         }
         h.finish()
     }
+
+    pub fn bit_circuit_plan(&self) -> Option<&BitCircuitPlan> {
+        match &self.plan {
+            DefineFunPlan::BitCircuit(plan) if self.closure_args.is_empty() => Some(plan),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +141,7 @@ pub struct BitCircuitPlan {
     pub bindings: Vec<BoolNode>,
     pub output_bits: Vec<BoolAtom>,
     pub ret_bits: usize,
+    pub input_slots: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -275,6 +283,121 @@ impl DefineFunPlan {
 }
 
 impl BitCircuitPlan {
+    pub fn pruned(&self, demanded_output_bits: &[usize]) -> Option<Self> {
+        if demanded_output_bits.len() >= self.output_bits.len() {
+            return None;
+        }
+        let num_bindings = self.bindings.len();
+        let mut needed = vec![false; num_bindings];
+
+        fn mark_atom(atom: &BoolAtom, needed: &mut [bool]) {
+            if let BoolAtom::Temp(idx) = atom {
+                if !needed[*idx] {
+                    needed[*idx] = true;
+                }
+            }
+        }
+
+        fn mark_node(node: &BoolNode, needed: &mut [bool]) {
+            match node {
+                BoolNode::Atom(a) => mark_atom(a, needed),
+                BoolNode::Not(a) => mark_atom(a, needed),
+                BoolNode::And(a, b) | BoolNode::Or(a, b) | BoolNode::Xor(a, b) => {
+                    mark_atom(a, needed);
+                    mark_atom(b, needed);
+                }
+                BoolNode::Ite(a, b, c) => {
+                    mark_atom(a, needed);
+                    mark_atom(b, needed);
+                    mark_atom(c, needed);
+                }
+            }
+        }
+
+        for &bit_idx in demanded_output_bits {
+            mark_atom(&self.output_bits[bit_idx], &mut needed);
+        }
+        for idx in (0..num_bindings).rev() {
+            if needed[idx] {
+                mark_node(&self.bindings[idx], &mut needed);
+            }
+        }
+
+        let kept_count = needed.iter().filter(|&&b| b).count();
+        if kept_count >= num_bindings * 9 / 10 {
+            return None;
+        }
+
+        let mut remap = vec![0usize; num_bindings];
+        let mut new_bindings = Vec::with_capacity(kept_count);
+        let mut new_idx = 0;
+        for (old_idx, &keep) in needed.iter().enumerate() {
+            if keep {
+                remap[old_idx] = new_idx;
+                new_bindings.push(self.bindings[old_idx].clone());
+                new_idx += 1;
+            }
+        }
+
+        fn remap_atom(atom: &BoolAtom, remap: &[usize]) -> BoolAtom {
+            match atom {
+                BoolAtom::Temp(idx) => BoolAtom::Temp(remap[*idx]),
+                other => other.clone(),
+            }
+        }
+
+        fn remap_node(node: &BoolNode, remap: &[usize]) -> BoolNode {
+            match node {
+                BoolNode::Atom(a) => BoolNode::Atom(remap_atom(a, remap)),
+                BoolNode::Not(a) => BoolNode::Not(remap_atom(a, remap)),
+                BoolNode::And(a, b) => BoolNode::And(remap_atom(a, remap), remap_atom(b, remap)),
+                BoolNode::Or(a, b) => BoolNode::Or(remap_atom(a, remap), remap_atom(b, remap)),
+                BoolNode::Xor(a, b) => BoolNode::Xor(remap_atom(a, remap), remap_atom(b, remap)),
+                BoolNode::Ite(a, b, c) => BoolNode::Ite(
+                    remap_atom(a, remap),
+                    remap_atom(b, remap),
+                    remap_atom(c, remap),
+                ),
+            }
+        }
+
+        let remapped_bindings: Vec<BoolNode> = new_bindings
+            .into_iter()
+            .map(|node| remap_node(&node, &remap))
+            .collect();
+
+        let new_output_bits: Vec<BoolAtom> = self.output_bits
+            .iter()
+            .enumerate()
+            .map(|(idx, atom)| {
+                if demanded_output_bits.contains(&idx) {
+                    remap_atom(atom, &remap)
+                } else {
+                    BoolAtom::Const(false)
+                }
+            })
+            .collect();
+
+        let ret_bits = self.ret_bits;
+        let mut seen_inputs = rustc_hash::FxHashSet::default();
+        for node in &remapped_bindings {
+            node.collect_input_bits(&mut seen_inputs);
+        }
+        for atom in &new_output_bits {
+            atom.collect_input_bits(&mut seen_inputs);
+        }
+        let input_slots: Vec<(usize, usize)> = seen_inputs.into_iter().collect();
+
+        Some(BitCircuitPlan {
+            bindings: remapped_bindings,
+            output_bits: new_output_bits,
+            ret_bits,
+            input_slots,
+        })
+    }
+}
+
+impl BitCircuitPlan {
     fn eval(&self, args: &[Value]) -> Result<Value, DivideByZero> {
         let mut temps = Vec::with_capacity(self.bindings.len());
         for binding in &self.bindings {
@@ -288,6 +411,138 @@ impl BitCircuitPlan {
             }
         }
         Ok(value_from_words(words, self.ret_bits))
+    }
+}
+
+impl BitCircuitPlan {
+    /// Evaluate the circuit for up to 64 input sets simultaneously.
+    /// `args_batch[candidate][arg]` gives the Value for that candidate's argument.
+    /// Returns one Value per candidate (up to `count`).
+    pub fn eval_batch(&self, args_batch: &[&[Value]], count: usize) -> Vec<Value> {
+        debug_assert!(count <= 64 && count > 0);
+        let nargs = args_batch[0].len();
+        let stride = args_batch[0].iter().map(|v| v.bits()).max().unwrap_or(0);
+        let input_len = nargs * stride;
+
+        thread_local! {
+            static INPUT_BUF: std::cell::RefCell<Vec<u64>> = std::cell::RefCell::new(Vec::new());
+            static TEMPS_BUF: std::cell::RefCell<Vec<u64>> = std::cell::RefCell::new(Vec::new());
+        }
+
+        INPUT_BUF.with(|buf| {
+            let mut input_words = buf.borrow_mut();
+            input_words.clear();
+            input_words.resize(input_len, 0);
+
+            for &(arg, bit) in &self.input_slots {
+                if arg >= nargs || bit >= stride {
+                    continue;
+                }
+                let idx = arg * stride + bit;
+                let mut word = 0u64;
+                for (cand_idx, args) in args_batch.iter().enumerate().take(count) {
+                    if args[arg].bit(bit) {
+                        word |= 1u64 << cand_idx;
+                    }
+                }
+                input_words[idx] = word;
+            }
+
+            TEMPS_BUF.with(|tbuf| {
+                let mut temps = tbuf.borrow_mut();
+                temps.clear();
+                temps.reserve(self.bindings.len());
+                for node in &self.bindings {
+                    let val = node.eval_word(&input_words, &temps, stride);
+                    temps.push(val);
+                }
+
+                let num_words = self.ret_bits.div_ceil(64);
+                let mut out_words = vec![vec![0u64; num_words]; count];
+
+                for (bit_idx, atom) in self.output_bits.iter().enumerate() {
+                    let word = atom.word(&input_words, &temps, stride);
+                    let out_word_idx = bit_idx / 64;
+                    let out_bit = bit_idx % 64;
+                    for cand_idx in 0..count {
+                        if (word >> cand_idx) & 1 == 1 {
+                            out_words[cand_idx][out_word_idx] |= 1u64 << out_bit;
+                        }
+                    }
+                }
+
+                out_words
+                    .into_iter()
+                    .map(|words| value_from_words(words, self.ret_bits))
+                    .collect()
+            })
+        })
+    }
+}
+
+impl BoolNode {
+    fn eval_word(&self, input_words: &[u64], temps: &[u64], stride: usize) -> u64 {
+        match self {
+            BoolNode::Atom(atom) => atom.word(input_words, temps, stride),
+            BoolNode::Not(atom) => !atom.word(input_words, temps, stride),
+            BoolNode::And(lhs, rhs) => {
+                lhs.word(input_words, temps, stride) & rhs.word(input_words, temps, stride)
+            }
+            BoolNode::Or(lhs, rhs) => {
+                lhs.word(input_words, temps, stride) | rhs.word(input_words, temps, stride)
+            }
+            BoolNode::Xor(lhs, rhs) => {
+                lhs.word(input_words, temps, stride) ^ rhs.word(input_words, temps, stride)
+            }
+            BoolNode::Ite(cond, then_atom, else_atom) => {
+                let c = cond.word(input_words, temps, stride);
+                let t = then_atom.word(input_words, temps, stride);
+                let e = else_atom.word(input_words, temps, stride);
+                (c & e) | (!c & t)
+            }
+        }
+    }
+}
+
+impl BoolAtom {
+    fn word(&self, input_words: &[u64], temps: &[u64], stride: usize) -> u64 {
+        match self {
+            BoolAtom::Const(true) => u64::MAX,
+            BoolAtom::Const(false) => 0,
+            BoolAtom::InputBit { arg, bit } => {
+                let idx = arg * stride + bit;
+                if idx < input_words.len() {
+                    input_words[idx]
+                } else {
+                    0
+                }
+            }
+            BoolAtom::Temp(idx) => temps[*idx],
+        }
+    }
+
+    fn collect_input_bits(&self, out: &mut rustc_hash::FxHashSet<(usize, usize)>) {
+        if let BoolAtom::InputBit { arg, bit } = self {
+            out.insert((*arg, *bit));
+        }
+    }
+}
+
+impl BoolNode {
+    fn collect_input_bits(&self, out: &mut rustc_hash::FxHashSet<(usize, usize)>) {
+        match self {
+            BoolNode::Atom(a) => a.collect_input_bits(out),
+            BoolNode::Not(a) => a.collect_input_bits(out),
+            BoolNode::And(a, b) | BoolNode::Or(a, b) | BoolNode::Xor(a, b) => {
+                a.collect_input_bits(out);
+                b.collect_input_bits(out);
+            }
+            BoolNode::Ite(a, b, c) => {
+                a.collect_input_bits(out);
+                b.collect_input_bits(out);
+                c.collect_input_bits(out);
+            }
+        }
     }
 }
 
@@ -562,10 +817,19 @@ impl BitCircuitPlan {
         if output_bits.len() != ret_bits {
             return None;
         }
+        let mut seen_inputs = rustc_hash::FxHashSet::default();
+        for node in &bindings {
+            node.collect_input_bits(&mut seen_inputs);
+        }
+        for atom in &output_bits {
+            atom.collect_input_bits(&mut seen_inputs);
+        }
+        let input_slots: Vec<(usize, usize)> = seen_inputs.into_iter().collect();
         Some(BitCircuitPlan {
             bindings,
             output_bits,
             ret_bits,
+            input_slots,
         })
     }
 }

@@ -34,6 +34,7 @@ use crate::exact::eval::eval_defined_with_closure;
 use crate::exact::stats::DedupStats;
 use crate::exact::types::{Candidate, ExactEvalCache, ExactGrammar, ExactRule, Node, NodeId};
 use crate::parse::{self, deffun, SynthProblem};
+use crate::parse::deffun::BitCircuitPlan;
 
 pub fn run_search<'a>(
     grammar: ExactGrammar<'a>,
@@ -53,6 +54,7 @@ struct Searcher<'a, 'g> {
     by_size: Vec<Vec<Vec<Candidate>>>,
     seen: SeenMode,
     leaf_cache: ExactEvalCache,
+    pruned_plans: rustc_hash::FxHashMap<(usize, usize), BitCircuitPlan>,
 }
 
 impl<'a, 'g> Searcher<'a, 'g> {
@@ -83,6 +85,11 @@ impl<'a, 'g> Searcher<'a, 'g> {
             }
             bits
         };
+        let pruned_plans: rustc_hash::FxHashMap<(usize, usize), BitCircuitPlan> =
+            rustc_hash::FxHashMap::default();
+        // TODO: cone-of-influence pruning for start-NT. The infrastructure
+        // (BitCircuitPlan::pruned) is ready but needs proper integration
+        // testing with wide bitvectors before enabling.
         let nt_count = grammar.nts.len();
         let seen = if closure.is_some() {
             SeenMode::pair(nt_count, grammar.start)
@@ -100,6 +107,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
             by_size: vec![vec![Vec::<Candidate>::new()]; nt_count],
             seen,
             leaf_cache: ExactEvalCache::default(),
+            pruned_plans,
         }
     }
 
@@ -154,7 +162,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 .map(|buckets| buckets.iter().map(|b| b.len()).sum::<usize>())
                 .sum();
             debg!(
-                "exact-nullary size={} done: per-nt@size={:?} total-candidates={} elapsed={:?}",
+                "search size={}: per-nt={:?} total={} elapsed={:?}",
                 size,
                 per_nt,
                 total,
@@ -195,17 +203,63 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 }
                 let child_size = size - 1;
                 let children = self.by_size[child_nt].get(child_size).cloned().unwrap_or_default();
-                for child in &children {
-                    let Some((values, values_top)) = self.eval_unary(fid, child) else { continue; };
-                    let child_node = child.node;
-                    if let Some(found) = self.try_push_new(
-                        nt_idx,
-                        size,
-                        values,
-                        values_top,
-                        || Node { nt_idx, rule_idx, children: vec![child_node] },
-                    ) {
-                        return Ok(Some(found));
+                let owned_pruned = self.pruned_plans.get(&(nt_idx, fid)).cloned();
+                let batch_plan = if self.closure.is_none() {
+                    owned_pruned.as_ref()
+                        .or_else(|| deffun::ENV.deffun(fid, 1).bit_circuit_plan())
+                } else {
+                    None
+                };
+                let use_batch = batch_plan.is_some_and(|p| p.bindings.len() > 256);
+                if use_batch {
+                    let plan = batch_plan.unwrap();
+                    let k = self.num_examples;
+                    let total = children.len();
+                    let mut idx = 0;
+                    while idx < total {
+                        let batch_end = (idx + 64).min(total);
+                        let count = batch_end - idx;
+                        let mut all_values: Vec<Vec<Value>> =
+                            (0..count).map(|_| Vec::with_capacity(k)).collect();
+                        for i in 0..k {
+                            let args_batch: Vec<[Value; 1]> = (idx..batch_end)
+                                .map(|ci| [children[ci].values[i].clone()])
+                                .collect();
+                            let refs: Vec<&[Value]> =
+                                args_batch.iter().map(|a| a.as_slice()).collect();
+                            let results = plan.eval_batch(&refs, count);
+                            for (j, val) in results.into_iter().enumerate() {
+                                all_values[j].push(val);
+                            }
+                        }
+                        for (batch_idx, ci) in (idx..batch_end).enumerate() {
+                            let values = std::mem::take(&mut all_values[batch_idx]);
+                            let child_node = children[ci].node;
+                            if let Some(found) = self.try_push_new(
+                                nt_idx,
+                                size,
+                                values,
+                                None,
+                                || Node { nt_idx, rule_idx, children: vec![child_node] },
+                            ) {
+                                return Ok(Some(found));
+                            }
+                        }
+                        idx = batch_end;
+                    }
+                } else {
+                    for child in &children {
+                        let Some((values, values_top)) = self.eval_unary(fid, child) else { continue; };
+                        let child_node = child.node;
+                        if let Some(found) = self.try_push_new(
+                            nt_idx,
+                            size,
+                            values,
+                            values_top,
+                            || Node { nt_idx, rule_idx, children: vec![child_node] },
+                        ) {
+                            return Ok(Some(found));
+                        }
                     }
                 }
                 Ok(None)
@@ -214,6 +268,14 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 if size < 3 {
                     return Ok(None);
                 }
+                let owned_pruned = self.pruned_plans.get(&(nt_idx, fid)).cloned();
+                let batch_plan = if self.closure.is_none() {
+                    owned_pruned.as_ref()
+                        .or_else(|| deffun::ENV.deffun(fid, 2).bit_circuit_plan())
+                } else {
+                    None
+                };
+                let use_batch = batch_plan.is_some_and(|p| p.bindings.len() > 256);
                 for lhs_size in 1..(size - 1) {
                     let rhs_size = size - 1 - lhs_size;
                     let lhs_pool = self.by_size[lhs_nt].get(lhs_size).cloned().unwrap_or_default();
@@ -221,24 +283,79 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     if lhs_pool.is_empty() || rhs_pool.is_empty() {
                         continue;
                     }
-                    for lhs in &lhs_pool {
-                        for rhs in &rhs_pool {
-                            let Some((values, values_top)) = self.eval_binary(fid, lhs, rhs) else {
-                                continue;
-                            };
-                            let (lhs_node, rhs_node) = (lhs.node, rhs.node);
-                            if let Some(found) = self.try_push_new(
-                                nt_idx,
-                                size,
-                                values,
-                                values_top,
-                                || Node {
+                    if use_batch {
+                        let plan = batch_plan.unwrap();
+                        let k = self.num_examples;
+                        let total_pairs = lhs_pool.len() * rhs_pool.len();
+                        let mut pair_idx = 0;
+                        while pair_idx < total_pairs {
+                            let batch_end = (pair_idx + 64).min(total_pairs);
+                            let count = batch_end - pair_idx;
+                            let mut all_values: Vec<Vec<Value>> =
+                                (0..count).map(|_| Vec::with_capacity(k)).collect();
+                            let mut batch_indices: Vec<(usize, usize)> = Vec::with_capacity(count);
+                            for flat in pair_idx..batch_end {
+                                let li = flat / rhs_pool.len();
+                                let ri = flat % rhs_pool.len();
+                                batch_indices.push((li, ri));
+                            }
+                            for i in 0..k {
+                                let args_batch: Vec<[Value; 2]> = batch_indices
+                                    .iter()
+                                    .map(|(li, ri)| {
+                                        [
+                                            lhs_pool[*li].values[i].clone(),
+                                            rhs_pool[*ri].values[i].clone(),
+                                        ]
+                                    })
+                                    .collect();
+                                let refs: Vec<&[Value]> =
+                                    args_batch.iter().map(|a| a.as_slice()).collect();
+                                let results = plan.eval_batch(&refs, count);
+                                for (j, val) in results.into_iter().enumerate() {
+                                    all_values[j].push(val);
+                                }
+                            }
+                            for (batch_idx, (li, ri)) in batch_indices.iter().enumerate() {
+                                let values = std::mem::take(&mut all_values[batch_idx]);
+                                let (lhs_node, rhs_node) =
+                                    (lhs_pool[*li].node, rhs_pool[*ri].node);
+                                if let Some(found) = self.try_push_new(
                                     nt_idx,
-                                    rule_idx,
-                                    children: vec![lhs_node, rhs_node],
-                                },
-                            ) {
-                                return Ok(Some(found));
+                                    size,
+                                    values,
+                                    None,
+                                    || Node {
+                                        nt_idx,
+                                        rule_idx,
+                                        children: vec![lhs_node, rhs_node],
+                                    },
+                                ) {
+                                    return Ok(Some(found));
+                                }
+                            }
+                            pair_idx = batch_end;
+                        }
+                    } else {
+                        for lhs in &lhs_pool {
+                            for rhs in &rhs_pool {
+                                let Some((values, values_top)) = self.eval_binary(fid, lhs, rhs) else {
+                                    continue;
+                                };
+                                let (lhs_node, rhs_node) = (lhs.node, rhs.node);
+                                if let Some(found) = self.try_push_new(
+                                    nt_idx,
+                                    size,
+                                    values,
+                                    values_top,
+                                    || Node {
+                                        nt_idx,
+                                        rule_idx,
+                                        children: vec![lhs_node, rhs_node],
+                                    },
+                                ) {
+                                    return Ok(Some(found));
+                                }
                             }
                         }
                     }
