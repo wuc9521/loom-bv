@@ -398,7 +398,7 @@ impl BitCircuitPlan {
 }
 
 impl BitCircuitPlan {
-    fn eval(&self, args: &[Value]) -> Result<Value, DivideByZero> {
+    pub fn eval(&self, args: &[Value]) -> Result<Value, DivideByZero> {
         let mut temps = Vec::with_capacity(self.bindings.len());
         for binding in &self.bindings {
             let value = binding.eval(args, &temps);
@@ -1212,3 +1212,297 @@ unsafe impl Sync for Environ {}
 lazy_static::lazy_static!(
     pub static ref ENV: Environ = Environ::new();
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_random_value(bits: usize, seed: u64) -> Value {
+        let mut rng = seed;
+        let num_words = bits.div_ceil(64);
+        let mut words = vec![0u64; num_words];
+        for w in words.iter_mut() {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            *w = rng;
+        }
+        if bits % 64 != 0 {
+            words[num_words - 1] &= (1u64 << (bits % 64)) - 1;
+        }
+        value_from_words(words, bits)
+    }
+
+    fn verify_pruned_circuit(plan: &BitCircuitPlan, demanded: &[usize], num_trials: usize) {
+        let pruned = match plan.pruned(demanded) {
+            Some(p) => p,
+            None => return,
+        };
+        let nargs = plan.input_slots.iter().map(|(a, _)| a + 1).max().unwrap_or(0);
+        let max_bits = plan.input_slots.iter().map(|(_, b)| b + 1).max().unwrap_or(1);
+
+        for trial in 0..num_trials {
+            let args: Vec<Value> = (0..nargs)
+                .map(|a| make_random_value(max_bits, (trial as u64 + 1) * 1000 + a as u64))
+                .collect();
+
+            let full_result = plan.eval(&args).unwrap();
+            let pruned_result = pruned.eval(&args).unwrap();
+
+            for &bit_idx in demanded {
+                let full_bit = full_result.bit(bit_idx);
+                let pruned_bit = pruned_result.bit(bit_idx);
+                assert_eq!(
+                    full_bit, pruned_bit,
+                    "Divergence at demanded bit {} on trial {} (nargs={}, max_bits={})",
+                    bit_idx, trial, nargs, max_bits
+                );
+            }
+        }
+    }
+
+    fn verify_pruned_circuit_batch(plan: &BitCircuitPlan, demanded: &[usize], num_trials: usize) {
+        let pruned = match plan.pruned(demanded) {
+            Some(p) => p,
+            None => return,
+        };
+        let nargs = plan.input_slots.iter().map(|(a, _)| a + 1).max().unwrap_or(1).max(1);
+        let max_bits = plan.input_slots.iter().map(|(_, b)| b + 1).max().unwrap_or(1);
+
+        let batch_size = 64.min(num_trials);
+        let args_batch: Vec<Vec<Value>> = (0..batch_size)
+            .map(|i| {
+                (0..nargs)
+                    .map(|a| make_random_value(max_bits, (i as u64 + 1) * 7919 + a as u64))
+                    .collect()
+            })
+            .collect();
+        let refs: Vec<&[Value]> = args_batch.iter().map(|v| v.as_slice()).collect();
+
+        let full_results = plan.eval_batch(&refs, batch_size);
+        let pruned_results = pruned.eval_batch(&refs, batch_size);
+
+        for (cand_idx, (full, pruned_val)) in
+            full_results.iter().zip(pruned_results.iter()).enumerate()
+        {
+            for &bit_idx in demanded {
+                assert_eq!(
+                    full.bit(bit_idx),
+                    pruned_val.bit(bit_idx),
+                    "Batch divergence at demanded bit {} candidate {}",
+                    bit_idx, cand_idx
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_pruned_simple_and_chain() {
+        // Circuit: out[0] = in[0,0] & in[0,1]; out[1] = in[0,2]; out[2] = in[0,0] | in[0,3]
+        let bindings = vec![
+            BoolNode::And(
+                BoolAtom::InputBit { arg: 0, bit: 0 },
+                BoolAtom::InputBit { arg: 0, bit: 1 },
+            ),
+            BoolNode::Or(
+                BoolAtom::InputBit { arg: 0, bit: 0 },
+                BoolAtom::InputBit { arg: 0, bit: 3 },
+            ),
+        ];
+        let output_bits = vec![
+            BoolAtom::Temp(0),
+            BoolAtom::InputBit { arg: 0, bit: 2 },
+            BoolAtom::Temp(1),
+        ];
+        let plan = BitCircuitPlan {
+            bindings,
+            output_bits,
+            ret_bits: 3,
+            input_slots: vec![(0, 0), (0, 1), (0, 2), (0, 3)],
+        };
+
+        // Demand only bit 0 → should prune binding[1] (the OR gate)
+        verify_pruned_circuit(&plan, &[0], 1000);
+        // Demand only bit 2 → should prune binding[0] (the AND gate)
+        verify_pruned_circuit(&plan, &[2], 1000);
+        // Demand bits 0 and 2 → no pruning (both gates needed)
+        verify_pruned_circuit(&plan, &[0, 2], 1000);
+    }
+
+    #[test]
+    fn test_pruned_ite_gate() {
+        // out[0] = ITE(in[0,0], in[0,1], in[0,2])
+        // out[1] = in[0,3]
+        let bindings = vec![BoolNode::Ite(
+            BoolAtom::InputBit { arg: 0, bit: 0 },
+            BoolAtom::InputBit { arg: 0, bit: 1 },
+            BoolAtom::InputBit { arg: 0, bit: 2 },
+        )];
+        let output_bits = vec![
+            BoolAtom::Temp(0),
+            BoolAtom::InputBit { arg: 0, bit: 3 },
+        ];
+        let plan = BitCircuitPlan {
+            bindings,
+            output_bits,
+            ret_bits: 2,
+            input_slots: vec![(0, 0), (0, 1), (0, 2), (0, 3)],
+        };
+
+        verify_pruned_circuit(&plan, &[0], 1000);
+        verify_pruned_circuit(&plan, &[1], 1000);
+        verify_pruned_circuit_batch(&plan, &[0], 64);
+    }
+
+    #[test]
+    fn test_pruned_deep_chain() {
+        // Deep chain: t0 = in[0,0] & in[0,1]; t1 = t0 | in[0,2]; t2 = !t1;
+        //             t3 = in[0,3] ^ in[0,4]; t4 = t3 & in[0,5]
+        // out[0] = t2; out[1] = t4
+        let bindings = vec![
+            BoolNode::And(
+                BoolAtom::InputBit { arg: 0, bit: 0 },
+                BoolAtom::InputBit { arg: 0, bit: 1 },
+            ),
+            BoolNode::Or(BoolAtom::Temp(0), BoolAtom::InputBit { arg: 0, bit: 2 }),
+            BoolNode::Not(BoolAtom::Temp(1)),
+            BoolNode::Xor(
+                BoolAtom::InputBit { arg: 0, bit: 3 },
+                BoolAtom::InputBit { arg: 0, bit: 4 },
+            ),
+            BoolNode::And(BoolAtom::Temp(3), BoolAtom::InputBit { arg: 0, bit: 5 }),
+        ];
+        let output_bits = vec![BoolAtom::Temp(2), BoolAtom::Temp(4)];
+        let plan = BitCircuitPlan {
+            bindings,
+            output_bits,
+            ret_bits: 2,
+            input_slots: vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5)],
+        };
+
+        // Demand bit 0 → needs t0, t1, t2 (bindings 0,1,2); should prune t3,t4
+        verify_pruned_circuit(&plan, &[0], 1000);
+        // Demand bit 1 → needs t3, t4 (bindings 3,4); should prune t0,t1,t2
+        verify_pruned_circuit(&plan, &[1], 1000);
+        verify_pruned_circuit_batch(&plan, &[0], 64);
+        verify_pruned_circuit_batch(&plan, &[1], 64);
+    }
+
+    #[test]
+    fn test_pruned_two_arg_circuit() {
+        // Binary operator: out[0] = in[0,0] & in[1,0]; out[1] = in[0,1] | in[1,1]
+        let bindings = vec![
+            BoolNode::And(
+                BoolAtom::InputBit { arg: 0, bit: 0 },
+                BoolAtom::InputBit { arg: 1, bit: 0 },
+            ),
+            BoolNode::Or(
+                BoolAtom::InputBit { arg: 0, bit: 1 },
+                BoolAtom::InputBit { arg: 1, bit: 1 },
+            ),
+        ];
+        let output_bits = vec![BoolAtom::Temp(0), BoolAtom::Temp(1)];
+        let plan = BitCircuitPlan {
+            bindings,
+            output_bits,
+            ret_bits: 2,
+            input_slots: vec![(0, 0), (0, 1), (1, 0), (1, 1)],
+        };
+
+        verify_pruned_circuit(&plan, &[0], 1000);
+        verify_pruned_circuit(&plan, &[1], 1000);
+        verify_pruned_circuit_batch(&plan, &[0], 64);
+    }
+
+    #[test]
+    fn test_pruned_wide_bitvector() {
+        // Simulate a wide BV (128 bits output) with shared sub-DAGs
+        let mut bindings = Vec::new();
+        // t0..t63: AND of in[0,i] and in[1,i]
+        for i in 0..64 {
+            bindings.push(BoolNode::And(
+                BoolAtom::InputBit { arg: 0, bit: i },
+                BoolAtom::InputBit { arg: 1, bit: i },
+            ));
+        }
+        // t64..t127: XOR of in[0,i] and in[1,i]
+        for i in 0..64 {
+            bindings.push(BoolNode::Xor(
+                BoolAtom::InputBit { arg: 0, bit: i },
+                BoolAtom::InputBit { arg: 1, bit: i },
+            ));
+        }
+        let mut output_bits = Vec::new();
+        for i in 0..64 {
+            output_bits.push(BoolAtom::Temp(i));
+        }
+        for i in 64..128 {
+            output_bits.push(BoolAtom::Temp(i));
+        }
+
+        let mut input_slots = Vec::new();
+        for i in 0..64 {
+            input_slots.push((0, i));
+            input_slots.push((1, i));
+        }
+
+        let plan = BitCircuitPlan {
+            bindings,
+            output_bits,
+            ret_bits: 128,
+            input_slots,
+        };
+
+        // Demand only lower 64 bits (AND results)
+        let demanded_lower: Vec<usize> = (0..64).collect();
+        verify_pruned_circuit(&plan, &demanded_lower, 500);
+        verify_pruned_circuit_batch(&plan, &demanded_lower, 64);
+
+        // Demand only upper 64 bits (XOR results)
+        let demanded_upper: Vec<usize> = (64..128).collect();
+        verify_pruned_circuit(&plan, &demanded_upper, 500);
+        verify_pruned_circuit_batch(&plan, &demanded_upper, 64);
+
+        // Demand scattered bits
+        let demanded_scattered: Vec<usize> = (0..128).step_by(7).collect();
+        verify_pruned_circuit(&plan, &demanded_scattered, 500);
+        verify_pruned_circuit_batch(&plan, &demanded_scattered, 64);
+    }
+
+    #[test]
+    fn test_pruned_shared_subdag() {
+        // t0 = in[0,0] & in[0,1] (shared)
+        // t1 = t0 | in[0,2]      → feeds out[0]
+        // t2 = t0 ^ in[0,3]      → feeds out[1]
+        // t3 = in[0,4]           → feeds out[2] (independent)
+        let bindings = vec![
+            BoolNode::And(
+                BoolAtom::InputBit { arg: 0, bit: 0 },
+                BoolAtom::InputBit { arg: 0, bit: 1 },
+            ),
+            BoolNode::Or(BoolAtom::Temp(0), BoolAtom::InputBit { arg: 0, bit: 2 }),
+            BoolNode::Xor(BoolAtom::Temp(0), BoolAtom::InputBit { arg: 0, bit: 3 }),
+            BoolNode::Atom(BoolAtom::InputBit { arg: 0, bit: 4 }),
+        ];
+        let output_bits = vec![
+            BoolAtom::Temp(1),
+            BoolAtom::Temp(2),
+            BoolAtom::Temp(3),
+        ];
+        let plan = BitCircuitPlan {
+            bindings,
+            output_bits,
+            ret_bits: 3,
+            input_slots: vec![(0, 0), (0, 1), (0, 2), (0, 3), (0, 4)],
+        };
+
+        // Demand bit 0 → needs t0, t1
+        verify_pruned_circuit(&plan, &[0], 1000);
+        // Demand bit 1 → needs t0, t2
+        verify_pruned_circuit(&plan, &[1], 1000);
+        // Demand bit 2 → needs only t3
+        verify_pruned_circuit(&plan, &[2], 1000);
+        // Demand bits 0,1 → needs t0, t1, t2 (shared t0)
+        verify_pruned_circuit(&plan, &[0, 1], 1000);
+    }
+}

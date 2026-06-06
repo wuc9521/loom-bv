@@ -1,0 +1,22 @@
+warning: field `name` is never read
+  --> src/exact/bitspec.rs:31:9
+   |
+30 | pub struct ClosureInfo {
+   |            ----------- field in this struct
+31 |     pub name: String,
+   |         ^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: field `start_nt` is never read
+  --> src/exact/dedup.rs:27:9
+   |
+24 |     Pair {
+   |     ---- field in this variant
+...
+27 |         start_nt: usize,
+   |         ^^^^^^^^
+
+warning: `dryadsynth-bv` (lib test) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+     Running unittests src/lib.rs (target/debug/deps/dryadsynth_bv-06870531ed5a71bb)

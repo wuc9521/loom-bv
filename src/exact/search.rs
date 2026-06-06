@@ -54,7 +54,7 @@ struct Searcher<'a, 'g> {
     by_size: Vec<Vec<Vec<Candidate>>>,
     seen: SeenMode,
     leaf_cache: ExactEvalCache,
-    pruned_plans: rustc_hash::FxHashMap<(usize, usize), BitCircuitPlan>,
+    pruned_plans: rustc_hash::FxHashMap<(usize, usize, usize), std::rc::Rc<BitCircuitPlan>>,
 }
 
 impl<'a, 'g> Searcher<'a, 'g> {
@@ -85,11 +85,35 @@ impl<'a, 'g> Searcher<'a, 'g> {
             }
             bits
         };
-        let pruned_plans: rustc_hash::FxHashMap<(usize, usize), BitCircuitPlan> =
+        let mut pruned_plans: rustc_hash::FxHashMap<(usize, usize, usize), std::rc::Rc<BitCircuitPlan>> =
             rustc_hash::FxHashMap::default();
-        // TODO: cone-of-influence pruning for start-NT. The infrastructure
-        // (BitCircuitPlan::pruned) is ready but needs proper integration
-        // testing with wide bitvectors before enabling.
+        if let Some(ref relevant_bits) = eager_relevant_bits {
+            for (nt_idx, (_, rules)) in grammar.nts.iter().enumerate() {
+                let nt_relevant = &relevant_bits[nt_idx];
+                for rule in rules {
+                    let (fid, nargs) = match rule {
+                        ExactRule::Unary { fid, .. } => (*fid, 1usize),
+                        ExactRule::Binary { fid, .. } => (*fid, 2usize),
+                        ExactRule::Nary { fid, child_nts } => (*fid, child_nts.len()),
+                        _ => continue,
+                    };
+                    if pruned_plans.contains_key(&(nt_idx, fid, nargs)) {
+                        continue;
+                    }
+                    let Some(plan) = deffun::ENV.deffun(fid, nargs).bit_circuit_plan() else {
+                        continue;
+                    };
+                    if let Some(pruned) = plan.pruned(nt_relevant) {
+                        debg!(
+                            "COI: nt[{}] fid={}/{} pruned {}/{} bindings, inputs {}/{}",
+                            nt_idx, fid, nargs, pruned.bindings.len(), plan.bindings.len(),
+                            pruned.input_slots.len(), plan.input_slots.len()
+                        );
+                        pruned_plans.insert((nt_idx, fid, nargs), std::rc::Rc::new(pruned));
+                    }
+                }
+            }
+        }
         let nt_count = grammar.nts.len();
         let seen = if closure.is_some() {
             SeenMode::pair(nt_count, grammar.start)
@@ -203,9 +227,9 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 }
                 let child_size = size - 1;
                 let children = self.by_size[child_nt].get(child_size).cloned().unwrap_or_default();
-                let owned_pruned = self.pruned_plans.get(&(nt_idx, fid)).cloned();
+                let owned_pruned = self.pruned_plans.get(&(nt_idx, fid, 1)).cloned();
                 let batch_plan = if self.closure.is_none() {
-                    owned_pruned.as_ref()
+                    owned_pruned.as_deref()
                         .or_else(|| deffun::ENV.deffun(fid, 1).bit_circuit_plan())
                 } else {
                     None
@@ -268,9 +292,9 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 if size < 3 {
                     return Ok(None);
                 }
-                let owned_pruned = self.pruned_plans.get(&(nt_idx, fid)).cloned();
+                let owned_pruned = self.pruned_plans.get(&(nt_idx, fid, 2)).cloned();
                 let batch_plan = if self.closure.is_none() {
-                    owned_pruned.as_ref()
+                    owned_pruned.as_deref()
                         .or_else(|| deffun::ENV.deffun(fid, 2).bit_circuit_plan())
                 } else {
                     None
@@ -371,6 +395,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 let by_size = &self.by_size;
                 let closure = self.closure.as_ref();
                 let num_examples = self.num_examples;
+                let nary_pruned = self.pruned_plans.get(&(nt_idx, fid, child_nts.len())).cloned();
                 let mut splits = Vec::with_capacity(child_nts.len());
                 for_each_size_split(
                     child_total,
@@ -393,7 +418,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                         let mut tuple = Vec::with_capacity(child_nts.len());
                         for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
                             let Some((values, values_top)) =
-                                Self::eval_nary_static(fid, tuple, closure, num_examples)
+                                Self::eval_nary_with_plan(fid, tuple, closure, num_examples, nary_pruned.as_deref())
                             else {
                                 return;
                             };
@@ -604,6 +629,16 @@ impl<'a, 'g> Searcher<'a, 'g> {
         closure: Option<&Closure>,
         num_examples: usize,
     ) -> Option<(Vec<Value>, Option<Vec<Value>>)> {
+        Self::eval_nary_with_plan(fid, tuple, closure, num_examples, None)
+    }
+
+    fn eval_nary_with_plan(
+        fid: usize,
+        tuple: &[&Candidate],
+        closure: Option<&Closure>,
+        num_examples: usize,
+        pruned_plan: Option<&BitCircuitPlan>,
+    ) -> Option<(Vec<Value>, Option<Vec<Value>>)> {
         if let Some(closure) = closure {
             let args_zero: Vec<Value> = tuple.iter().map(|c| c.values[0].clone()).collect();
             let value = eval_defined_with_closure(
@@ -622,7 +657,11 @@ impl<'a, 'g> Searcher<'a, 'g> {
         let mut values = Vec::with_capacity(k);
         for i in 0..k {
             let args: Vec<Value> = tuple.iter().map(|c| c.values[i].clone()).collect();
-            let v = eval_defined_with_closure(fid, args.len(), &args, None).ok()?;
+            let v = if let Some(plan) = pruned_plan {
+                plan.eval(&args).ok()?
+            } else {
+                eval_defined_with_closure(fid, args.len(), &args, None).ok()?
+            };
             values.push(v);
         }
         Some((values, None))
