@@ -164,22 +164,26 @@ impl<'a> ExactGrammar<'a> {
         match &self.nts[node.nt_idx].1[node.rule_idx] {
             ExactRule::Alias(_) => self.materialize_node(node.children[0], nodes),
             ExactRule::Leaf(expr) => Some(expr.clone()),
-            ExactRule::Unary { fid, .. } => Some(OwnedExpr::Fop1Dyn(
-                *fid,
-                Box::new(self.materialize_node(node.children[0], nodes)?),
-            )),
-            ExactRule::Binary { fid, .. } => Some(OwnedExpr::Fop2Dyn(
-                *fid,
-                Box::new(self.materialize_node(node.children[0], nodes)?),
-                Box::new(self.materialize_node(node.children[1], nodes)?),
-            )),
-            ExactRule::Nary { fid, .. } => Some(OwnedExpr::FopDyn(
-                *fid,
-                node.children
-                    .iter()
-                    .map(|child| self.materialize_node(*child, nodes))
-                    .collect::<Option<Vec<_>>>()?,
-            )),
+            ExactRule::Op { fid, child_nts } => {
+                match child_nts.len() {
+                    1 => Some(OwnedExpr::Fop1Dyn(
+                        *fid,
+                        Box::new(self.materialize_node(node.children[0], nodes)?),
+                    )),
+                    2 => Some(OwnedExpr::Fop2Dyn(
+                        *fid,
+                        Box::new(self.materialize_node(node.children[0], nodes)?),
+                        Box::new(self.materialize_node(node.children[1], nodes)?),
+                    )),
+                    _ => Some(OwnedExpr::FopDyn(
+                        *fid,
+                        node.children
+                            .iter()
+                            .map(|child| self.materialize_node(*child, nodes))
+                            .collect::<Option<Vec<_>>>()?,
+                    )),
+                }
+            }
             ExactRule::GenericTemplate { template, .. } => {
                 let child_exprs = node
                     .children
@@ -206,21 +210,7 @@ impl<'a> ExactGrammar<'a> {
         match &self.nts[node.nt_idx].1[node.rule_idx] {
             ExactRule::Alias(_) => self.eval_node_at(node.children[0], nodes, aux, closure_name),
             ExactRule::Leaf(expr) => expr.eval_with_closure(&deffun::ENV, aux, closure_name).ok(),
-            ExactRule::Unary { fid, .. } => {
-                let c0 = self.eval_node_at(node.children[0], nodes, aux, closure_name)?;
-                eval_defined_with_closure(
-                    *fid,
-                    std::slice::from_ref(&c0),
-                    Some((closure_name, aux)),
-                )
-                .ok()
-            }
-            ExactRule::Binary { fid, .. } => {
-                let c0 = self.eval_node_at(node.children[0], nodes, aux, closure_name)?;
-                let c1 = self.eval_node_at(node.children[1], nodes, aux, closure_name)?;
-                eval_defined_with_closure(*fid, &[c0, c1], Some((closure_name, aux))).ok()
-            }
-            ExactRule::Nary { fid, .. } => {
+            ExactRule::Op { fid, .. } => {
                 let mut args = Vec::with_capacity(node.children.len());
                 for child in &node.children {
                     args.push(self.eval_node_at(*child, nodes, aux, closure_name)?);

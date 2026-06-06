@@ -35,9 +35,9 @@ impl ExactGrammar<'static> {
 
 impl ExactRule {
     /// Try to fold a `MultiRule::Template`'s template into one of the dedicated
-    /// `ExactRule` variants (Leaf / Unary / Binary / Nary) that don't carry
-    /// the full TemplateExpr. Falls back to `GenericTemplate` whenever the
-    /// shape doesn't match `op(slot_0, slot_1, ...)` exactly.
+    /// `ExactRule` variants (Leaf / Op) that don't carry the full TemplateExpr.
+    /// Falls back to `GenericTemplate` whenever the shape doesn't match
+    /// `op(slot_0, slot_1, ...)` exactly.
     pub fn from_template(template: &TemplateExpr, child_nts: &[usize], base_size: usize) -> ExactRule {
     if child_nts.is_empty() {
         if let TemplateExpr::Leaf(expr) = template {
@@ -76,20 +76,9 @@ impl ExactRule {
             base_size,
         };
     };
-    match parts.len() {
-        1 => ExactRule::Unary {
-            fid,
-            child_nt: child_nts[0],
-        },
-        2 => ExactRule::Binary {
-            fid,
-            lhs_nt: child_nts[0],
-            rhs_nt: child_nts[1],
-        },
-        _ => ExactRule::Nary {
-            fid,
-            child_nts: child_nts.to_vec(),
-        },
+    ExactRule::Op {
+        fid,
+        child_nts: child_nts.to_vec(),
     }
     }
 }

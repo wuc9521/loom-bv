@@ -174,28 +174,8 @@ impl<'a> Relevance<'a> {
                 }
                 true
             }
-            ExactRule::Unary { fid, child_nt } => {
+            ExactRule::Op { fid, child_nts } => {
                 let Some(dep) = get_deffun_dep_bits(*fid, demanded, &mut self.dep_cache) else {
-                    return false;
-                };
-                self.propagate_dep(&dep, 0, *child_nt);
-                self.propagate_closure_deps(*fid, &dep);
-                true
-            }
-            ExactRule::Binary { fid, lhs_nt, rhs_nt } => {
-                let Some(dep) = get_deffun_dep_bits(*fid, demanded, &mut self.dep_cache)
-                else {
-                    return false;
-                };
-                self.propagate_dep(&dep, 0, *lhs_nt);
-                self.propagate_dep(&dep, 1, *rhs_nt);
-                self.propagate_closure_deps(*fid, &dep);
-                true
-            }
-            ExactRule::Nary { fid, child_nts } => {
-                let Some(dep) =
-                    get_deffun_dep_bits(*fid, demanded, &mut self.dep_cache)
-                else {
                     return false;
                 };
                 for (arg_idx, child_nt) in child_nts.iter().enumerate() {
@@ -293,11 +273,7 @@ pub fn nt_output_bits(rules: &[ExactRule]) -> usize {
         match rule {
             ExactRule::Alias(_) => {}
             ExactRule::Leaf(expr) => return expr.width(),
-            ExactRule::Unary { fid, .. } => return deffun::ENV.ret_bits(*fid),
-            ExactRule::Binary { fid, .. } => return deffun::ENV.ret_bits(*fid),
-            ExactRule::Nary { fid, .. } => {
-                return deffun::ENV.ret_bits(*fid)
-            }
+            ExactRule::Op { fid, .. } => return deffun::ENV.ret_bits(*fid),
             ExactRule::GenericTemplate { template, .. } => return template.output_bits(),
         }
     }

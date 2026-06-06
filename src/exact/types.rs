@@ -29,16 +29,7 @@ pub struct ExactGrammar<'a> {
 pub enum ExactRule {
     Alias(usize),
     Leaf(OwnedExpr),
-    Unary {
-        fid: usize,
-        child_nt: usize,
-    },
-    Binary {
-        fid: usize,
-        lhs_nt: usize,
-        rhs_nt: usize,
-    },
-    Nary {
+    Op {
         fid: usize,
         child_nts: Vec<usize>,
     },

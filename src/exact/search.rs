@@ -54,7 +54,7 @@ struct Searcher<'a, 'g> {
     by_size: Vec<Vec<Vec<Candidate>>>,
     seen: SeenMode,
     leaf_cache: ExactEvalCache,
-    pruned_plans: rustc_hash::FxHashMap<(usize, usize, usize), std::rc::Rc<BitCircuitPlan>>,
+    pruned_plans: rustc_hash::FxHashMap<(usize, usize), std::rc::Rc<BitCircuitPlan>>,
 }
 
 impl<'a, 'g> Searcher<'a, 'g> {
@@ -85,19 +85,17 @@ impl<'a, 'g> Searcher<'a, 'g> {
             }
             bits
         };
-        let mut pruned_plans: rustc_hash::FxHashMap<(usize, usize, usize), std::rc::Rc<BitCircuitPlan>> =
+        let mut pruned_plans: rustc_hash::FxHashMap<(usize, usize), std::rc::Rc<BitCircuitPlan>> =
             rustc_hash::FxHashMap::default();
         if let Some(ref relevant_bits) = eager_relevant_bits {
             for (nt_idx, (_, rules)) in grammar.nts.iter().enumerate() {
                 let nt_relevant = &relevant_bits[nt_idx];
                 for rule in rules {
-                    let (fid, nargs) = match rule {
-                        ExactRule::Unary { fid, .. } => (*fid, 1usize),
-                        ExactRule::Binary { fid, .. } => (*fid, 2usize),
-                        ExactRule::Nary { fid, child_nts } => (*fid, child_nts.len()),
+                    let fid = match rule {
+                        ExactRule::Op { fid, .. } => *fid,
                         _ => continue,
                     };
-                    if pruned_plans.contains_key(&(nt_idx, fid, nargs)) {
+                    if pruned_plans.contains_key(&(nt_idx, fid)) {
                         continue;
                     }
                     let Some(plan) = deffun::ENV.deffun(fid).bit_circuit_plan() else {
@@ -105,11 +103,11 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     };
                     if let Some(pruned) = plan.pruned(nt_relevant) {
                         debg!(
-                            "COI: nt[{}] fid={}/{} pruned {}/{} bindings, inputs {}/{}",
-                            nt_idx, fid, nargs, pruned.bindings.len(), plan.bindings.len(),
+                            "COI: nt[{}] fid={} pruned {}/{} bindings, inputs {}/{}",
+                            nt_idx, fid, pruned.bindings.len(), plan.bindings.len(),
                             pruned.input_slots.len(), plan.input_slots.len()
                         );
-                        pruned_plans.insert((nt_idx, fid, nargs), std::rc::Rc::new(pruned));
+                        pruned_plans.insert((nt_idx, fid), std::rc::Rc::new(pruned));
                     }
                 }
             }
@@ -221,172 +219,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     || Node { nt_idx, rule_idx, children: Vec::new() },
                 ))
             }
-            ExactRule::Unary { fid, child_nt } => {
-                if size < 2 {
-                    return Ok(None);
-                }
-                let child_size = size - 1;
-                let children = self.by_size[child_nt].get(child_size).cloned().unwrap_or_default();
-                let owned_pruned = self.pruned_plans.get(&(nt_idx, fid, 1)).cloned();
-                let batch_plan = if self.closure.is_none() {
-                    owned_pruned.as_deref()
-                        .or_else(|| deffun::ENV.deffun(fid).bit_circuit_plan())
-                } else {
-                    None
-                };
-                let use_batch = batch_plan.is_some_and(|p| p.bindings.len() > 256);
-                if use_batch {
-                    let plan = batch_plan.unwrap();
-                    let k = self.num_examples;
-                    let total = children.len();
-                    let mut idx = 0;
-                    while idx < total {
-                        let batch_end = (idx + 64).min(total);
-                        let count = batch_end - idx;
-                        let mut all_values: Vec<Vec<Value>> =
-                            (0..count).map(|_| Vec::with_capacity(k)).collect();
-                        for i in 0..k {
-                            let args_batch: Vec<[Value; 1]> = (idx..batch_end)
-                                .map(|ci| [children[ci].values[i].clone()])
-                                .collect();
-                            let refs: Vec<&[Value]> =
-                                args_batch.iter().map(|a| a.as_slice()).collect();
-                            let results = plan.eval_batch(&refs, count);
-                            for (j, val) in results.into_iter().enumerate() {
-                                all_values[j].push(val);
-                            }
-                        }
-                        for (batch_idx, ci) in (idx..batch_end).enumerate() {
-                            let values = std::mem::take(&mut all_values[batch_idx]);
-                            let child_node = children[ci].node;
-                            if let Some(found) = self.try_push_new(
-                                nt_idx,
-                                size,
-                                values,
-                                None,
-                                || Node { nt_idx, rule_idx, children: vec![child_node] },
-                            ) {
-                                return Ok(Some(found));
-                            }
-                        }
-                        idx = batch_end;
-                    }
-                } else {
-                    for child in &children {
-                        let Some((values, values_top)) = self.eval_unary(fid, child) else { continue; };
-                        let child_node = child.node;
-                        if let Some(found) = self.try_push_new(
-                            nt_idx,
-                            size,
-                            values,
-                            values_top,
-                            || Node { nt_idx, rule_idx, children: vec![child_node] },
-                        ) {
-                            return Ok(Some(found));
-                        }
-                    }
-                }
-                Ok(None)
-            }
-            ExactRule::Binary { fid, lhs_nt, rhs_nt } => {
-                if size < 3 {
-                    return Ok(None);
-                }
-                let owned_pruned = self.pruned_plans.get(&(nt_idx, fid, 2)).cloned();
-                let batch_plan = if self.closure.is_none() {
-                    owned_pruned.as_deref()
-                        .or_else(|| deffun::ENV.deffun(fid).bit_circuit_plan())
-                } else {
-                    None
-                };
-                let use_batch = batch_plan.is_some_and(|p| p.bindings.len() > 256);
-                for lhs_size in 1..(size - 1) {
-                    let rhs_size = size - 1 - lhs_size;
-                    let lhs_pool = self.by_size[lhs_nt].get(lhs_size).cloned().unwrap_or_default();
-                    let rhs_pool = self.by_size[rhs_nt].get(rhs_size).cloned().unwrap_or_default();
-                    if lhs_pool.is_empty() || rhs_pool.is_empty() {
-                        continue;
-                    }
-                    if use_batch {
-                        let plan = batch_plan.unwrap();
-                        let k = self.num_examples;
-                        let total_pairs = lhs_pool.len() * rhs_pool.len();
-                        let mut pair_idx = 0;
-                        while pair_idx < total_pairs {
-                            let batch_end = (pair_idx + 64).min(total_pairs);
-                            let count = batch_end - pair_idx;
-                            let mut all_values: Vec<Vec<Value>> =
-                                (0..count).map(|_| Vec::with_capacity(k)).collect();
-                            let mut batch_indices: Vec<(usize, usize)> = Vec::with_capacity(count);
-                            for flat in pair_idx..batch_end {
-                                let li = flat / rhs_pool.len();
-                                let ri = flat % rhs_pool.len();
-                                batch_indices.push((li, ri));
-                            }
-                            for i in 0..k {
-                                let args_batch: Vec<[Value; 2]> = batch_indices
-                                    .iter()
-                                    .map(|(li, ri)| {
-                                        [
-                                            lhs_pool[*li].values[i].clone(),
-                                            rhs_pool[*ri].values[i].clone(),
-                                        ]
-                                    })
-                                    .collect();
-                                let refs: Vec<&[Value]> =
-                                    args_batch.iter().map(|a| a.as_slice()).collect();
-                                let results = plan.eval_batch(&refs, count);
-                                for (j, val) in results.into_iter().enumerate() {
-                                    all_values[j].push(val);
-                                }
-                            }
-                            for (batch_idx, (li, ri)) in batch_indices.iter().enumerate() {
-                                let values = std::mem::take(&mut all_values[batch_idx]);
-                                let (lhs_node, rhs_node) =
-                                    (lhs_pool[*li].node, rhs_pool[*ri].node);
-                                if let Some(found) = self.try_push_new(
-                                    nt_idx,
-                                    size,
-                                    values,
-                                    None,
-                                    || Node {
-                                        nt_idx,
-                                        rule_idx,
-                                        children: vec![lhs_node, rhs_node],
-                                    },
-                                ) {
-                                    return Ok(Some(found));
-                                }
-                            }
-                            pair_idx = batch_end;
-                        }
-                    } else {
-                        for lhs in &lhs_pool {
-                            for rhs in &rhs_pool {
-                                let Some((values, values_top)) = self.eval_binary(fid, lhs, rhs) else {
-                                    continue;
-                                };
-                                let (lhs_node, rhs_node) = (lhs.node, rhs.node);
-                                if let Some(found) = self.try_push_new(
-                                    nt_idx,
-                                    size,
-                                    values,
-                                    values_top,
-                                    || Node {
-                                        nt_idx,
-                                        rule_idx,
-                                        children: vec![lhs_node, rhs_node],
-                                    },
-                                ) {
-                                    return Ok(Some(found));
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(None)
-            }
-            ExactRule::Nary { fid, child_nts } => {
+            ExactRule::Op { fid, child_nts } => {
                 if size <= child_nts.len() {
                     return Ok(None);
                 }
@@ -395,7 +228,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 let by_size = &self.by_size;
                 let closure = self.closure.as_ref();
                 let num_examples = self.num_examples;
-                let nary_pruned = self.pruned_plans.get(&(nt_idx, fid, child_nts.len())).cloned();
+                let nary_pruned = self.pruned_plans.get(&(nt_idx, fid)).cloned();
                 let nary_batch_plan: Option<&BitCircuitPlan> = if closure.is_none() {
                     nary_pruned.as_deref()
                         .or_else(|| deffun::ENV.deffun(fid).bit_circuit_plan())
@@ -411,6 +244,33 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     let nargs = child_nts.len();
                     let mut batch_nodes: Vec<Vec<NodeId>> = Vec::with_capacity(64);
                     let mut batch_args: Vec<Vec<Value>> = Vec::with_capacity(64);
+
+                    let flush_batch = |batch_nodes: &mut Vec<Vec<NodeId>>,
+                                       batch_args: &mut Vec<Vec<Value>>,
+                                       staged: &mut Vec<(Vec<Value>, Option<Vec<Value>>, Vec<NodeId>)>,
+                                       plan: &BitCircuitPlan,
+                                       k: usize| {
+                        let count = batch_nodes.len();
+                        if count == 0 { return; }
+
+                        let staged_base = staged.len();
+                        for j in 0..count {
+                            staged.push((Vec::with_capacity(k), None, batch_nodes[j].clone()));
+                        }
+                        let refs: Vec<&[Value]> = batch_args.iter().map(|a| a.as_slice()).collect();
+                        for i in 0..k {
+                            let example_refs: Vec<&[Value]> = (0..count)
+                                .map(|j| refs[j * k + i])
+                                .collect();
+                            let results = plan.eval_batch(&example_refs, count);
+                            for (j, val) in results.into_iter().enumerate() {
+                                staged[staged_base + j].0.push(val);
+                            }
+                        }
+
+                        batch_nodes.clear();
+                        batch_args.clear();
+                    };
 
                     for_each_size_split(
                         child_total,
@@ -440,45 +300,13 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                 batch_nodes.push(children);
 
                                 if batch_nodes.len() == 64 {
-                                    let staged_base = staged.len();
-                                    for j in 0..64 {
-                                        staged.push((Vec::with_capacity(k), None, batch_nodes[j].clone()));
-                                    }
-                                    let refs: Vec<&[Value]> = batch_args.iter().map(|a| a.as_slice()).collect();
-                                    for i in 0..k {
-                                        let example_refs: Vec<&[Value]> = (0..64)
-                                            .map(|j| refs[j * k + i])
-                                            .collect();
-                                        let results = plan.eval_batch(&example_refs, 64);
-                                        for (j, val) in results.into_iter().enumerate() {
-                                            staged[staged_base + j].0.push(val);
-                                        }
-                                    }
-                                    batch_nodes.clear();
-                                    batch_args.clear();
+                                    flush_batch(&mut batch_nodes, &mut batch_args, &mut staged, plan, k);
                                 }
                             });
                         },
                     );
                     // flush remaining
-                    if !batch_nodes.is_empty() {
-                        let count = batch_nodes.len();
-                        let k = num_examples;
-                        let staged_base = staged.len();
-                        for j in 0..count {
-                            staged.push((Vec::with_capacity(k), None, batch_nodes[j].clone()));
-                        }
-                        let refs: Vec<&[Value]> = batch_args.iter().map(|a| a.as_slice()).collect();
-                        for i in 0..k {
-                            let example_refs: Vec<&[Value]> = (0..count)
-                                .map(|j| refs[j * k + i])
-                                .collect();
-                            let results = plan.eval_batch(&example_refs, count);
-                            for (j, val) in results.into_iter().enumerate() {
-                                staged[staged_base + j].0.push(val);
-                            }
-                        }
-                    }
+                    flush_batch(&mut batch_nodes, &mut batch_args, &mut staged, plan, k);
                 } else {
                     for_each_size_split(
                         child_total,
@@ -649,65 +477,6 @@ impl<'a, 'g> Searcher<'a, 'g> {
         Some((values, None))
     }
 
-    fn eval_unary(&self, fid: usize, child: &Candidate) -> Option<(Vec<Value>, Option<Vec<Value>>)> {
-        if self.closure.is_some() {
-            let closure = self.closure.as_ref().unwrap();
-            let value = eval_defined_with_closure(
-                fid, std::slice::from_ref(&child.values[0]),
-                Some(closure.binding_zero()),
-            ).ok()?;
-            let child_top = child.values_top.as_ref()?;
-            let value_top = eval_defined_with_closure(
-                fid, std::slice::from_ref(&child_top[0]),
-                Some(closure.binding_top()),
-            ).ok()?;
-            return Some((vec![value], Some(vec![value_top])));
-        }
-        let k = self.num_examples;
-        let mut values = Vec::with_capacity(k);
-        for i in 0..k {
-            let v = eval_defined_with_closure(
-                fid, std::slice::from_ref(&child.values[i]), None,
-            ).ok()?;
-            values.push(v);
-        }
-        Some((values, None))
-    }
-
-    fn eval_binary(
-        &self,
-        fid: usize,
-        lhs: &Candidate,
-        rhs: &Candidate,
-    ) -> Option<(Vec<Value>, Option<Vec<Value>>)> {
-        if self.closure.is_some() {
-            let closure = self.closure.as_ref().unwrap();
-            let value = eval_defined_with_closure(
-                fid,
-                &[lhs.values[0].clone(), rhs.values[0].clone()],
-                Some(closure.binding_zero()),
-            ).ok()?;
-            let lt = &lhs.values_top.as_ref()?[0];
-            let rt = &rhs.values_top.as_ref()?[0];
-            let value_top = eval_defined_with_closure(
-                fid, &[lt.clone(), rt.clone()],
-                Some(closure.binding_top()),
-            ).ok()?;
-            return Some((vec![value], Some(vec![value_top])));
-        }
-        let k = self.num_examples;
-        let mut values = Vec::with_capacity(k);
-        for i in 0..k {
-            let v = eval_defined_with_closure(
-                fid,
-                &[lhs.values[i].clone(), rhs.values[i].clone()],
-                None,
-            ).ok()?;
-            values.push(v);
-        }
-        Some((values, None))
-    }
-
     fn eval_nary_with_plan(
         fid: usize,
         tuple: &[&Candidate],
@@ -872,30 +641,24 @@ impl<'a, 'g> Searcher<'a, 'g> {
 fn log_grammar_summary(grammar: &ExactGrammar<'_>) {
     let mut leaf = 0usize;
     let mut alias = 0usize;
-    let mut unary = 0usize;
-    let mut binary = 0usize;
-    let mut nary = 0usize;
+    let mut op = 0usize;
     let mut generic = 0usize;
     for (_, rules) in &grammar.nts {
         for rule in rules {
             match rule {
                 ExactRule::Alias(_) => alias += 1,
                 ExactRule::Leaf(_) => leaf += 1,
-                ExactRule::Unary { .. } => unary += 1,
-                ExactRule::Binary { .. } => binary += 1,
-                ExactRule::Nary { .. } => nary += 1,
+                ExactRule::Op { .. } => op += 1,
                 ExactRule::GenericTemplate { .. } => generic += 1,
             }
         }
     }
     debg!(
-        "exact-nullary grammar nts={} leaf={} alias={} unary={} binary={} nary={} generic={}",
+        "exact-nullary grammar nts={} leaf={} alias={} op={} generic={}",
         grammar.nts.len(),
         leaf,
         alias,
-        unary,
-        binary,
-        nary,
+        op,
         generic
     );
 }
