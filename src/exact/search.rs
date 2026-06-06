@@ -396,37 +396,122 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 let closure = self.closure.as_ref();
                 let num_examples = self.num_examples;
                 let nary_pruned = self.pruned_plans.get(&(nt_idx, fid, child_nts.len())).cloned();
+                let nary_batch_plan: Option<&BitCircuitPlan> = if closure.is_none() {
+                    nary_pruned.as_deref()
+                        .or_else(|| deffun::ENV.deffun(fid).bit_circuit_plan())
+                } else {
+                    None
+                };
+                let use_batch = nary_batch_plan.is_some_and(|p| p.bindings.len() > 256);
                 let mut splits = Vec::with_capacity(child_nts.len());
-                for_each_size_split(
-                    child_total,
-                    child_nts.len(),
-                    &mut splits,
-                    &mut |sizes| {
-                        let pools: Vec<&[Candidate]> = child_nts
-                            .iter()
-                            .zip(sizes.iter())
-                            .map(|(child_nt, child_size)| {
-                                by_size[*child_nt]
-                                    .get(*child_size)
-                                    .map(Vec::as_slice)
-                                    .unwrap_or(&[][..])
-                            })
-                            .collect();
-                        if pools.iter().any(|pool| pool.is_empty()) {
-                            return;
-                        }
-                        let mut tuple = Vec::with_capacity(child_nts.len());
-                        for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
-                            let Some((values, values_top)) =
-                                Self::eval_nary_with_plan(fid, tuple, closure, num_examples, nary_pruned.as_deref())
-                            else {
+
+                if use_batch {
+                    let plan = nary_batch_plan.unwrap();
+                    let k = num_examples;
+                    let nargs = child_nts.len();
+                    let mut batch_nodes: Vec<Vec<NodeId>> = Vec::with_capacity(64);
+                    let mut batch_args: Vec<Vec<Value>> = Vec::with_capacity(64);
+
+                    for_each_size_split(
+                        child_total,
+                        nargs,
+                        &mut splits,
+                        &mut |sizes| {
+                            let pools: Vec<&[Candidate]> = child_nts
+                                .iter()
+                                .zip(sizes.iter())
+                                .map(|(child_nt, child_size)| {
+                                    by_size[*child_nt]
+                                        .get(*child_size)
+                                        .map(Vec::as_slice)
+                                        .unwrap_or(&[][..])
+                                })
+                                .collect();
+                            if pools.iter().any(|pool| pool.is_empty()) {
                                 return;
-                            };
-                            let children = tuple.iter().map(|c| c.node).collect();
-                            staged.push((values, values_top, children));
-                        });
-                    },
-                );
+                            }
+                            let mut tuple = Vec::with_capacity(nargs);
+                            for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
+                                let children: Vec<NodeId> = tuple.iter().map(|c| c.node).collect();
+                                for i in 0..k {
+                                    let args: Vec<Value> = tuple.iter().map(|c| c.values[i].clone()).collect();
+                                    batch_args.push(args);
+                                }
+                                batch_nodes.push(children);
+
+                                if batch_nodes.len() == 64 {
+                                    let staged_base = staged.len();
+                                    for j in 0..64 {
+                                        staged.push((Vec::with_capacity(k), None, batch_nodes[j].clone()));
+                                    }
+                                    let refs: Vec<&[Value]> = batch_args.iter().map(|a| a.as_slice()).collect();
+                                    for i in 0..k {
+                                        let example_refs: Vec<&[Value]> = (0..64)
+                                            .map(|j| refs[j * k + i])
+                                            .collect();
+                                        let results = plan.eval_batch(&example_refs, 64);
+                                        for (j, val) in results.into_iter().enumerate() {
+                                            staged[staged_base + j].0.push(val);
+                                        }
+                                    }
+                                    batch_nodes.clear();
+                                    batch_args.clear();
+                                }
+                            });
+                        },
+                    );
+                    // flush remaining
+                    if !batch_nodes.is_empty() {
+                        let count = batch_nodes.len();
+                        let k = num_examples;
+                        let staged_base = staged.len();
+                        for j in 0..count {
+                            staged.push((Vec::with_capacity(k), None, batch_nodes[j].clone()));
+                        }
+                        let refs: Vec<&[Value]> = batch_args.iter().map(|a| a.as_slice()).collect();
+                        for i in 0..k {
+                            let example_refs: Vec<&[Value]> = (0..count)
+                                .map(|j| refs[j * k + i])
+                                .collect();
+                            let results = plan.eval_batch(&example_refs, count);
+                            for (j, val) in results.into_iter().enumerate() {
+                                staged[staged_base + j].0.push(val);
+                            }
+                        }
+                    }
+                } else {
+                    for_each_size_split(
+                        child_total,
+                        child_nts.len(),
+                        &mut splits,
+                        &mut |sizes| {
+                            let pools: Vec<&[Candidate]> = child_nts
+                                .iter()
+                                .zip(sizes.iter())
+                                .map(|(child_nt, child_size)| {
+                                    by_size[*child_nt]
+                                        .get(*child_size)
+                                        .map(Vec::as_slice)
+                                        .unwrap_or(&[][..])
+                                })
+                                .collect();
+                            if pools.iter().any(|pool| pool.is_empty()) {
+                                return;
+                            }
+                            let mut tuple = Vec::with_capacity(child_nts.len());
+                            for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
+                                let Some((values, values_top)) =
+                                    Self::eval_nary_with_plan(fid, tuple, closure, num_examples, nary_pruned.as_deref())
+                                else {
+                                    return;
+                                };
+                                let children = tuple.iter().map(|c| c.node).collect();
+                                staged.push((values, values_top, children));
+                            });
+                        },
+                    );
+                }
+
                 for (values, values_top, children) in staged {
                     if let Some(found) = self.try_push_new(
                         nt_idx,
