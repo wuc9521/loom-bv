@@ -136,7 +136,7 @@ pub struct BitCircuitPlan {
     pub ret_bits: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum BoolNode {
     Atom(BoolAtom),
     Not(BoolAtom),
@@ -146,7 +146,7 @@ pub enum BoolNode {
     Ite(BoolAtom, BoolAtom, BoolAtom),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum BoolAtom {
     Const(bool),
     InputBit { arg: usize, bit: usize },
@@ -356,6 +356,26 @@ impl BoolAtom {
         bindings.push(node);
         Some(BoolAtom::Temp(idx))
     }
+
+    fn compile_dedup(
+        expr: &OwnedExpr,
+        nargs: usize,
+        bindings: &mut Vec<BoolNode>,
+        let_offsets: &[usize],
+        dedup: &mut rustc_hash::FxHashMap<BoolNode, usize>,
+    ) -> Option<Self> {
+        if let Some(atom) = Self::try_leaf(expr, nargs, let_offsets) {
+            return Some(atom);
+        }
+        let node = BoolNode::compile_dedup(expr, nargs, bindings, let_offsets, dedup)?;
+        if let Some(&idx) = dedup.get(&node) {
+            return Some(BoolAtom::Temp(idx));
+        }
+        let idx = bindings.len();
+        dedup.insert(node.clone(), idx);
+        bindings.push(node);
+        Some(BoolAtom::Temp(idx))
+    }
 }
 
 impl BoolNode {
@@ -398,6 +418,48 @@ impl BoolNode {
             _ => None,
         }
     }
+
+    fn compile_dedup(
+        expr: &OwnedExpr,
+        nargs: usize,
+        bindings: &mut Vec<BoolNode>,
+        let_offsets: &[usize],
+        dedup: &mut rustc_hash::FxHashMap<BoolNode, usize>,
+    ) -> Option<Self> {
+        match expr {
+            OwnedExpr::Const(value) if value.bits() == 1 => {
+                Some(Self::Atom(BoolAtom::Const(!value.is_zero())))
+            }
+            OwnedExpr::Var(_, _) | OwnedExpr::Extract(_, _, _) => {
+                Some(Self::Atom(BoolAtom::try_leaf(expr, nargs, let_offsets)?))
+            }
+            OwnedExpr::Not(inner) => Some(Self::Not(BoolAtom::compile_dedup(
+                inner,
+                nargs,
+                bindings,
+                let_offsets,
+                dedup,
+            )?)),
+            OwnedExpr::And(lhs, rhs) => Some(Self::And(
+                BoolAtom::compile_dedup(lhs, nargs, bindings, let_offsets, dedup)?,
+                BoolAtom::compile_dedup(rhs, nargs, bindings, let_offsets, dedup)?,
+            )),
+            OwnedExpr::Or(lhs, rhs) => Some(Self::Or(
+                BoolAtom::compile_dedup(lhs, nargs, bindings, let_offsets, dedup)?,
+                BoolAtom::compile_dedup(rhs, nargs, bindings, let_offsets, dedup)?,
+            )),
+            OwnedExpr::Xor(lhs, rhs) => Some(Self::Xor(
+                BoolAtom::compile_dedup(lhs, nargs, bindings, let_offsets, dedup)?,
+                BoolAtom::compile_dedup(rhs, nargs, bindings, let_offsets, dedup)?,
+            )),
+            OwnedExpr::Ite(cond, then_expr, else_expr) => Some(Self::Ite(
+                BoolAtom::compile_dedup(cond, nargs, bindings, let_offsets, dedup)?,
+                BoolAtom::compile_dedup(then_expr, nargs, bindings, let_offsets, dedup)?,
+                BoolAtom::compile_dedup(else_expr, nargs, bindings, let_offsets, dedup)?,
+            )),
+            _ => None,
+        }
+    }
 }
 
 fn value_from_words(words: Vec<u64>, bits: usize) -> Value {
@@ -421,6 +483,30 @@ fn flatten_concat_bits<'a>(expr: &'a OwnedExpr, out: &mut Vec<&'a OwnedExpr>) ->
             }
             flatten_concat_bits(high, out)
         }
+        OwnedExpr::Const(value) if value.bits() == 1 => {
+            out.push(expr);
+            true
+        }
+        _ if expr.width() == 1 => {
+            out.push(expr);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn flatten_concat_bits_or_consts<'a>(expr: &'a OwnedExpr, out: &mut Vec<&'a OwnedExpr>) -> bool {
+    match expr {
+        OwnedExpr::Concat(high, low) => {
+            if !flatten_concat_bits_or_consts(low, out) {
+                return false;
+            }
+            flatten_concat_bits_or_consts(high, out)
+        }
+        OwnedExpr::Const(_) => {
+            out.push(expr);
+            true
+        }
         _ if expr.width() == 1 => {
             out.push(expr);
             true
@@ -430,16 +516,13 @@ fn flatten_concat_bits<'a>(expr: &'a OwnedExpr, out: &mut Vec<&'a OwnedExpr>) ->
 }
 
 impl BitCircuitPlan {
-    /// Try to compile a 1-bit-output, let-bindings-then-concat OwnedExpr
-    /// shape directly into a flat boolean circuit. Returns `None` for any
-    /// shape we don't recognize (callers fall back to `DefineFunPlan::compile`'s
-    /// Generic path).
+    /// Try to compile a define-fun body into a flat boolean circuit.
+    /// Handles let-bindings (must be 1-bit each), then a concat tree whose
+    /// leaves are either 1-bit expressions or multi-bit constants.
+    /// Returns `None` for any shape we don't recognize (callers fall back
+    /// to the Generic plan).
     pub fn try_compile(expr: &OwnedExpr, nargs: usize, ret_bits: usize) -> Option<Self> {
         let mut bindings = Vec::new();
-        // `let_offsets[k]` is the index into `bindings` where the value node for
-        // the k-th let-binding (Var(nargs + k) in source order) lives. We can't
-        // use `k` directly because compiling a value may push auxiliary nodes
-        // into `bindings` first, shifting the let's own slot past `k`.
         let mut let_offsets: Vec<usize> = Vec::new();
         let mut current = expr;
         while let OwnedExpr::Let(_, value, body) = current {
@@ -452,17 +535,33 @@ impl BitCircuitPlan {
             let_offsets.push(pos);
             current = body;
         }
+        if let OwnedExpr::Const(_) = current {
+            return None;
+        }
         let mut raw_bits = Vec::new();
         if !flatten_concat_bits(current, &mut raw_bits) {
+            raw_bits.clear();
+            if !flatten_concat_bits_or_consts(current, &mut raw_bits) {
+                return None;
+            }
+        }
+        let mut output_bits = Vec::new();
+        let mut dedup = rustc_hash::FxHashMap::default();
+        for leaf in &raw_bits {
+            match leaf {
+                OwnedExpr::Const(value) if value.bits() > 1 => {
+                    for i in 0..value.bits() {
+                        output_bits.push(BoolAtom::Const(value.bit(i)));
+                    }
+                }
+                _ => {
+                    output_bits.push(BoolAtom::compile_dedup(leaf, nargs, &mut bindings, &let_offsets, &mut dedup)?);
+                }
+            }
+        }
+        if output_bits.len() != ret_bits {
             return None;
         }
-        if raw_bits.len() != ret_bits {
-            return None;
-        }
-        let output_bits = raw_bits
-            .into_iter()
-            .map(|bit| BoolAtom::compile(bit, nargs, &mut bindings, &let_offsets))
-            .collect::<Option<Vec<_>>>()?;
         Some(BitCircuitPlan {
             bindings,
             output_bits,
