@@ -63,6 +63,9 @@ macro_rules! enum_expr {
             #[debug(fmt = "(f2{} {:?} {:?})", _0, _1, _2)]
             #[display(fmt = "({} {} {})", "crate::parse::deffun::ENV.name(*_0)", _1, _2)]
             Fop2Dyn(usize, &'a Expr<'a>, &'a Expr<'a>),
+            #[debug(fmt = "(fn{} {:?})", _0, _1)]
+            #[display(fmt = "{}", "crate::enumerate::expr::format_expr_dyn_app(*_0, _1)")]
+            FopDyn(usize, &'a [&'a Expr<'a>]),
             #[debug(fmt = "(ule {:?} {:?})", _0, _1)]
             #[display(fmt = "(bvule {} {})", _0, _1)]
             BVule(&'a Expr<'a>, &'a Expr<'a>),

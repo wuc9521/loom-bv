@@ -191,17 +191,19 @@ impl SearchConfig {
                     }
                     if has_and && has_lshr {
                         info!("Searching Conditions.");
+                        let arg_widths = problem.arg_widths();
                         for shift in &consts {
                             let shift = shift.as_u64_lossy() as usize;
                             use Expr::*;
                             for i in 0..problem.args.len() {
+                                let w = arg_widths[i];
                                 conds.add_solution(
                                     &And(
                                         &LShr(
-                                            &Var(i, problem.bits),
-                                            &Const(Value::from_u64(shift as u64, problem.bits)),
+                                            &Var(i, w),
+                                            &Const(Value::from_u64(shift as u64, w)),
                                         ),
-                                        &Const(Value::from_u64(1, problem.bits)),
+                                        &Const(Value::from_u64(1, w)),
                                     ),
                                     0,
                                 );
