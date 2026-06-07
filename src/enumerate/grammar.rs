@@ -405,6 +405,18 @@ pub fn build_owned_application(id: &Identifier, args: &[OwnedExpr]) -> parse::Re
     operator2!("bvult", BVult);
     operator2!("bvsle", BVsle);
     operator2!("bvslt", BVslt);
+    if opname == "bvugt" && args.len() == 2 {
+        return Ok(OwnedExpr::BVult(Box::new(args[1].clone()), Box::new(args[0].clone())));
+    }
+    if opname == "bvuge" && args.len() == 2 {
+        return Ok(OwnedExpr::BVule(Box::new(args[1].clone()), Box::new(args[0].clone())));
+    }
+    if opname == "bvsgt" && args.len() == 2 {
+        return Ok(OwnedExpr::BVslt(Box::new(args[1].clone()), Box::new(args[0].clone())));
+    }
+    if opname == "bvsge" && args.len() == 2 {
+        return Ok(OwnedExpr::BVsle(Box::new(args[1].clone()), Box::new(args[0].clone())));
+    }
     operator1!("not", Not);
     if opname == "and" && args.len() >= 2 {
         let mut it = args.iter();

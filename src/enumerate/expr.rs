@@ -523,6 +523,18 @@ impl OwnedExpr {
                 operator2!("bvult", BVult);
                 operator2!("bvsle", BVsle);
                 operator2!("bvslt", BVslt);
+                if opname == "bvugt" && args.len() == 2 {
+                    return Ok(Self::BVult(Box::new(Self::from_term(&args[1], env)?), Box::new(Self::from_term(&args[0], env)?)));
+                }
+                if opname == "bvuge" && args.len() == 2 {
+                    return Ok(Self::BVule(Box::new(Self::from_term(&args[1], env)?), Box::new(Self::from_term(&args[0], env)?)));
+                }
+                if opname == "bvsgt" && args.len() == 2 {
+                    return Ok(Self::BVslt(Box::new(Self::from_term(&args[1], env)?), Box::new(Self::from_term(&args[0], env)?)));
+                }
+                if opname == "bvsge" && args.len() == 2 {
+                    return Ok(Self::BVsle(Box::new(Self::from_term(&args[1], env)?), Box::new(Self::from_term(&args[0], env)?)));
+                }
                 // SyGuS boolean connectives may appear in define-fun bodies; booleans
                 // are represented as 1-bit bitvectors in this codebase.
                 operator1!("not", Not);
