@@ -15,7 +15,6 @@ pub struct Cfg<'i>(Vec<NonTerminal<'i>>);
 impl<'i> Cfg<'i> {
     pub fn from_grammar(
         grammar: &GrammarDef,
-        _axioms: Option<&super::axiom::AxiomRewriter>,
     ) -> Result<Cfg<'static>, Error> {
         let nts = grammar
             .grouped_rule_lists

@@ -55,7 +55,7 @@ impl<'a, const N: usize> CombineRules<'a, N>
         let and_cond = first.imples(&self.output);
         let and_count = (self.mask & *first).count();
         let and_cnstr = self.mask.count() - and_count > 2 * (N as u32);
-        if and_cond && and_cnstr && 3 * first.count_zeros() > self.output.count_zeros() && (N >= sol.pbecstr.len() || sol.pbecstr.test_and(expr)) {
+        if and_cond && and_cnstr && 3 * first.count_zeros() > self.output.count_zeros() && (N >= sol.pbecstr.len() || sol.pbecstr.test_and_expr(expr)) {
             self.subexprs.push(SubExpr::And(expr.clone(), !self.mask | *first));
             self.mask = self.mask & *first;
             // println!("{:?} and {:?} {}", expr, first.count_zeros() as f32 / self.output.count_zeros() as f32, self.mask.count());
@@ -64,7 +64,7 @@ impl<'a, const N: usize> CombineRules<'a, N>
         let or_cond = self.output.imples(&first);
         let or_count = (self.mask & !*first).count();
         let or_cnstr = self.mask.count() - or_count > 2 * (N as u32);
-        if or_cond && or_cnstr && 3 * first.count() > self.output.count() && (N >= sol.pbecstr.len() || sol.pbecstr.test_or(expr)) {
+        if or_cond && or_cnstr && 3 * first.count() > self.output.count() && (N >= sol.pbecstr.len() || sol.pbecstr.test_or_expr(expr)) {
             self.subexprs.push(SubExpr::Or(expr.clone(), self.mask & *first));
             self.mask = self.mask & !*first;
             // println!("{:?} or {:?} {}", expr, first.count() as f32 / self.output.count() as f32, self.mask.count());

@@ -14,7 +14,7 @@ use crate::{
     },
     exact::Constraint,
     info,
-    parse::{self, constraint::RefImplConstraint, SynthProblem},
+    parse::{self, SynthProblem},
     solutions::Solutions,
 };
 
@@ -286,13 +286,13 @@ impl SearchConfig {
     pub fn cegis_loop(
         &mut self,
         problem: &SynthProblem<'static>,
-        refimpl: &RefImplConstraint,
+        ref_impl: &OwnedExpr,
     ) -> parse::Result<OwnedExpr> {
         info!("Starting CEGIS Loop.");
         let mut cegis = CegisState::new(
-            problem.args.len(),
+            problem.arg_widths(),
             problem.bits,
-            refimpl.clone(),
+            ref_impl.clone(),
             self.get_smt_conf(),
         );
         let no_additional_check = Constraint::empty(problem.args.len(), problem.bits);
@@ -314,7 +314,7 @@ impl SearchConfig {
                 additional_check.random_example(
                     &mut rng,
                     *mask,
-                    &refimpl.ref_impl,
+                    ref_impl,
                     problem.args.len(),
                 )
             }
@@ -333,7 +333,7 @@ impl SearchConfig {
                 cegis.examples.random_example(
                     &mut rng,
                     *mask,
-                    &refimpl.ref_impl,
+                    ref_impl,
                     problem.args.len(),
                 );
             }
@@ -359,13 +359,13 @@ impl SearchConfig {
     pub fn cegis_check<'a>(
         &mut self,
         problem: &SynthProblem<'a>,
-        refimpl: &RefImplConstraint,
+        ref_impl: &OwnedExpr,
         expr: &OwnedExpr,
     ) -> bool {
         let mut cegis = CegisState::new(
-            problem.args.len(),
+            problem.arg_widths(),
             problem.bits,
-            refimpl.clone(),
+            ref_impl.clone(),
             self.get_smt_conf(),
         );
         cegis.verify(expr).unwrap_or(false)

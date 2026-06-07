@@ -24,7 +24,6 @@ pub struct ProblemView<'a> {
     pub synth_funs: Vec<SynthFunView<'a>>,
     pub define_funs: Vec<DefineFunView<'a>>,
     pub constraints: Vec<&'a SyGuSTerm>,
-    pub axioms: Vec<&'a SyGuSTerm>,
 }
 
 impl<'a> ProblemView<'a> {
@@ -33,7 +32,6 @@ impl<'a> ProblemView<'a> {
         let mut synth_funs = Vec::new();
         let mut define_funs = Vec::new();
         let mut constraints = Vec::new();
-        let mut axioms = Vec::new();
 
         for cmd in &file.cmds {
             match cmd {
@@ -54,7 +52,6 @@ impl<'a> ProblemView<'a> {
                     });
                 }
                 SyGuSCmd::Constraint(term) => constraints.push(term),
-                SyGuSCmd::Assume(term) => axioms.push(term),
                 _ => {}
             }
         }
@@ -65,7 +62,6 @@ impl<'a> ProblemView<'a> {
             synth_funs,
             define_funs,
             constraints,
-            axioms,
         }
     }
 

@@ -9,21 +9,23 @@ use crate::{
     enumerate::{expr::OwnedExpr, utils::run_with_timeout, value::BitVec},
     exact::Constraint,
     info,
-    parse::constraint::RefImplConstraint,
 };
 
 pub struct CegisState {
     pub examples: Constraint,
-    constraint: RefImplConstraint,
+    ref_impl: OwnedExpr,
+    arg_widths: Vec<usize>,
     bits: usize,
     conf: SmtConf,
 }
 
 impl CegisState {
-    pub fn new(args: usize, bits: usize, refimpl: RefImplConstraint, conf: SmtConf) -> Self {
+    pub fn new(arg_widths: Vec<usize>, bits: usize, ref_impl: OwnedExpr, conf: SmtConf) -> Self {
+        let args = arg_widths.len();
         Self {
             examples: Constraint::empty(args, bits),
-            constraint: refimpl,
+            ref_impl,
+            arg_widths,
             bits,
             conf,
         }
@@ -38,13 +40,13 @@ impl CegisState {
         solver
             .set_logic(rsmt2::Logic::QF_BV)
             .map_err(|e| format!("failed to set verifier logic: {e}"))?;
-        for i in 0..self.constraint.args {
+        for i in 0..self.arg_widths.len() {
             solver
-                .declare_const(VAR_NAMES[i], &format!("(_ BitVec {})", self.bits))
+                .declare_const(VAR_NAMES[i], &format!("(_ BitVec {})", self.arg_widths[i]))
                 .map_err(|e| format!("failed to declare verifier var {}: {e}", VAR_NAMES[i]))?;
         }
-        let arg_names: Vec<&str> = VAR_NAMES[..self.constraint.args].to_vec();
-        let refimpl_smt = self.constraint.ref_impl.to_sygus(&arg_names);
+        let arg_names: Vec<&str> = VAR_NAMES[..self.arg_widths.len()].to_vec();
+        let refimpl_smt = self.ref_impl.to_sygus(&arg_names);
         let expr_smt = expr.to_sygus(&arg_names);
         let s = if self.bits == 1 {
             format!("(not (= {} (= {} #b0)))", refimpl_smt, expr_smt)
@@ -52,7 +54,7 @@ impl CegisState {
             format!("(not (= {} {}))", refimpl_smt, expr_smt)
         };
         solver
-            .assert(s)
+            .assert(&s)
             .map_err(|e| format!("failed to assert verifier constraint: {e}"))?;
 
         loop {
@@ -65,7 +67,7 @@ impl CegisState {
                 let model = solver
                     .get_model()
                     .map_err(|e| format!("failed to read verifier model: {e}"))?;
-                let mut args = (0..self.constraint.args)
+                let mut args = (0..self.arg_widths.len())
                     .map(|_| BitVec::zero(self.bits))
                     .collect_vec();
                 for (name, _, _, value) in model.into_iter() {
@@ -78,7 +80,7 @@ impl CegisState {
                         .0;
                     args[index] = value;
                 }
-                if let Ok(out) = self.constraint.ref_impl.eval(&*args) {
+                if let Ok(out) = self.ref_impl.eval(&*args) {
                     self.examples.add_example(&*args, out.clone());
                     info!("{:?} can not be verified. {:?} -> {}", expr, args, out);
                     return Ok(false);

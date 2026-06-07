@@ -124,7 +124,7 @@ impl<'a> Config<'a> {
                     SyGuSGTerm::SyGuSTerm(term) => term,
                     SyGuSGTerm::Constant(_) | SyGuSGTerm::Variable(_) => continue,
                 };
-                match term_to_rule(term, &nt_lookup, &env, problem.axioms.as_ref())? {
+                match term_to_rule(&term, &nt_lookup, &env)? {
                     Some(rule) => rules.push(rule),
                     None => {}
                 }
@@ -169,7 +169,6 @@ fn term_to_rule(
     term: &SyGuSTerm,
     nt_lookup: &HashMap<&str, usize>,
     env: &[(&str, u64)],
-    _axioms: Option<&crate::parse::axiom::AxiomRewriter>,
 ) -> parse::Result<Option<Rule>> {
     fn parse_identifier_atom(
         id: &Identifier,

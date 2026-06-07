@@ -96,6 +96,7 @@ impl SampleConfig {
         problem: &SynthProblem<'static>,
         rng: &mut StdRng,
     ) -> parse::Result<bool> {
+        use crate::deductive::unified::DeductiveState;
         use crate::enumerate::grammar::Config;
         use crate::exact::{Constraint, search::enumerate_start, types::Grammar};
         use rand::seq::IteratorRandom;
@@ -115,19 +116,35 @@ impl SampleConfig {
             closure: None,
         };
 
+        let output: Vec<_> = spec.examples.iter().map(|ex| ex.output.clone()).collect();
+
         let multi = Config::from_problem(problem)?;
         let grammar = Grammar::from_config(&multi);
         let max_size = 7;
 
+        let mut deductive = DeductiveState::new(
+            &output,
+            self.filter.deductive_reverse,
+            self.filter.deductive_combine,
+        );
+
         let mut solved = false;
         let count_limit = self.filter.count_limit;
-        let mut count = 0usize;
+        let count_limit_solved = self.filter.count_limit_solved;
 
-        enumerate_start(grammar, &spec, false, max_size, |expr| {
-            count += 1;
-            sol.add_solution_owned(expr, count);
-            if sol.unsolved.is_empty() || count >= count_limit {
-                solved = sol.unsolved.is_empty();
+        enumerate_start(grammar, &spec, false, max_size, |expr, values| {
+            sol.add_solution_owned(expr, deductive.count);
+
+            let spec_ref = sol.pbecstr;
+            deductive.on_candidate(expr, values, sol, spec_ref)?;
+
+            if sol.unsolved.is_empty() {
+                solved = true;
+                return Err(());
+            }
+            if deductive.count >= count_limit
+                || (solved && deductive.count >= count_limit_solved)
+            {
                 return Err(());
             }
             Ok(())

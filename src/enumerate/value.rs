@@ -54,11 +54,41 @@ impl BitVec {
         Self::from_u64(0, bits)
     }
 
+    pub fn ones(bits: usize) -> Self {
+        if bits == 0 {
+            Self::from_u64(0, 0)
+        } else {
+            Self::zero(bits).bitnot()
+        }
+    }
+
     pub fn is_zero(&self) -> bool {
         match self {
             BitVec::Small { raw, .. } => *raw == 0,
             BitVec::Big { raw, .. } => raw.as_ref().is_zero(),
         }
+    }
+
+    pub fn is_ones(&self) -> bool {
+        match self {
+            BitVec::Small { bits, raw } => *raw == mask_u64(*bits),
+            BitVec::Big { bits, raw } => {
+                let all_ones = (BigUint::one() << *bits) - BigUint::one();
+                raw.as_ref() == &all_ones
+            }
+        }
+    }
+
+    pub fn count_ones(&self) -> u32 {
+        match self {
+            BitVec::Small { raw, .. } => raw.count_ones(),
+            BitVec::Big { raw, .. } => raw.as_ref().to_u64_digits().iter().map(|d| d.count_ones()).sum(),
+        }
+    }
+
+    pub fn count_zeros(&self) -> u32 {
+        let bits = self.bits() as u32;
+        bits - self.count_ones()
     }
 
     pub fn matches_masked(&self, expected: &Self, mask: &Self) -> bool {

@@ -179,7 +179,7 @@ impl<'a> LfpSpec<'a> {
                 empty_span(),
             )
         })?;
-        let cfg = Cfg::from_grammar(grammar_def, None)?;
+        let cfg = Cfg::from_grammar(grammar_def)?;
         let closure_name: &'static str =
             Box::leak(self.closure_name().to_string().into_boxed_str());
         let problem = SynthProblem {
@@ -194,7 +194,6 @@ impl<'a> LfpSpec<'a> {
             chatgpt_exprs: Vec::new(),
             bits: self.bits(),
             ret_sort: op.ret.clone(),
-            axioms: None,
         };
         let labels: BTreeMap<usize, bool> = self.labels().iter().copied().collect();
         let spec = super::bitspec::Constraint::from_labels(

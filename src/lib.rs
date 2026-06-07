@@ -9,7 +9,7 @@ use figment::{
 };
 #[cfg(feature = "chatgpt")]
 use itertools::Itertools;
-use parse::{constraint::RefImplConstraint, deffun, ProblemView};
+use parse::{constraint::parse_ref_impl, deffun, ProblemView};
 use sygus_parser::ast::{SyGuSCmd, SyGuSFile};
 #[cfg(feature = "chatgpt")]
 use std::sync::mpsc;
@@ -51,7 +51,7 @@ impl SynthProblem<'_> {
 
     self.cfg.iter().any(|nt| {
         nt.1.iter().any(|rule| match rule {
-            sygus_parser::ast::SyGuSGTerm::SyGuSTerm(term) => term_has_ite(term),
+            sygus_parser::ast::SyGuSGTerm::SyGuSTerm(term) => term_has_ite(&term),
             _ => false,
         })
     })
@@ -61,7 +61,7 @@ impl SynthProblem<'_> {
 fn run_cegis_with_large_stack(
     mut config: SearchConfig,
     problem: SynthProblem<'static>,
-    refimpl: RefImplConstraint,
+    ref_impl: OwnedExpr,
 ) -> Result<OwnedExpr, String> {
     const CEGIS_STACK_SIZE: usize = 256 * 1024 * 1024;
     let handle = thread::Builder::new()
@@ -69,7 +69,7 @@ fn run_cegis_with_large_stack(
         .stack_size(CEGIS_STACK_SIZE)
         .spawn(move || {
             config
-                .cegis_loop(&problem, &refimpl)
+                .cegis_loop(&problem, &ref_impl)
                 .map_err(|e| e.to_string())
         })
         .map_err(|e| format!("failed to spawn cegis worker: {e}"))?;
@@ -144,8 +144,8 @@ fn solve_file_inner(
             Constraint::empty(problem.args.len(), problem.bits),
         )?;
         Ok(problem.format_solution(&result))
-    } else if let Some(refimpl) =
-        RefImplConstraint::parse_from_view(&view, problem.name, problem.args.len())?
+    } else if let Some(ref_impl) =
+        parse_ref_impl(&view, problem.name, problem.args.len())?
     {
         let original_problem = problem.clone();
         let defaults = if problem.has_ite() {
@@ -180,19 +180,19 @@ fn solve_file_inner(
             let (sender, receiver) = mpsc::channel();
             let sd = sender.clone();
             let _ = thread::spawn({
-                let (config, problem, refimpl) = (config.clone(), problem.clone(), refimpl.clone());
-                move || sd.send(run_cegis_with_large_stack(config, problem, refimpl))
+                let (config, problem, ref_impl) = (config.clone(), problem.clone(), ref_impl.clone());
+                move || sd.send(run_cegis_with_large_stack(config, problem, ref_impl))
             });
             let _ = thread::spawn(move || {
                 log::set_log_level(l);
-                let pbe = refimpl.generate_pbe(3, problem.args.len(), problem.bits, &mut config.rng());
+                let pbe = parse::constraint::generate_pbe(&ref_impl, 3, problem.args.len(), problem.bits, &mut config.rng());
                 info!("Use ChatGPT to guide the search");
                 let result = chatgpt::ask(&problem, pbe.clone(), config.gpt_version.clone());
                 info!("Use ChatGPT to guide the search: {:?}", result);
                 for r in result.iter() {
                     if let Some(last) = r.get("last") {
                         if pbe.test_owned(last).len() >= 3 {
-                            if config.cegis_check(&problem, &refimpl, last) {
+                            if config.cegis_check(&problem, &ref_impl, last) {
                                 sender.send(Ok(last.clone())).unwrap();
                                 return;
                             }
@@ -208,7 +208,7 @@ fn solve_file_inner(
                     info!("Use ChatGPT to guide the search: {:?}", v);
                     problem.chatgpt_exprs = v;
                     sender
-                        .send(run_cegis_with_large_stack(config, problem, refimpl))
+                        .send(run_cegis_with_large_stack(config, problem, ref_impl))
                         .unwrap();
                 }
             });
@@ -218,7 +218,7 @@ fn solve_file_inner(
                 .map_err(|e| format!("cegis failed: {e}"))?;
             return Ok(original_problem.format_solution(&a));
         }
-        let result = run_cegis_with_large_stack(config, problem, refimpl)
+        let result = run_cegis_with_large_stack(config, problem, ref_impl)
             .map_err(|e| format!("cegis failed: {e}"))?;
         Ok(original_problem.format_solution(&result))
     } else {
@@ -234,7 +234,6 @@ pub fn solve_sygus_file(
     file: &SyGuSFile,
     config_path: Option<&str>,
     description: &str,
-    _axioms: Option<&[sygus_parser::ast::SyGuSTerm]>,
     verbose: u8,
     min: bool,
 ) -> SolverResult<String> {
@@ -261,12 +260,11 @@ pub fn solve_sygus_cmds(
     cmds: &[SyGuSCmd],
     config_path: Option<&str>,
     description: &str,
-    axioms: Option<&[sygus_parser::ast::SyGuSTerm]>,
     verbose: u8,
     min: bool,
 ) -> SolverResult<String> {
     let file = SyGuSFile { cmds: cmds.to_vec() };
-    match solve_sygus_file(&file, config_path, description, axioms, verbose, min) {
+    match solve_sygus_file(&file, config_path, description, verbose, min) {
         Ok(result) => Ok(result),
         Err(err) => {
             let message = err.to_string();
@@ -279,7 +277,7 @@ pub fn solve_sygus_cmds(
             let normalized = String::from_utf8(normalized)?;
             let reparsed =
                 SyGuSFile::from_str(&normalized).map_err(|e| format!("failed to normalize SyGuS commands: {e}"))?;
-            solve_sygus_file(&reparsed, config_path, description, axioms, verbose, min)
+            solve_sygus_file(&reparsed, config_path, description, verbose, min)
         }
     }
 }

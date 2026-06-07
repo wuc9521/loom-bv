@@ -50,7 +50,7 @@ pub fn enumerate_start<'a>(
     spec: &Constraint,
     min: bool,
     max_size: usize,
-    mut callback: impl FnMut(&OwnedExpr) -> Result<(), ()>,
+    mut callback: impl FnMut(&OwnedExpr, &[BitVec]) -> Result<(), ()>,
 ) -> parse::Result<()> {
     let mut searcher = Searcher::new(grammar, spec, min, None);
     searcher.run_with_callback(max_size, &mut callback)
@@ -209,7 +209,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
     fn run_with_callback(
         &mut self,
         max_size: usize,
-        callback: &mut impl FnMut(&OwnedExpr) -> Result<(), ()>,
+        callback: &mut impl FnMut(&OwnedExpr, &[BitVec]) -> Result<(), ()>,
     ) -> parse::Result<()> {
         log_grammar_summary(&self.grammar);
         for size in 1..=max_size {
@@ -218,11 +218,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
             }
             for nt_idx in 0..self.grammar.nts.len() {
                 for rule_idx in 0..self.grammar.nts[nt_idx].1.len() {
-                    if let Some(expr) = self.expand_rule(nt_idx, rule_idx, size)? {
-                        if callback(&expr).is_err() {
-                            return Ok(());
-                        }
-                    }
+                    self.expand_rule(nt_idx, rule_idx, size)?;
                 }
             }
             loop {
@@ -238,11 +234,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                         let before = self.by_size[nt_idx][size].len();
                         let staged = self.by_size[child_nt][size].clone();
                         for candidate in staged {
-                            if let Some(expr) = self.try_push_existing(nt_idx, candidate, size) {
-                                if callback(&expr).is_err() {
-                                    return Ok(());
-                                }
-                            }
+                            self.try_push_existing(nt_idx, candidate, size);
                         }
                         changed |= self.by_size[nt_idx][size].len() > before;
                     }
@@ -251,11 +243,10 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     break;
                 }
             }
-            // Yield all novel start-NT candidates added at this size level
             let start_nt = self.grammar.start;
             for cand in &self.by_size[start_nt][size] {
                 if let Some(expr) = self.grammar.materialize_node(cand.node, &self.nodes) {
-                    if callback(&expr).is_err() {
+                    if callback(&expr, &cand.values).is_err() {
                         return Ok(());
                     }
                 }
@@ -657,16 +648,13 @@ impl<'a, 'g> Searcher<'a, 'g> {
         values_top: Option<Vec<BitVec>>,
         build_node: impl FnOnce() -> Node,
     ) -> Option<OwnedExpr> {
-        if nt_idx == self.grammar.start {
-            if self.closure.is_some() {
-                let node = self.intern_node(build_node());
-                return self.start_nt_kleene(node, size);
-            }
-            if self.spec.matches(&values) {
-                let node = self.intern_node(build_node());
-                return self.grammar.materialize_node(node, &self.nodes);
-            }
+        if nt_idx == self.grammar.start && self.closure.is_some() {
+            let node = self.intern_node(build_node());
+            return self.start_nt_kleene(node, size);
         }
+        let matches_spec = nt_idx == self.grammar.start
+            && self.closure.is_none()
+            && self.spec.matches(&values);
         if self.closure.is_none()
             && self.seen.contains_or_insert_multi(nt_idx, &values, size)
         {
@@ -684,6 +672,9 @@ impl<'a, 'g> Searcher<'a, 'g> {
             );
         }
         self.by_size[nt_idx][size].push(Candidate { node, values, values_top });
+        if matches_spec {
+            return self.grammar.materialize_node(node, &self.nodes);
+        }
         None
     }
 
@@ -693,14 +684,12 @@ impl<'a, 'g> Searcher<'a, 'g> {
         candidate: Candidate,
         size: usize,
     ) -> Option<OwnedExpr> {
-        if nt_idx == self.grammar.start {
-            if self.closure.is_some() {
-                return self.start_nt_kleene(candidate.node, size);
-            }
-            if self.spec.matches(&candidate.values) {
-                return self.grammar.materialize_node(candidate.node, &self.nodes);
-            }
+        if nt_idx == self.grammar.start && self.closure.is_some() {
+            return self.start_nt_kleene(candidate.node, size);
         }
+        let matches_spec = nt_idx == self.grammar.start
+            && self.closure.is_none()
+            && self.spec.matches(&candidate.values);
         if self.closure.is_none()
             && self.seen.contains_or_insert_multi(nt_idx, &candidate.values, size)
         {
@@ -717,7 +706,11 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 &candidate.values[0], &self.grammar, &self.nodes, &closure.name,
             );
         }
+        let node = candidate.node;
         self.by_size[nt_idx][size].push(candidate);
+        if matches_spec {
+            return self.grammar.materialize_node(node, &self.nodes);
+        }
         None
     }
 

@@ -1,9 +1,8 @@
-//! SyGuS constraint parsing — produces `RefImplConstraint` and the
+//! SyGuS constraint parsing — reference implementation extraction and the
 //! bit-extract / structural-constraint shapes consumed by `Constraint`.
 
 use std::collections::BTreeMap;
 
-use derive_more::DebugCustom;
 #[cfg(feature = "chatgpt")]
 use rand::{rngs::StdRng, seq::SliceRandom};
 use sygus_parser::ast::{
@@ -522,32 +521,15 @@ fn extract_bit_of_target(term: &SyGuSTerm, target_name: &str) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
-//  RefImplConstraint — symbolic reference implementation. CEGIS uses it both
-//  to seed examples and to verify candidate equivalence via SMT.
+//  Reference implementation parsing. Returns the symbolic expression that
+//  serves as the oracle for CEGIS verification and example generation.
 // ---------------------------------------------------------------------------
 
-#[derive(DebugCustom, Clone)]
-#[debug(fmt = "{:?}", ref_impl)]
-pub struct RefImplConstraint {
-    pub args: usize,
-    pub ref_impl: OwnedExpr,
-}
-
-impl RefImplConstraint {
-    pub fn parse_from_file(
-        file: &SyGuSFile,
-        target_name: &str,
-        target_arity: usize,
-    ) -> Result<Option<Self>> {
-        let view = ProblemView::from_file(file);
-        Self::parse_from_view(&view, target_name, target_arity)
-    }
-
-    pub fn parse_from_view(
-        view: &ProblemView<'_>,
-        target_name: &str,
-        target_arity: usize,
-    ) -> Result<Option<Self>> {
+pub fn parse_ref_impl(
+    view: &ProblemView<'_>,
+    target_name: &str,
+    target_arity: usize,
+) -> Result<Option<OwnedExpr>> {
         fn target_var_indices(args: &[SyGuSTerm], target_args: &[SortedVar]) -> Option<Vec<usize>> {
             let mut indices = Vec::with_capacity(args.len());
             for arg in args {
@@ -596,10 +578,7 @@ impl RefImplConstraint {
                 })
                 .collect();
             let e = OwnedExpr::from_term(def.body, &*vargs)?;
-            return Ok(Some(Self {
-                ref_impl: e,
-                args: vargs.len(),
-            }));
+        return Ok(Some(e));
         }
 
         let Some(target_decl) = view
@@ -651,40 +630,37 @@ impl RefImplConstraint {
                     continue;
                 };
                 let e = OwnedExpr::from_term(helper_def.body, &env)?;
-                return Ok(Some(Self {
-                    ref_impl: e,
-                    args: target_arity,
-                }));
+                return Ok(Some(e));
             }
         }
 
         Ok(None)
+}
+
+#[cfg(feature = "chatgpt")]
+pub fn generate_pbe(
+    ref_impl: &OwnedExpr,
+    count: usize,
+    arity: usize,
+    bits: usize,
+    rng: &mut StdRng,
+) -> Constraint {
+    let mut res = Constraint::empty(arity, bits);
+    for _ in 0..count {
+        let mask = [
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            0xFF,
+            0xFFFFFFFFFFFF,
+            0xFFFFFF0000FFFFFF,
+        ]
+        .choose(rng)
+        .unwrap();
+        res.random_example(rng, *mask, ref_impl, arity)
     }
-    #[cfg(feature = "chatgpt")]
-    pub fn generate_pbe(
-        &self,
-        count: usize,
-        arity: usize,
-        bits: usize,
-        rng: &mut StdRng,
-    ) -> Constraint {
-        let mut res = Constraint::empty(arity, bits);
-        for _ in 0..count {
-            let mask = [
-                u64::MAX,
-                u64::MAX,
-                u64::MAX,
-                u64::MAX,
-                0xFF,
-                0xFFFFFFFFFFFF,
-                0xFFFFFF0000FFFFFF,
-            ]
-            .choose(rng)
-            .unwrap();
-            res.random_example(rng, *mask, &self.ref_impl, arity)
-        }
-        res
-    }
+    res
 }
 
 #[cfg(test)]

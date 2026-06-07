@@ -3,7 +3,7 @@ use sygus_parser::ast::{Identifier, Index, Sort, SortedVar, SyGuSFile};
 
 use crate::enumerate::expr::OwnedExpr;
 
-use super::{axiom::AxiomRewriter, cfg::Cfg, new_custom_error_span, Error, ProblemView};
+use super::{cfg::Cfg, new_custom_error_span, Error, ProblemView};
 
 #[derive(Clone, DebugCustom)]
 #[debug(fmt = "synth-fun {} {:?}", name, args)]
@@ -16,7 +16,6 @@ pub struct SynthProblem<'i> {
     pub chatgpt_exprs: Vec<OwnedExpr>,
     pub bits: usize,
     pub ret_sort: Sort,
-    pub axioms: Option<AxiomRewriter>,
 }
 
 impl<'i> SynthProblem<'i> {
@@ -87,19 +86,15 @@ impl<'i> SynthProblem<'i> {
         let cfg = synth.grammar.ok_or_else(|| {
             new_custom_error_span("SynthProblem: Expecting grammar list".into(), ())
         })?;
-        let axioms = AxiomRewriter::from_axioms(
-            &view.axioms.iter().map(|a| (*a).clone()).collect::<Vec<_>>(),
-        );
         Ok(SynthProblem {
             name: Box::leak(synth.name.to_string().into_boxed_str()),
             args,
             arg_decls,
-            cfg: Cfg::from_grammar(cfg, axioms.as_ref())?,
+            cfg: Cfg::from_grammar(cfg)?,
             description: "".into(),
             chatgpt_exprs: Vec::new(),
             bits,
             ret_sort: synth.ret.clone(),
-            axioms,
         })
     }
 

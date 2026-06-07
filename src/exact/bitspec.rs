@@ -74,6 +74,22 @@ fn all_ones(bits: usize) -> BitVec {
     }
 }
 
+pub fn generate_example(
+    rng: &mut StdRng,
+    randmask: u64,
+    oracle: &OwnedExpr,
+    arity: usize,
+) -> (Vec<BitVec>, BitVec) {
+    loop {
+        let args: Vec<BitVec> = (0..arity)
+            .map(|_| BitVec::from_u64(rng.gen::<u64>() & randmask, 64))
+            .collect();
+        if let Ok(output) = oracle.eval(&args) {
+            return (args, output);
+        }
+    }
+}
+
 impl Constraint {
     pub fn empty(args: usize, bits: usize) -> Self {
         Self {
@@ -331,7 +347,7 @@ impl Constraint {
         )
     }
 
-    pub fn test_and(&self, expr: &Expr) -> bool {
+    pub fn test_and(&self, expr: &OwnedExpr) -> bool {
         (0..self.len()).all(|i| {
             let ex = &self.examples[i];
             expr.eval(self.args(i).as_slice())
@@ -340,7 +356,25 @@ impl Constraint {
         })
     }
 
-    pub fn test_or(&self, expr: &Expr) -> bool {
+    pub fn test_or(&self, expr: &OwnedExpr) -> bool {
+        (0..self.len()).all(|i| {
+            let ex = &self.examples[i];
+            expr.eval(self.args(i).as_slice())
+                .map(|x| ex.output.clone().bitnot().bitand(x).is_zero())
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn test_and_expr(&self, expr: &Expr) -> bool {
+        (0..self.len()).all(|i| {
+            let ex = &self.examples[i];
+            expr.eval(self.args(i).as_slice())
+                .map(|x| ex.output.clone().bitand(x.bitnot()).is_zero())
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn test_or_expr(&self, expr: &Expr) -> bool {
         (0..self.len()).all(|i| {
             let ex = &self.examples[i];
             expr.eval(self.args(i).as_slice())
@@ -375,18 +409,11 @@ impl Constraint {
         &mut self,
         rng: &mut StdRng,
         randmask: u64,
-        expr: &OwnedExpr,
-        len: usize,
+        oracle: &OwnedExpr,
+        arity: usize,
     ) {
-        loop {
-            let args = (0..len)
-                .map(|_| BitVec::from_u64(rng.gen::<u64>() & randmask, 64))
-                .collect_vec();
-            if let Ok(a) = expr.eval(&*args) {
-                self.add_example(&args, a);
-                break;
-            }
-        }
+        let (args, output) = generate_example(rng, randmask, oracle, arity);
+        self.add_example(&args, output);
     }
 
     #[cfg(feature = "chatgpt")]

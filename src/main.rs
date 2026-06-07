@@ -67,7 +67,6 @@ pub fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         &file,
         args.config.as_deref(),
         &description,
-        None,
         args.verbose,
         args.min,
     )?;
