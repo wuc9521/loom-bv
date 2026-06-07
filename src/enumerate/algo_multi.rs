@@ -177,7 +177,7 @@ impl<'a, const N: usize> Algo<'a, N> {
                             template,
                             child_nts,
                             base_size,
-                            class: _class,
+                            class,
                         } => {
                             if base_size > size {
                                 continue;
@@ -197,60 +197,74 @@ impl<'a, const N: usize> Algo<'a, N> {
                             if child_total < child_nts.len() {
                                 continue;
                             }
-                            let mut staged = Vec::new();
-                            let mut splits = Vec::with_capacity(child_nts.len());
-                            for_each_size_split(
-                                child_total,
-                                child_nts.len(),
-                                &mut splits,
-                                &mut |sizes| {
-                                    let pools = child_nts
-                                        .iter()
-                                        .zip(sizes.iter())
-                                        .map(|(child_nt, child_size)| {
-                                            self.exprs[*child_nt]
-                                                .get(*child_size)
-                                                .map(Vec::as_slice)
-                                                .unwrap_or(&[][..])
-                                        })
-                                        .collect::<Vec<_>>();
-                                    if pools.iter().any(|pool| pool.is_empty()) {
-                                        return;
-                                    }
-                                    let child_abs = child_nts
-                                        .iter()
-                                        .zip(sizes.iter())
-                                        .map(|(child_nt, child_size)| {
-                                            self.bucket_abs[*child_nt]
-                                                .get(*child_size)
-                                                .and_then(|v| *v)
-                                        })
-                                        .collect::<Option<Vec<_>>>();
-                                    let Some(child_abs) = child_abs else {
-                                        return;
-                                    };
-                                    if let Some(approx) =
-                                        self.eval_template_abs(&template, &child_abs)
-                                    {
-                                        if !approx.may_match_target(self.target) {
+                            let mut staged: Vec<(OwnedExpr, Bv<N>)> = Vec::new();
+                            if child_nts.len() == 2
+                                && (class.commutative
+                                    || class.nonzero_rhs
+                                    || class.shift_rhs_literal)
+                            {
+                                self.expand_binary_specialized(
+                                    &template,
+                                    &child_nts,
+                                    child_total,
+                                    class,
+                                    &mut staged,
+                                );
+                            } else {
+                                let mut splits = Vec::with_capacity(child_nts.len());
+                                for_each_size_split(
+                                    child_total,
+                                    child_nts.len(),
+                                    &mut splits,
+                                    &mut |sizes| {
+                                        let pools = child_nts
+                                            .iter()
+                                            .zip(sizes.iter())
+                                            .map(|(child_nt, child_size)| {
+                                                self.exprs[*child_nt]
+                                                    .get(*child_size)
+                                                    .map(Vec::as_slice)
+                                                    .unwrap_or(&[][..])
+                                            })
+                                            .collect::<Vec<_>>();
+                                        if pools.iter().any(|pool| pool.is_empty()) {
                                             return;
                                         }
-                                    }
-                                    let mut tuple = Vec::with_capacity(child_nts.len());
-                                    for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
-                                        let child_exprs = tuple
+                                        let child_abs = child_nts
                                             .iter()
-                                            .map(|cand| cand.expr.clone())
-                                            .collect::<Vec<_>>();
-                                        let expr = match template.instantiate(&child_exprs) {
-                                            Ok(expr) => expr,
-                                            Err(_) => return,
+                                            .zip(sizes.iter())
+                                            .map(|(child_nt, child_size)| {
+                                                self.bucket_abs[*child_nt]
+                                                    .get(*child_size)
+                                                    .and_then(|v| *v)
+                                            })
+                                            .collect::<Option<Vec<_>>>();
+                                        let Some(child_abs) = child_abs else {
+                                            return;
                                         };
-                                        let value = expr.eval_bv(&self.args);
-                                        staged.push((expr, value));
-                                    });
-                                },
-                            );
+                                        if let Some(approx) =
+                                            self.eval_template_abs(&template, &child_abs)
+                                        {
+                                            if !approx.may_match_target(self.target) {
+                                                return;
+                                            }
+                                        }
+                                        let mut tuple = Vec::with_capacity(child_nts.len());
+                                        for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
+                                            let child_exprs = tuple
+                                                .iter()
+                                                .map(|cand| cand.expr.clone())
+                                                .collect::<Vec<_>>();
+                                            let expr = match template.instantiate(&child_exprs) {
+                                                Ok(expr) => expr,
+                                                Err(_) => return,
+                                            };
+                                            let value = expr.eval_bv(&self.args);
+                                            staged.push((expr, value));
+                                        });
+                                    },
+                                );
+                            }
                             for (expr, value) in staged {
                                 self.insert_candidate(nt, expr, value, &mut next[nt], &mut f)?;
                             }
@@ -434,6 +448,140 @@ impl<'a, const N: usize> Algo<'a, N> {
                         .unwrap_or_else(AbsSummary::top)
                 } else {
                     AbsSummary::top()
+                }
+            }
+        }
+    }
+
+    /// Specialized 2-arity template expansion that respects `RuleClass`
+    /// shortcuts. Mirrors the `op2_sym` / `op2_sym_idem` / `op2_nonzero` /
+    /// shift-rhs macros from the legacy single-NT `algo::Algo`.
+    ///
+    /// The shortcuts are correctness-preserving up to the dedup pool: for
+    /// example, commutative-same-NT rules emit `(e1, e2)` only when
+    /// `size(e1) ≤ size(e2)` because `(e2, e1)` would produce the same
+    /// value and be dropped by the seen-map anyway.
+    fn expand_binary_specialized(
+        &self,
+        template: &TemplateExpr,
+        child_nts: &[usize],
+        child_total: usize,
+        class: super::grammar::RuleClass,
+        staged: &mut Vec<(OwnedExpr, Bv<N>)>,
+    ) {
+        debug_assert_eq!(child_nts.len(), 2);
+        let lhs_nt = child_nts[0];
+        let rhs_nt = child_nts[1];
+        let same_nt = lhs_nt == rhs_nt;
+        // Each child consumes at least size 1.
+        if child_total < 2 {
+            return;
+        }
+
+        let mut emit = |lhs: &Candidate<N>, rhs: &Candidate<N>| {
+            if class.idempotent && std::ptr::eq(lhs as *const _, rhs as *const _) {
+                return;
+            }
+            if class.nonzero_rhs && rhs.value.any_eq(&Bv::ZEROS) {
+                return;
+            }
+            let expr = match template
+                .instantiate(&[lhs.expr.clone(), rhs.expr.clone()])
+            {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+            let value = expr.eval_bv(&self.args);
+            staged.push((expr, value));
+        };
+
+        // Optional rhs filter: shifts restrict the rhs to size-1 leaves
+        // (Var / Const / Fop0Dyn — anything that lives at exprs[NT][1]).
+        let rhs_is_leaf = |c: &Candidate<N>| {
+            matches!(
+                c.expr,
+                OwnedExpr::Var(_, _) | OwnedExpr::Const(_) | OwnedExpr::Fop0Dyn(_)
+            )
+        };
+
+        let bucket = |nt: usize, size: usize| -> &[Candidate<N>] {
+            self.exprs[nt]
+                .get(size)
+                .map(Vec::as_slice)
+                .unwrap_or(&[][..])
+        };
+
+        if class.shift_rhs_literal {
+            // Shifts: rhs is a size-1 leaf, lhs takes the remaining
+            // child_total - 1 size budget. (Equivalent to the algo.rs
+            // shift fast path with `l = 1` for LShr; the original code
+            // used `l = 2` for Shl and `l = 3` for AShr, but those skewed
+            // size assignments are heuristic — keeping the standard
+            // 1-vs-(total-1) split here is conservative.)
+            if child_total < 2 {
+                return;
+            }
+            let lhs_size = child_total - 1;
+            let lhs_pool = bucket(lhs_nt, lhs_size);
+            let rhs_pool = bucket(rhs_nt, 1);
+            if lhs_pool.is_empty() || rhs_pool.is_empty() {
+                return;
+            }
+            for rhs in rhs_pool.iter().filter(|c| rhs_is_leaf(c)) {
+                for lhs in lhs_pool {
+                    emit(lhs, rhs);
+                }
+            }
+            return;
+        }
+
+        if class.commutative && same_nt {
+            // Symmetric same-NT: only emit (lhs, rhs) with size(lhs) ≤
+            // size(rhs). The seen-map drops the swapped order.
+            let lo = 1;
+            let hi = child_total - 1;
+            for i in lo..=(child_total / 2) {
+                let j = child_total - i;
+                let lhs_pool = bucket(lhs_nt, i);
+                let rhs_pool = bucket(rhs_nt, j);
+                if lhs_pool.is_empty() || rhs_pool.is_empty() {
+                    continue;
+                }
+                if i == j {
+                    // Diagonal: (e1, e2) with e1, e2 from same pool.
+                    // For idempotent ops, skip e1 == e2; otherwise also
+                    // include the e1 == e1 self-pair (it produces e.g.
+                    // `e + e = 2e` which the legacy op2_sym macro keeps).
+                    for (a, lhs) in lhs_pool.iter().enumerate() {
+                        for rhs in lhs_pool.iter().skip(a) {
+                            emit(lhs, rhs);
+                        }
+                    }
+                } else {
+                    for lhs in lhs_pool {
+                        for rhs in rhs_pool {
+                            emit(lhs, rhs);
+                        }
+                    }
+                }
+            }
+            // Avoid the unused-variables warning on the `hi` placeholder
+            // while keeping the symmetry-bounds intent visible.
+            let _ = hi;
+            return;
+        }
+
+        // Generic binary fallback (asymmetric, possibly nonzero-filtered).
+        for i in 1..=(child_total - 1) {
+            let j = child_total - i;
+            let lhs_pool = bucket(lhs_nt, i);
+            let rhs_pool = bucket(rhs_nt, j);
+            if lhs_pool.is_empty() || rhs_pool.is_empty() {
+                continue;
+            }
+            for lhs in lhs_pool {
+                for rhs in rhs_pool {
+                    emit(lhs, rhs);
                 }
             }
         }
