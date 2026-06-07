@@ -7,7 +7,7 @@ use rustc_hash::FxHashMap;
 
 use crate::enumerate::{
     expr::OwnedExpr,
-    grammar::{build_owned_application, TemplateExpr},
+    grammar::{build_owned_application, RuleClass, TemplateExpr},
     value::BitVec,
 };
 
@@ -32,6 +32,7 @@ pub enum ExactRule {
     Op {
         fid: usize,
         child_nts: Vec<usize>,
+        class: RuleClass,
     },
     GenericTemplate {
         template: TemplateExpr,

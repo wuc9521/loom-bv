@@ -174,7 +174,7 @@ impl<'a> Relevance<'a> {
                 }
                 true
             }
-            ExactRule::Op { fid, child_nts } => {
+            ExactRule::Op { fid, child_nts, .. } => {
                 let Some(dep) = get_deffun_dep_bits(*fid, demanded, &mut self.dep_cache) else {
                     return false;
                 };

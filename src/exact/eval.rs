@@ -164,7 +164,7 @@ impl<'a> Grammar<'a> {
         match &self.nts[node.nt_idx].1[node.rule_idx] {
             ExactRule::Alias(_) => self.materialize_node(node.children[0], nodes),
             ExactRule::Leaf(expr) => Some(expr.clone()),
-            ExactRule::Op { fid, child_nts: _ } => {
+            ExactRule::Op { fid, .. } => {
                 Some(OwnedExpr::Func(
                     *fid,
                     node.children

@@ -1,5 +1,5 @@
 use crate::{
-    enumerate::grammar::{Config, Rule, TemplateExpr},
+    enumerate::grammar::{Config, Rule, RuleClass, TemplateExpr},
     parse::deffun,
 };
 
@@ -19,8 +19,8 @@ impl Grammar<'static> {
                         template,
                         child_nts,
                         base_size,
-                        ..
-                    } => ExactRule::from_template(template, child_nts, *base_size),
+                        class,
+                    } => ExactRule::from_template(template, child_nts, *base_size, *class),
                     Rule::ChatGPT { expr, .. } => ExactRule::Leaf(expr.clone()),
                 })
                 .collect();
@@ -35,11 +35,7 @@ impl Grammar<'static> {
 }
 
 impl ExactRule {
-    /// Try to fold a `Rule::Template`'s template into one of the dedicated
-    /// `ExactRule` variants (Leaf / Op) that don't carry the full TemplateExpr.
-    /// Falls back to `GenericTemplate` whenever the shape doesn't match
-    /// `op(slot_0, slot_1, ...)` exactly.
-    pub fn from_template(template: &TemplateExpr, child_nts: &[usize], base_size: usize) -> ExactRule {
+    pub fn from_template(template: &TemplateExpr, child_nts: &[usize], base_size: usize, class: RuleClass) -> ExactRule {
     if child_nts.is_empty() {
         if let TemplateExpr::Leaf(expr) = template {
             return ExactRule::Leaf(expr.clone());
@@ -80,6 +76,7 @@ impl ExactRule {
     ExactRule::Op {
         fid,
         child_nts: child_nts.to_vec(),
+        class,
     }
     }
 }

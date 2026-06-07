@@ -219,7 +219,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     || Node { nt_idx, rule_idx, children: Vec::new() },
                 ))
             }
-            ExactRule::Op { fid, child_nts } => {
+            ExactRule::Op { fid, child_nts, class } => {
                 if size <= child_nts.len() {
                     return Ok(None);
                 }
@@ -308,36 +308,102 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     // flush remaining
                     flush_batch(&mut batch_nodes, &mut batch_args, &mut staged, plan, k);
                 } else {
-                    for_each_size_split(
-                        child_total,
-                        child_nts.len(),
-                        &mut splits,
-                        &mut |sizes| {
-                            let pools: Vec<&[Candidate]> = child_nts
-                                .iter()
-                                .zip(sizes.iter())
-                                .map(|(child_nt, child_size)| {
-                                    by_size[*child_nt]
-                                        .get(*child_size)
-                                        .map(Vec::as_slice)
-                                        .unwrap_or(&[][..])
-                                })
-                                .collect();
-                            if pools.iter().any(|pool| pool.is_empty()) {
-                                return;
+                    let is_binary_same_nt = child_nts.len() == 2 && child_nts[0] == child_nts[1];
+
+                    if class.shift_rhs_literal && child_nts.len() == 2 && child_total >= 1 {
+                        let lhs_nt = child_nts[0];
+                        let rhs_nt = child_nts[1];
+                        let lhs_size = child_total - 1;
+                        if lhs_size >= 1 {
+                            let lhs_pool = by_size[lhs_nt].get(lhs_size).map(Vec::as_slice).unwrap_or(&[]);
+                            let rhs_pool = by_size[rhs_nt].get(1).map(Vec::as_slice).unwrap_or(&[]);
+                            if !lhs_pool.is_empty() && !rhs_pool.is_empty() {
+                                for lhs in lhs_pool {
+                                    for rhs in rhs_pool {
+                                        let tuple: &[&Candidate] = &[lhs, rhs];
+                                        let Some((values, values_top)) =
+                                            Self::eval_nary_with_plan(fid, tuple, closure, num_examples, nary_pruned.as_deref())
+                                        else { continue };
+                                        let children = vec![lhs.node, rhs.node];
+                                        staged.push((values, values_top, children));
+                                    }
+                                }
                             }
-                            let mut tuple = Vec::with_capacity(child_nts.len());
-                            for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
-                                let Some((values, values_top)) =
-                                    Self::eval_nary_with_plan(fid, tuple, closure, num_examples, nary_pruned.as_deref())
-                                else {
+                        }
+                    } else if is_binary_same_nt && class.commutative {
+                        // Commutative: only enumerate lhs_size <= rhs_size
+                        let nt = child_nts[0];
+                        for lhs_size in 1..=child_total / 2 {
+                            let rhs_size = child_total - lhs_size;
+                            let lhs_pool = by_size[nt].get(lhs_size).map(Vec::as_slice).unwrap_or(&[]);
+                            let rhs_pool = by_size[nt].get(rhs_size).map(Vec::as_slice).unwrap_or(&[]);
+                            if lhs_pool.is_empty() || rhs_pool.is_empty() { continue; }
+
+                            if lhs_size == rhs_size {
+                                // Diagonal: upper-triangle (i <= j)
+                                for (i, lhs) in lhs_pool.iter().enumerate() {
+                                    let start = if class.idempotent { i + 1 } else { i };
+                                    for rhs in &rhs_pool[start..] {
+                                        if class.nonzero_rhs && rhs.values.iter().all(|v| v.is_zero()) { continue; }
+                                        let tuple: &[&Candidate] = &[lhs, rhs];
+                                        let Some((values, values_top)) =
+                                            Self::eval_nary_with_plan(fid, tuple, closure, num_examples, nary_pruned.as_deref())
+                                        else { continue };
+                                        let children = vec![lhs.node, rhs.node];
+                                        staged.push((values, values_top, children));
+                                    }
+                                }
+                            } else {
+                                // Off-diagonal: full cross-product (lhs_size < rhs_size already ensures no dup)
+                                for lhs in lhs_pool {
+                                    for rhs in rhs_pool {
+                                        if class.nonzero_rhs && rhs.values.iter().all(|v| v.is_zero()) { continue; }
+                                        let tuple: &[&Candidate] = &[lhs, rhs];
+                                        let Some((values, values_top)) =
+                                            Self::eval_nary_with_plan(fid, tuple, closure, num_examples, nary_pruned.as_deref())
+                                        else { continue };
+                                        let children = vec![lhs.node, rhs.node];
+                                        staged.push((values, values_top, children));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // General case: full cross-product
+                        for_each_size_split(
+                            child_total,
+                            child_nts.len(),
+                            &mut splits,
+                            &mut |sizes| {
+                                let pools: Vec<&[Candidate]> = child_nts
+                                    .iter()
+                                    .zip(sizes.iter())
+                                    .map(|(child_nt, child_size)| {
+                                        by_size[*child_nt]
+                                            .get(*child_size)
+                                            .map(Vec::as_slice)
+                                            .unwrap_or(&[][..])
+                                    })
+                                    .collect();
+                                if pools.iter().any(|pool| pool.is_empty()) {
                                     return;
-                                };
-                                let children = tuple.iter().map(|c| c.node).collect();
-                                staged.push((values, values_top, children));
-                            });
-                        },
-                    );
+                                }
+                                let mut tuple = Vec::with_capacity(child_nts.len());
+                                for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
+                                    if class.nonzero_rhs && child_nts.len() == 2 {
+                                        if tuple[1].values.iter().all(|v| v.is_zero()) { return; }
+                                    }
+                                    let Some((values, values_top)) =
+                                        Self::eval_nary_with_plan(fid, tuple, closure, num_examples, nary_pruned.as_deref())
+                                    else {
+                                        return;
+                                    };
+                                    let children = tuple.iter().map(|c| c.node).collect();
+                                    staged.push((values, values_top, children));
+                                });
+                            },
+                        );
+                    }
                 }
 
                 for (values, values_top, children) in staged {
