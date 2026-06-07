@@ -108,21 +108,11 @@ fn solve_file_inner(
     let pbecstr =
         Constraint::parse_pbe_from_view(problem.name, problem.args.len(), problem.bits, &view)?;
     if let Some(spec) = exact::Constraint::from_file(file, &problem)? {
-        let use_sampling = spec.structural.is_empty()
-            && spec.examples.first().map_or(false, |e| !e.args.is_empty())
-            && !spec.examples.is_empty()
-            && spec.is_fully_specified();
-        let defaults = if use_sampling {
-            debg!("sampling search: {} examples, {} bits", spec.len(), spec.bits);
-            SearchConfig::default_pbe()
-        } else {
-            debg!(
-                "exact search: {} (bits={}, examples={}, cmds={})",
-                problem.name, problem.bits, spec.num_examples(), file.cmds.len()
-            );
-            SearchConfig::default_exact()
-        };
-        let fig = Figment::new().merge(Serialized::defaults(defaults));
+        debg!(
+            "exact search: {} (bits={}, examples={}, cmds={})",
+            problem.name, problem.bits, spec.num_examples(), file.cmds.len()
+        );
+        let fig = Figment::new().merge(Serialized::defaults(SearchConfig::default_exact()));
         let fig = if let Some(path) = config_path {
             fig.merge(Toml::file(path))
         } else {
@@ -130,9 +120,6 @@ fn solve_file_inner(
         };
         let mut config: SearchConfig = fig.extract()?;
         config.min = min;
-        if use_sampling {
-            config.is_pbe = true;
-        }
         let result = config.search(
             &problem,
             &spec,
