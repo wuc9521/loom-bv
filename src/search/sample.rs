@@ -5,7 +5,7 @@ use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    enumerate::{algo_multi, Algo as AAlgo},
+    enumerate::{algo, Algo as AAlgo},
     info,
     parse::{self, SynthProblem},
     solutions::Solutions,
@@ -78,7 +78,7 @@ impl SampleConfig {
             .filter
             .state(args.clone(), &out, &bump, self.partial_solution);
         let mut algo =
-            algo_multi::Algo::new(problem, args, out.clone(), self.dag_size, &bump)?;
+            algo::Algo::new(problem, args, out.clone(), self.dag_size, &bump)?;
         let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
         let result = !filter.solved;
         info!(

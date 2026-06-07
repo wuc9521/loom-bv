@@ -48,7 +48,7 @@ impl TemplateExpr {
 /// Operator-specific search-time metadata. Detected once at grammar
 /// compile time by looking at the outermost `App` of the rule template.
 /// Algorithm consumers (currently the enumeration engine,
-/// soon `algo_multi::Algo`) use this to prune the bottom-up enumeration:
+/// soon `algo::Algo`) use this to prune the bottom-up enumeration:
 ///
 /// - `commutative`: with two same-NT children, only iterate `i ≤ size/2`.
 /// - `idempotent`: additionally skip `e == e` pairs (e.g. `a & a = a`).
