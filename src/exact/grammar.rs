@@ -1,12 +1,12 @@
 use crate::{
-    enumerate::grammar::{MultiConfig, MultiRule, TemplateExpr},
+    enumerate::grammar::{Config, Rule, TemplateExpr},
     parse::deffun,
 };
 
 use super::{Grammar, ExactRule};
 
 impl Grammar<'static> {
-    pub fn from_config(grammar: &MultiConfig<'static>) -> Self {
+    pub fn from_config(grammar: &Config<'static>) -> Self {
     let nts = grammar
         .nts
         .iter()
@@ -14,14 +14,14 @@ impl Grammar<'static> {
             let compiled = rules
                 .iter()
                 .map(|rule| match rule {
-                    MultiRule::Alias(nt) => ExactRule::Alias(*nt),
-                    MultiRule::Template {
+                    Rule::Alias(nt) => ExactRule::Alias(*nt),
+                    Rule::Template {
                         template,
                         child_nts,
                         base_size,
                         ..
                     } => ExactRule::from_template(template, child_nts, *base_size),
-                    MultiRule::ChatGPT { expr, .. } => ExactRule::Leaf(expr.clone()),
+                    Rule::ChatGPT { expr, .. } => ExactRule::Leaf(expr.clone()),
                 })
                 .collect();
             (*name, compiled)
@@ -35,7 +35,7 @@ impl Grammar<'static> {
 }
 
 impl ExactRule {
-    /// Try to fold a `MultiRule::Template`'s template into one of the dedicated
+    /// Try to fold a `Rule::Template`'s template into one of the dedicated
     /// `ExactRule` variants (Leaf / Op) that don't carry the full TemplateExpr.
     /// Falls back to `GenericTemplate` whenever the shape doesn't match
     /// `op(slot_0, slot_1, ...)` exactly.

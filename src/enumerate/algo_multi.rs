@@ -1,4 +1,4 @@
-use std::{collections::HashMap, mem::size_of};
+use std::{alloc::Layout, collections::HashMap, mem::size_of};
 
 use rustc_hash::FxHashMap;
 
@@ -10,12 +10,25 @@ use crate::{
 };
 
 use super::{
-    algo::dynamic_usage_for_capacity,
     expr::OwnedExpr,
     grammar::{
-        for_each_candidate_tuple, for_each_size_split, MultiConfig, MultiRule, TemplateExpr,
+        for_each_candidate_tuple, for_each_size_split, Config, Rule, TemplateExpr,
     },
 };
+
+fn dynamic_usage_for_capacity<K, V>(cap: usize) -> usize {
+    let width: usize = if cfg!(target_arch = "x86_64") { 16 } else { 8 };
+    let buckets = if cap < 8 {
+        return if cap < 4 { 4 } else { 8 };
+    } else {
+        ((cap * 8) / 7).next_power_of_two()
+    };
+    let layout = Layout::new::<(K, V)>();
+    let size = layout.size();
+    let ctrl_align = usize::max(layout.align(), width);
+    let ctrl_offset = (size * buckets + ctrl_align - 1) & !(ctrl_align - 1);
+    ctrl_offset + buckets + width
+}
 
 #[derive(Clone)]
 struct Candidate<const N: usize> {
@@ -57,7 +70,7 @@ impl<const N: usize> AbsSummary<N> {
 }
 
 pub struct Algo<'a, const N: usize> {
-    config: MultiConfig<'static>,
+    config: Config<'static>,
     exprs: Vec<Vec<Vec<Candidate<N>>>>,
     start_map: HashMap<Bv<N>, Option<&'a Expr<'a>>>,
     seen_counts: Vec<usize>,
@@ -69,7 +82,7 @@ pub struct Algo<'a, const N: usize> {
     bump: &'a Bump,
     counter2: usize,
     current_size: usize,
-    /// Reserved for the upcoming sub-expression-reuse port from `algo::Algo`.
+    /// Reserved for the upcoming sub-expression-reuse port.
     /// Currently unused; setting it has no effect.
     #[allow(dead_code)]
     dag_size: bool,
@@ -122,7 +135,7 @@ impl<'a, const N: usize> Algo<'a, N> {
         dag_size: bool,
         bump: &'a Bump,
     ) -> parse::Result<Self> {
-        let config = MultiConfig::from_problem(problem)?;
+        let config = Config::from_problem(problem)?;
         let nt_count = config.nts.len();
         let mut start_map = HashMap::with_capacity_and_hasher(2000000, Default::default());
         start_map.insert(output, None);
@@ -159,7 +172,7 @@ impl<'a, const N: usize> Algo<'a, N> {
                 let rules = self.config.nts[nt].1.clone();
                 for rule in rules {
                     match rule {
-                        MultiRule::Alias(child_nt) => {
+                        Rule::Alias(child_nt) => {
                             if size < self.exprs[child_nt].len() {
                                 let staged = self.exprs[child_nt][size].clone();
                                 for child in staged {
@@ -173,7 +186,7 @@ impl<'a, const N: usize> Algo<'a, N> {
                                 }
                             }
                         }
-                        MultiRule::Template {
+                        Rule::Template {
                             template,
                             child_nts,
                             base_size,
@@ -269,7 +282,7 @@ impl<'a, const N: usize> Algo<'a, N> {
                                 self.insert_candidate(nt, expr, value, &mut next[nt], &mut f)?;
                             }
                         }
-                        MultiRule::ChatGPT { expr, size: target_size } => {
+                        Rule::ChatGPT { expr, size: target_size } => {
                             if size == target_size {
                                 let value = expr.eval_bv(&self.args);
                                 self.insert_candidate(
@@ -455,7 +468,7 @@ impl<'a, const N: usize> Algo<'a, N> {
 
     /// Specialized 2-arity template expansion that respects `RuleClass`
     /// shortcuts. Mirrors the `op2_sym` / `op2_sym_idem` / `op2_nonzero` /
-    /// shift-rhs macros from the legacy single-NT `algo::Algo`.
+    /// shift-rhs macros from the previous single-NT engine.
     ///
     /// The shortcuts are correctness-preserving up to the dedup pool: for
     /// example, commutative-same-NT rules emit `(e1, e2)` only when

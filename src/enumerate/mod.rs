@@ -7,9 +7,7 @@ use derive_more::{DebugCustom, Deref, From};
 
 use self::expr::Expr;
 
-pub mod algo;
 pub mod algo_multi;
-pub mod config;
 pub mod expr;
 pub mod grammar;
 pub mod macros;

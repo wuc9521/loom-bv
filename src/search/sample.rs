@@ -5,12 +5,7 @@ use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    enumerate::{
-        algo,
-        algo_multi,
-        config::Config,
-        Algo as AAlgo,
-    },
+    enumerate::{algo_multi, Algo as AAlgo},
     info,
     parse::{self, SynthProblem},
     solutions::Solutions,
@@ -82,33 +77,17 @@ impl SampleConfig {
         let mut filter = self
             .filter
             .state(args.clone(), &out, &bump, self.partial_solution);
-        if problem.cfg.len() == 1 {
-            let config = Config::from_problem(problem, self.partial_solution)?;
-            let arg_widths = problem.arg_widths();
-            let mut algo =
-                algo::Algo::new(config, args, arg_widths, out.clone(), self.dag_size, &bump);
-            let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
-            let result = !filter.solved;
-            info!(
-                "Searched for {} {} {} Expressions.",
-                algo.len(),
-                algo.count(),
-                algo.count2()
-            );
-            Ok(result)
-        } else {
-            let mut algo =
-                algo_multi::Algo::new(problem, args, out.clone(), self.dag_size, &bump)?;
-            let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
-            let result = !filter.solved;
-            info!(
-                "Searched for {} {} {} Expressions.",
-                algo.len(),
-                algo.count(),
-                algo.count2()
-            );
-            Ok(result)
-        }
+        let mut algo =
+            algo_multi::Algo::new(problem, args, out.clone(), self.dag_size, &bump)?;
+        let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
+        let result = !filter.solved;
+        info!(
+            "Searched for {} {} {} Expressions.",
+            algo.len(),
+            algo.count(),
+            algo.count2()
+        );
+        Ok(result)
     }
     #[inline(always)]
     pub fn search(

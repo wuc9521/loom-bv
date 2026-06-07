@@ -47,7 +47,7 @@ impl TemplateExpr {
 
 /// Operator-specific search-time metadata. Detected once at grammar
 /// compile time by looking at the outermost `App` of the rule template.
-/// Algorithm consumers (currently `algo::Algo` via the legacy `Rule<N>`,
+/// Algorithm consumers (currently the enumeration engine,
 /// soon `algo_multi::Algo`) use this to prune the bottom-up enumeration:
 ///
 /// - `commutative`: with two same-NT children, only iterate `i ≤ size/2`.
@@ -55,7 +55,7 @@ impl TemplateExpr {
 /// - `nonzero_rhs`: skip candidate tuples whose rhs evaluates to 0 (UDiv,
 ///   URem, SDiv, SRem).
 /// - `shift_rhs_literal`: when present, only consider size-1 leaves on the
-///   rhs (matches `algo::Algo`'s shift-by-symbol restriction).
+///   rhs (matches the shift-by-symbol restriction).
 #[derive(Clone, Copy, Default, Debug)]
 pub struct RuleClass {
     pub commutative: bool,
@@ -65,7 +65,7 @@ pub struct RuleClass {
 }
 
 #[derive(Clone)]
-pub enum MultiRule {
+pub enum Rule {
     Alias(usize),
     Template {
         template: TemplateExpr,
@@ -82,13 +82,13 @@ pub enum MultiRule {
     },
 }
 
-pub struct MultiConfig<'a> {
-    pub nts: Vec<(&'a str, Vec<MultiRule>)>,
+pub struct Config<'a> {
+    pub nts: Vec<(&'a str, Vec<Rule>)>,
     pub start: usize,
 }
 
-impl<'a> MultiConfig<'a> {
-    pub fn from_problem(problem: &SynthProblem<'static>) -> parse::Result<MultiConfig<'static>> {
+impl<'a> Config<'a> {
+    pub fn from_problem(problem: &SynthProblem<'static>) -> parse::Result<Config<'static>> {
         let nt_lookup = problem
             .cfg
             .iter()
@@ -110,11 +110,11 @@ impl<'a> MultiConfig<'a> {
         for (idx, nt) in problem.cfg.iter().enumerate() {
             let mut rules = Vec::new();
             // Inject ChatGPT suggestions only into the start non-terminal.
-            // `algo::Algo` did the same via `Rule::ChatGPT(_, 1)` at the
+            // the legacy single-NT engine injected ChatGPT rules at the
             // single (start) NT; preserve that semantics here.
             if idx == 0 {
                 for expr in problem.chatgpt_exprs.iter() {
-                    rules.push(MultiRule::ChatGPT {
+                    rules.push(Rule::ChatGPT {
                         expr: expr.clone(),
                         size: 1,
                     });
@@ -132,7 +132,7 @@ impl<'a> MultiConfig<'a> {
             }
             nts.push((nt.0, rules));
         }
-        Ok(MultiConfig { nts, start: 0 })
+        Ok(Config { nts, start: 0 })
     }
 }
 
@@ -171,7 +171,7 @@ fn term_to_rule(
     nt_lookup: &HashMap<&str, usize>,
     env: &[(&str, u64)],
     _axioms: Option<&crate::parse::axiom::AxiomRewriter>,
-) -> parse::Result<Option<MultiRule>> {
+) -> parse::Result<Option<Rule>> {
     fn parse_identifier_atom(
         id: &Identifier,
         env: &[(&str, u64)],
@@ -203,9 +203,9 @@ fn term_to_rule(
     match term {
         SyGuSTerm::Identifier(id) => {
             if let Some(child_nt) = nt_lookup.get(id.get_name()).copied() {
-                Ok(Some(MultiRule::Alias(child_nt)))
+                Ok(Some(Rule::Alias(child_nt)))
             } else if let Some(atom) = parse_identifier_atom(id, env)? {
-                Ok(Some(MultiRule::Template {
+                Ok(Some(Rule::Template {
                     template: TemplateExpr::Leaf(atom),
                     child_nts: Vec::new(),
                     base_size: 1,
@@ -220,7 +220,7 @@ fn term_to_rule(
         }
         SyGuSTerm::Literal(lit) => {
             let atom = OwnedExpr::from_term(&SyGuSTerm::Literal(lit.clone()), env)?;
-            Ok(Some(MultiRule::Template {
+            Ok(Some(Rule::Template {
                 template: TemplateExpr::Leaf(atom),
                 child_nts: Vec::new(),
                 base_size: 1,
@@ -232,7 +232,7 @@ fn term_to_rule(
             let class = head_op_name(term)
                 .map(|op| classify_op(op, &child_nts))
                 .unwrap_or_default();
-            Ok(Some(MultiRule::Template {
+            Ok(Some(Rule::Template {
                 template,
                 child_nts,
                 base_size,

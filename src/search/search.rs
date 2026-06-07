@@ -8,8 +8,8 @@ use spin::Mutex;
 use crate::{
     cegis::CegisState,
     enumerate::{
-        config::{Config, Rule},
         expr::{Expr, OwnedExpr},
+        grammar::{Config, Rule, TemplateExpr},
         value::Value,
     },
     exact::Constraint,
@@ -140,27 +140,41 @@ impl SearchConfig {
                 conds.cond_buffer = Some(cond);
                 let problem = problem;
 
-                if let Ok(config) = Config::<1>::from_problem(&problem, true) {
-                    if config.iter().any(|x| *x == Rule::<1>::And)
-                        && config.iter().any(|x| *x == Rule::<1>::LShr)
-                    {
+                if let Ok(mcfg) = Config::from_problem(&problem) {
+                    let start_rules = &mcfg.nts[mcfg.start].1;
+                    let mut has_and = false;
+                    let mut has_lshr = false;
+                    let mut consts: Vec<Value> = Vec::new();
+                    for rule in start_rules {
+                        match rule {
+                            Rule::Template { template, .. } => match template {
+                                TemplateExpr::App(id, _) => match id.get_name() {
+                                    "bvand" => has_and = true,
+                                    "bvlshr" => has_lshr = true,
+                                    _ => {}
+                                },
+                                TemplateExpr::Leaf(OwnedExpr::Const(v)) => consts.push(v.clone()),
+                                _ => {}
+                            },
+                            _ => {}
+                        }
+                    }
+                    if has_and && has_lshr {
                         info!("Searching Conditions.");
-                        for shift in config.iter() {
-                            if let Rule::Const(shift) = shift {
-                                let shift = shift.as_u64_lossy() as usize;
-                                use Expr::*;
-                                for i in 0..problem.args.len() {
-                                    conds.add_solution(
-                                        &And(
-                                            &LShr(
-                                                &Var(i, problem.bits),
-                                                &Const(Value::from_u64(shift as u64, problem.bits)),
-                                            ),
-                                            &Const(Value::from_u64(1, 1)),
+                        for shift in &consts {
+                            let shift = shift.as_u64_lossy() as usize;
+                            use Expr::*;
+                            for i in 0..problem.args.len() {
+                                conds.add_solution(
+                                    &And(
+                                        &LShr(
+                                            &Var(i, problem.bits),
+                                            &Const(Value::from_u64(shift as u64, problem.bits)),
                                         ),
-                                        0,
-                                    );
-                                }
+                                        &Const(Value::from_u64(1, 1)),
+                                    ),
+                                    0,
+                                );
                             }
                         }
                     }

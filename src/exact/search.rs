@@ -24,7 +24,7 @@ use std::time::Instant;
 use crate::debg;
 use crate::enumerate::{
     expr::OwnedExpr,
-    grammar::{for_each_candidate_tuple, for_each_size_split, MultiConfig},
+    grammar::{for_each_candidate_tuple, for_each_size_split, Config},
     value::Value,
 };
 use crate::exact::bitspec::Constraint;
@@ -672,7 +672,7 @@ pub fn search_problem<'a>(
     fixpoint: Option<&'a str>,
 ) -> parse::Result<OwnedExpr> {
     let cfg_start = Instant::now();
-    let multi = MultiConfig::from_problem(problem)?;
+    let multi = Config::from_problem(problem)?;
     debg!(
         "exact multi-config built in {:?}",
         cfg_start.elapsed()
