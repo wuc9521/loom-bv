@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::{
     all_ops, bv_op_of, enum_expr, enum_ownedexpr,
     enumerate::op,
-    enumerate::value::Value,
+    enumerate::value::BitVec,
     parse::{self, deffun, literals, new_custom_error_span},
     smt_name_of,
 };
@@ -76,7 +76,7 @@ pub fn format_owned_func_app(fid: usize, args: &[OwnedExpr]) -> String {
 }
 
 impl<'a> Expr<'a> {
-    pub fn eval(&self, args: &[Value]) -> Result<Value, DivideByZero> {
+    pub fn eval(&self, args: &[BitVec]) -> Result<BitVec, DivideByZero> {
         macro_rules! foreach_op {
             (1, false, $op: ident) => {
                 if let Expr::$op(e1) = self {
@@ -392,10 +392,10 @@ impl OwnedExpr {
             })
         }
 
-        fn literal_to_value(lit: &SyGuSLiteral) -> parse::Result<Value> {
+        fn literal_to_value(lit: &SyGuSLiteral) -> parse::Result<BitVec> {
             match lit {
-                SyGuSLiteral::Numeral(v) => Ok(Value::from_u64(*v as u64, 64)),
-                SyGuSLiteral::Bool(v) => Ok(Value::from_u64(if *v { 1 } else { 0 }, 1)),
+                SyGuSLiteral::Numeral(v) => Ok(BitVec::from_u64(*v as u64, 64)),
+                SyGuSLiteral::Bool(v) => Ok(BitVec::from_u64(if *v { 1 } else { 0 }, 1)),
                 SyGuSLiteral::HexConst(v) => {
                     let s = if v.starts_with("#x") {
                         v.clone()
@@ -420,12 +420,12 @@ impl OwnedExpr {
             }
         }
 
-        fn identifier_to_value(id: &Identifier) -> Option<parse::Result<Value>> {
+        fn identifier_to_value(id: &Identifier) -> Option<parse::Result<BitVec>> {
             let name = symbol_name(id);
             if name.eq_ignore_ascii_case("true") {
-                Some(Ok(Value::from_u64(1, 1)))
+                Some(Ok(BitVec::from_u64(1, 1)))
             } else if name.eq_ignore_ascii_case("false") {
-                Some(Ok(Value::from_u64(0, 1)))
+                Some(Ok(BitVec::from_u64(0, 1)))
             } else if name.starts_with("#x") {
                 let bits = name.trim_start_matches("#x").len() * 4;
                 Some(literals::value_constant(name, bits.max(1), empty_span()))
@@ -782,7 +782,7 @@ impl<'a> From<&Expr<'a>> for OwnedExpr {
 #[macro_export]
 macro_rules! oexpr {
     ($v:literal) => { OwnedExpr::Var($v as usize, 64) };
-    ([$v:expr]) => { OwnedExpr::Const(crate::enumerate::value::Value::from_u64($v as u64, 64)) };
+    ([$v:expr]) => { OwnedExpr::Const(crate::enumerate::value::BitVec::from_u64($v as u64, 64)) };
     ($v:ident) => { $v.clone() };
     (! $a1:tt) => { OwnedExpr::Not(Box::new(oexpr![$a1])) };
     (~ $a1:tt) => { OwnedExpr::Neg(Box::new(oexpr![$a1])) };
@@ -849,7 +849,7 @@ impl OwnedExpr {
         format!("{prefix}... <{} chars total>", total)
     }
 
-    fn eval_let_chain(&self, args: &[Value]) -> Result<Value, DivideByZero> {
+    fn eval_let_chain(&self, args: &[BitVec]) -> Result<BitVec, DivideByZero> {
         let mut scoped = args.to_vec();
         let mut current = self;
         loop {
@@ -879,7 +879,7 @@ impl OwnedExpr {
         }
     }
 
-    pub fn eval(&self, args: &[Value]) -> Result<Value, DivideByZero> {
+    pub fn eval(&self, args: &[BitVec]) -> Result<BitVec, DivideByZero> {
         macro_rules! foreach_op {
             (1, false, $op: ident) => {
                 if let OwnedExpr::$op(e1) = self {

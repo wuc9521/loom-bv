@@ -6,7 +6,7 @@ use rsmt2::{
 // use z3::{ast::Ast, Symbol};
 
 use crate::{
-    enumerate::{expr::OwnedExpr, utils::run_with_timeout, value::Value},
+    enumerate::{expr::OwnedExpr, utils::run_with_timeout, value::BitVec},
     exact::Constraint,
     info,
     parse::{constraint::RefImplConstraint, literals},
@@ -66,7 +66,7 @@ impl CegisState {
                     .get_model()
                     .map_err(|e| format!("failed to read verifier model: {e}"))?;
                 let mut args = (0..self.constraint.args)
-                    .map(|_| Value::zero(self.bits))
+                    .map(|_| BitVec::zero(self.bits))
                     .collect_vec();
                 for (name, _, _, value) in model.into_iter() {
                     let value = literals::value_constant(
@@ -74,7 +74,7 @@ impl CegisState {
                         self.bits,
                         pest::Span::new("", 0, 0).unwrap(),
                     )
-                    .unwrap_or_else(|_| Value::zero(self.bits));
+                    .unwrap_or_else(|_| BitVec::zero(self.bits));
                     let index = VAR_NAMES
                         .iter()
                         .enumerate()

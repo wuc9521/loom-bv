@@ -12,15 +12,15 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::enumerate::value::Value;
+use crate::enumerate::value::BitVec;
 use crate::exact::types::{Grammar, Node, NodeId};
 use crate::info;
 
 #[derive(Default)]
 struct DedupBucket {
     pushed: u64,
-    at_zero: FxHashSet<Value>,
-    at_pair: FxHashSet<(Value, Value)>,
+    at_zero: FxHashSet<BitVec>,
+    at_pair: FxHashSet<(BitVec, BitVec)>,
 }
 
 #[derive(Default)]
@@ -133,7 +133,7 @@ impl DedupStats {
         nt_idx: usize,
         size: usize,
         node: NodeId,
-        value_at_zero: &Value,
+        value_at_zero: &BitVec,
         grammar: &Grammar<'_>,
         nodes: &[Node],
         closure_name: &str,
@@ -145,7 +145,7 @@ impl DedupStats {
         if !enabled {
             return;
         }
-        let aux_top = Value::zero(bits).bitnot();
+        let aux_top = BitVec::zero(bits).bitnot();
         let Some(value_at_top) = grammar.eval_node_at(node, nodes, &aux_top, closure_name) else {
             return;
         };

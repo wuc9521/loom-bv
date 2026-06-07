@@ -14,7 +14,7 @@
 //!   negative-label early reject (sound by monotonicity).
 //!
 //! All fixpoint-vs-direct branching is confined to `Searcher::eval_*`
-//! (which return `(value, value_top: Option<Value>)`) and `Searcher::try_push`
+//! (which return `(value, value_top: Option<BitVec>)`) and `Searcher::try_push`
 //! (which dispatches on `self.closure.is_some()` and `nt_idx == start`).
 //! Each rule arm in `Searcher::run` reduces to "build children-eval +
 //! call try_push".
@@ -25,7 +25,7 @@ use crate::debg;
 use crate::enumerate::{
     expr::OwnedExpr,
     grammar::{for_each_candidate_tuple, for_each_size_split, Config},
-    value::Value,
+    value::BitVec,
 };
 use crate::exact::bitspec::Constraint;
 use crate::exact::closure::Closure;
@@ -224,7 +224,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     return Ok(None);
                 }
                 let child_total = size - 1;
-                let mut staged: Vec<(Vec<Value>, Option<Vec<Value>>, Vec<NodeId>)> = Vec::new();
+                let mut staged: Vec<(Vec<BitVec>, Option<Vec<BitVec>>, Vec<NodeId>)> = Vec::new();
                 let by_size = &self.by_size;
                 let closure = self.closure.as_ref();
                 let num_examples = self.num_examples;
@@ -243,11 +243,11 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     let k = num_examples;
                     let nargs = child_nts.len();
                     let mut batch_nodes: Vec<Vec<NodeId>> = Vec::with_capacity(64);
-                    let mut batch_args: Vec<Vec<Value>> = Vec::with_capacity(64);
+                    let mut batch_args: Vec<Vec<BitVec>> = Vec::with_capacity(64);
 
                     let flush_batch = |batch_nodes: &mut Vec<Vec<NodeId>>,
-                                       batch_args: &mut Vec<Vec<Value>>,
-                                       staged: &mut Vec<(Vec<Value>, Option<Vec<Value>>, Vec<NodeId>)>,
+                                       batch_args: &mut Vec<Vec<BitVec>>,
+                                       staged: &mut Vec<(Vec<BitVec>, Option<Vec<BitVec>>, Vec<NodeId>)>,
                                        plan: &BitCircuitPlan,
                                        k: usize| {
                         let count = batch_nodes.len();
@@ -257,9 +257,9 @@ impl<'a, 'g> Searcher<'a, 'g> {
                         for j in 0..count {
                             staged.push((Vec::with_capacity(k), None, batch_nodes[j].clone()));
                         }
-                        let refs: Vec<&[Value]> = batch_args.iter().map(|a| a.as_slice()).collect();
+                        let refs: Vec<&[BitVec]> = batch_args.iter().map(|a| a.as_slice()).collect();
                         for i in 0..k {
-                            let example_refs: Vec<&[Value]> = (0..count)
+                            let example_refs: Vec<&[BitVec]> = (0..count)
                                 .map(|j| refs[j * k + i])
                                 .collect();
                             let results = plan.eval_batch(&example_refs, count);
@@ -294,7 +294,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                             for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
                                 let children: Vec<NodeId> = tuple.iter().map(|c| c.node).collect();
                                 for i in 0..k {
-                                    let args: Vec<Value> = tuple.iter().map(|c| c.values[i].clone()).collect();
+                                    let args: Vec<BitVec> = tuple.iter().map(|c| c.values[i].clone()).collect();
                                     batch_args.push(args);
                                 }
                                 batch_nodes.push(children);
@@ -385,7 +385,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 if child_total < child_nts.len() {
                     return Ok(None);
                 }
-                let mut staged: Vec<(Vec<Value>, Vec<NodeId>)> = Vec::new();
+                let mut staged: Vec<(Vec<BitVec>, Vec<NodeId>)> = Vec::new();
                 let by_size = &self.by_size;
                 let leaf_cache = &mut self.leaf_cache;
                 let num_examples = self.num_examples;
@@ -414,7 +414,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                             let mut all_values = Vec::with_capacity(num_examples);
                             let mut ok = true;
                             for i in 0..num_examples {
-                                let child_values: Vec<Value> =
+                                let child_values: Vec<BitVec> =
                                     tuple.iter().map(|c| c.values[i].clone()).collect();
                                 match template.evaluate_with_args_and_children(
                                     &spec_examples[i].args,
@@ -452,7 +452,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
     //       For multi-example: values has K entries (one per example).
     //       For LFP mode (always K=1): values_top has K entries at aux=top.
 
-    fn eval_leaf(&mut self, expr: &OwnedExpr) -> Option<(Vec<Value>, Option<Vec<Value>>)> {
+    fn eval_leaf(&mut self, expr: &OwnedExpr) -> Option<(Vec<BitVec>, Option<Vec<BitVec>>)> {
         if self.closure.is_some() {
             let closure = self.closure.as_ref().unwrap();
             let (name, v) = closure.binding_zero();
@@ -483,13 +483,13 @@ impl<'a, 'g> Searcher<'a, 'g> {
         closure: Option<&Closure>,
         num_examples: usize,
         pruned_plan: Option<&BitCircuitPlan>,
-    ) -> Option<(Vec<Value>, Option<Vec<Value>>)> {
+    ) -> Option<(Vec<BitVec>, Option<Vec<BitVec>>)> {
         if let Some(closure) = closure {
-            let args_zero: Vec<Value> = tuple.iter().map(|c| c.values[0].clone()).collect();
+            let args_zero: Vec<BitVec> = tuple.iter().map(|c| c.values[0].clone()).collect();
             let value = eval_defined_with_closure(
                 fid, &args_zero, Some(closure.binding_zero()),
             ).ok()?;
-            let args_top: Option<Vec<Value>> = tuple.iter().map(|c| {
+            let args_top: Option<Vec<BitVec>> = tuple.iter().map(|c| {
                 c.values_top.as_ref().map(|vt| vt[0].clone())
             }).collect();
             let args_top = args_top?;
@@ -501,7 +501,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
         let k = num_examples;
         let mut values = Vec::with_capacity(k);
         for i in 0..k {
-            let args: Vec<Value> = tuple.iter().map(|c| c.values[i].clone()).collect();
+            let args: Vec<BitVec> = tuple.iter().map(|c| c.values[i].clone()).collect();
             let v = if let Some(plan) = pruned_plan {
                 plan.eval(&args).ok()?
             } else {
@@ -518,8 +518,8 @@ impl<'a, 'g> Searcher<'a, 'g> {
         &mut self,
         nt_idx: usize,
         size: usize,
-        values: Vec<Value>,
-        values_top: Option<Vec<Value>>,
+        values: Vec<BitVec>,
+        values_top: Option<Vec<BitVec>>,
         build_node: impl FnOnce() -> Node,
     ) -> Option<OwnedExpr> {
         if nt_idx == self.grammar.start {
@@ -617,10 +617,10 @@ impl<'a, 'g> Searcher<'a, 'g> {
         &self,
         node: NodeId,
         closure_name: &str,
-    ) -> Option<(OwnedExpr, Value)> {
+    ) -> Option<(OwnedExpr, BitVec)> {
         let bits = self.spec.bits;
         let (_pos, neg_indices) = self.spec.label_indices()?;
-        let mut aux = Value::zero(bits);
+        let mut aux = BitVec::zero(bits);
         for _ in 0..=bits {
             let next = self
                 .grammar

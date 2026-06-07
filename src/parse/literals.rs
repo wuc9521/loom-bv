@@ -7,7 +7,7 @@ use nom::{
 };
 use pest::Span;
 
-use crate::enumerate::value::Value;
+use crate::enumerate::value::BitVec;
 
 use super::{new_custom_error_span, Error};
 
@@ -99,24 +99,24 @@ pub fn u64_constant<'i>(input: &str, span: Span<'i>) -> Result<u64, Error> {
     }
 }
 
-pub fn value_constant<'i>(input: &str, bits: usize, span: Span<'i>) -> Result<Value, Error> {
+pub fn value_constant<'i>(input: &str, bits: usize, span: Span<'i>) -> Result<BitVec, Error> {
     if input.starts_with("#x") || input.starts_with("#b") || input.starts_with("#d") {
         if bits <= 64 {
-            return u64_constant(input, span).map(|v| Value::from_u64(v, bits));
+            return u64_constant(input, span).map(|v| BitVec::from_u64(v, bits));
         }
         if let Some(raw) = input.strip_prefix("#x") {
             return num_bigint::BigUint::parse_bytes(raw.as_bytes(), 16)
-                .map(|v| Value::from_biguint(v, bits))
+                .map(|v| BitVec::from_biguint(v, bits))
                 .ok_or_else(|| new_custom_error_span("Unrecognized Constant.".into(), span));
         }
         if let Some(raw) = input.strip_prefix("#b") {
             return num_bigint::BigUint::parse_bytes(raw.as_bytes(), 2)
-                .map(|v| Value::from_biguint(v, bits))
+                .map(|v| BitVec::from_biguint(v, bits))
                 .ok_or_else(|| new_custom_error_span("Unrecognized Constant.".into(), span));
         }
         if let Some(raw) = input.strip_prefix("#d") {
             return num_bigint::BigUint::parse_bytes(raw.as_bytes(), 10)
-                .map(|v| Value::from_biguint(v, bits))
+                .map(|v| BitVec::from_biguint(v, bits))
                 .ok_or_else(|| new_custom_error_span("Unrecognized Constant.".into(), span));
         }
     }

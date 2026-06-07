@@ -10,7 +10,7 @@ use crate::{
     enumerate::{
         expr::{Expr, OwnedExpr},
         grammar::{Config, Rule, TemplateExpr},
-        value::Value,
+        value::BitVec,
     },
     exact::Constraint,
     info,
@@ -165,7 +165,7 @@ impl SearchConfig {
             let cond_search = self.cond_search.clone();
             let cond = cond.clone();
             move || {
-                let cond_cstr = &pbecstr.clone().set_output(Value::from_u64(0, 1));
+                let cond_cstr = &pbecstr.clone().set_output(BitVec::from_u64(0, 1));
                 let mut conds = Solutions::new(cond_cstr, false, true);
                 conds.cond_buffer = Some(cond);
                 let problem = problem;
@@ -174,7 +174,7 @@ impl SearchConfig {
                     let start_rules = &mcfg.nts[mcfg.start].1;
                     let mut has_and = false;
                     let mut has_lshr = false;
-                    let mut consts: Vec<Value> = Vec::new();
+                    let mut consts: Vec<BitVec> = Vec::new();
                     for rule in start_rules {
                         match rule {
                             Rule::Template { template, .. } => match template {
@@ -201,9 +201,9 @@ impl SearchConfig {
                                     &And(
                                         &LShr(
                                             &Var(i, w),
-                                            &Const(Value::from_u64(shift as u64, w)),
+                                            &Const(BitVec::from_u64(shift as u64, w)),
                                         ),
-                                        &Const(Value::from_u64(1, w)),
+                                        &Const(BitVec::from_u64(1, w)),
                                     ),
                                     0,
                                 );

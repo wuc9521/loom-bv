@@ -8,7 +8,7 @@ use rustc_hash::FxHashMap;
 use crate::enumerate::{
     expr::OwnedExpr,
     grammar::{build_owned_application, TemplateExpr},
-    value::Value,
+    value::BitVec,
 };
 
 pub type NodeId = usize;
@@ -42,7 +42,7 @@ pub enum ExactRule {
 
 #[derive(Default)]
 pub struct ExactEvalCache {
-    pub leaves: FxHashMap<OwnedExpr, Option<Value>>,
+    pub leaves: FxHashMap<OwnedExpr, Option<BitVec>>,
 }
 
 impl TemplateExpr {
@@ -51,9 +51,9 @@ impl TemplateExpr {
     /// same constant leaf appears across many template instantiations.
     pub fn evaluate(
         &self,
-        args: &[Value],
+        args: &[BitVec],
         cache: &mut ExactEvalCache,
-    ) -> Result<Value, ()> {
+    ) -> Result<BitVec, ()> {
         match self {
             TemplateExpr::Slot(i) => Ok(args[*i].clone()),
             TemplateExpr::Leaf(expr) => cache
@@ -79,9 +79,9 @@ impl TemplateExpr {
     /// Evaluate a childless template with synth-fun example args.
     pub fn evaluate_with_args(
         &self,
-        synth_args: &[Value],
+        synth_args: &[BitVec],
         cache: &mut ExactEvalCache,
-    ) -> Result<Value, ()> {
+    ) -> Result<BitVec, ()> {
         match self {
             TemplateExpr::Slot(_) => Err(()),
             TemplateExpr::Leaf(expr) => {
@@ -113,10 +113,10 @@ impl TemplateExpr {
     /// Evaluate a template with both synth-fun args and child-NT slot values.
     pub fn evaluate_with_args_and_children(
         &self,
-        synth_args: &[Value],
-        children: &[Value],
+        synth_args: &[BitVec],
+        children: &[BitVec],
         cache: &mut ExactEvalCache,
-    ) -> Result<Value, ()> {
+    ) -> Result<BitVec, ()> {
         match self {
             TemplateExpr::Slot(i) => Ok(children[*i].clone()),
             TemplateExpr::Leaf(expr) => {
@@ -157,6 +157,6 @@ impl TemplateExpr {
 #[derive(Clone)]
 pub struct Candidate {
     pub node: NodeId,
-    pub values: Vec<Value>,
-    pub values_top: Option<Vec<Value>>,
+    pub values: Vec<BitVec>,
+    pub values_top: Option<Vec<BitVec>>,
 }

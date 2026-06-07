@@ -10,7 +10,7 @@ use sygus_parser::ast::{SyGuSFile, SyGuSTerm};
 use crate::{
     enumerate::{
         expr::{Expr, OwnedExpr},
-        value::Value,
+        value::BitVec,
         Bv,
     },
     exact::{
@@ -36,9 +36,9 @@ use crate::{
 /// and leave the remaining `output` bits at zero — they are don't-cares.
 #[derive(Clone)]
 pub struct Example {
-    pub args: Vec<Value>,
-    pub output: Value,
-    pub mask: Value,
+    pub args: Vec<BitVec>,
+    pub output: BitVec,
+    pub mask: BitVec,
 }
 
 impl Example {
@@ -66,11 +66,11 @@ pub struct Constraint {
     pub closure: Option<ClosureInfo>,
 }
 
-fn all_ones(bits: usize) -> Value {
+fn all_ones(bits: usize) -> BitVec {
     if bits == 0 {
-        Value::zero(0)
+        BitVec::zero(0)
     } else {
-        Value::zero(bits).bitnot()
+        BitVec::zero(bits).bitnot()
     }
 }
 
@@ -88,9 +88,9 @@ impl Constraint {
     pub fn from_pbe_parts(
         args: usize,
         bits: usize,
-        input: Vec<Vec<Value>>,
-        output: Vec<Value>,
-        mask: Option<Value>,
+        input: Vec<Vec<BitVec>>,
+        output: Vec<BitVec>,
+        mask: Option<BitVec>,
     ) -> Self {
         let n = output.len();
         debug_assert_eq!(input.len(), args);
@@ -98,7 +98,7 @@ impl Constraint {
         let mask_value = mask.unwrap_or_else(|| all_ones(bits));
         let mut examples = Vec::with_capacity(n);
         for i in 0..n {
-            let row: Vec<Value> = (0..args).map(|a| input[a][i].clone()).collect();
+            let row: Vec<BitVec> = (0..args).map(|a| input[a][i].clone()).collect();
             examples.push(Example {
                 args: row,
                 output: output[i].clone(),
@@ -233,7 +233,7 @@ impl Constraint {
         Some((pos, neg))
     }
 
-    pub fn matches(&self, values: &[Value]) -> bool {
+    pub fn matches(&self, values: &[BitVec]) -> bool {
         debug_assert_eq!(values.len(), self.examples.len());
         for (example, value) in self.examples.iter().zip(values.iter()) {
             if value.bits() != self.bits {
@@ -277,7 +277,7 @@ impl Constraint {
         self.args
     }
 
-    pub fn args(&self, i: usize) -> SmallVec<[Value; 4]> {
+    pub fn args(&self, i: usize) -> SmallVec<[BitVec; 4]> {
         self.examples[i].args.iter().cloned().collect()
     }
 
@@ -353,7 +353,7 @@ impl Constraint {
     /// Replace every example's output (and mask) with `value`. Used by the
     /// condition-search worker, which searches for boolean predicates whose
     /// output is the constant `0`.
-    pub fn set_output(mut self, value: Value) -> Self {
+    pub fn set_output(mut self, value: BitVec) -> Self {
         let mask = all_ones(value.bits());
         self.bits = value.bits();
         for ex in &mut self.examples {
@@ -363,7 +363,7 @@ impl Constraint {
         self
     }
 
-    pub fn add_example(&mut self, args: &[Value], output: Value) {
+    pub fn add_example(&mut self, args: &[BitVec], output: BitVec) {
         let mask = all_ones(output.bits());
         self.examples.push(Example {
             args: args.to_vec(),
@@ -381,7 +381,7 @@ impl Constraint {
     ) {
         loop {
             let args = (0..len)
-                .map(|_| Value::from_u64(rng.gen::<u64>() & randmask, 64))
+                .map(|_| BitVec::from_u64(rng.gen::<u64>() & randmask, 64))
                 .collect_vec();
             if let Ok(a) = expr.eval(&*args) {
                 self.add_example(&args, a);
@@ -439,7 +439,7 @@ impl Constraint {
 }
 
 fn bit_constraint_example_to_example(
-    args: Vec<Value>,
+    args: Vec<BitVec>,
     known_bits: BTreeMap<usize, bool>,
     bits: usize,
 ) -> Example {
@@ -453,7 +453,7 @@ fn bit_constraint_example_to_example(
     }
     Example {
         args,
-        output: Value::from_biguint(output_raw, bits),
-        mask: Value::from_biguint(mask_raw, bits),
+        output: BitVec::from_biguint(output_raw, bits),
+        mask: BitVec::from_biguint(mask_raw, bits),
     }
 }

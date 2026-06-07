@@ -2,7 +2,7 @@ use std::collections::hash_map::Entry;
 
 use rustc_hash::FxHashMap;
 
-use crate::enumerate::value::Value;
+use crate::enumerate::value::BitVec;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ProjectionKey(Vec<u64>);
@@ -11,7 +11,7 @@ pub enum SeenMode {
     /// Dedup by flat-concat of all K example values. K=1 degenerates to exact
     /// single-value dedup.
     MultiExact {
-        maps: Vec<FxHashMap<Vec<Value>, usize>>,
+        maps: Vec<FxHashMap<Vec<BitVec>, usize>>,
     },
     /// Dedup by flat-concat of K projected values onto per-NT relevant bits.
     MultiProjected {
@@ -20,10 +20,10 @@ pub enum SeenMode {
         maps: Vec<FxHashMap<ProjectionKey, usize>>,
     },
     /// Fixpoint-mode dedup: sub-NTs use `(values@0, values@top)` pairs;
-    /// the start-NT pool uses a single `Value` (the converged LFP).
+    /// the start-NT pool uses a single `BitVec` (the converged LFP).
     Pair {
-        sub_maps: Vec<FxHashMap<(Value, Value), usize>>,
-        start_lfp: FxHashMap<Value, usize>,
+        sub_maps: Vec<FxHashMap<(BitVec, BitVec), usize>>,
+        start_lfp: FxHashMap<BitVec, usize>,
     },
 }
 
@@ -53,7 +53,7 @@ impl SeenMode {
     pub fn contains_or_insert_multi(
         &mut self,
         nt: usize,
-        values: &[Value],
+        values: &[BitVec],
         size: usize,
     ) -> bool {
         match self {
@@ -83,7 +83,7 @@ impl SeenMode {
     }
 
     /// Single-value dedup for start-NT in Pair (LFP) mode.
-    pub fn contains_or_insert_lfp(&mut self, value: &Value, size: usize) -> bool {
+    pub fn contains_or_insert_lfp(&mut self, value: &BitVec, size: usize) -> bool {
         let SeenMode::Pair { start_lfp, .. } = self else {
             panic!("contains_or_insert_lfp called outside Pair mode");
         };
@@ -100,8 +100,8 @@ impl SeenMode {
     pub fn contains_or_insert_pair(
         &mut self,
         nt: usize,
-        value_zero: &Value,
-        value_top: &Value,
+        value_zero: &BitVec,
+        value_top: &BitVec,
         size: usize,
     ) -> bool {
         let SeenMode::Pair { sub_maps, .. } = self else { return false; };
@@ -115,7 +115,7 @@ impl SeenMode {
     }
 }
 
-fn project_multi(values: &[Value], relevant_bits: &[usize], _num_examples: usize) -> ProjectionKey {
+fn project_multi(values: &[BitVec], relevant_bits: &[usize], _num_examples: usize) -> ProjectionKey {
     let mut words = Vec::new();
     for value in values {
         words.extend(value.project_bits(relevant_bits));

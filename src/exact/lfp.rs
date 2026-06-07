@@ -22,7 +22,7 @@ use sygus_parser::ast::{GrammarDef, Literal, Sort, SyGuSTerm};
 
 use crate::enumerate::expr::OwnedExpr;
 use crate::enumerate::op;
-use crate::enumerate::value::Value;
+use crate::enumerate::value::BitVec;
 use crate::exact::util::{empty_span, extract_single_bit_idx};
 use crate::exact::{eval_defined_with_closure};
 use crate::info;
@@ -357,9 +357,9 @@ impl OwnedExpr {
     pub fn eval_with_closure(
         &self,
         env: &deffun::Environ,
-        closure_value: &Value,
+        closure_value: &BitVec,
         closure_name: &str,
-    ) -> parse::Result<Value> {
+    ) -> parse::Result<BitVec> {
         let closure = Some((closure_name, closure_value));
         let div_by_zero = || new_custom_error_span("lfp: divide-by-zero".into(), empty_span());
         let fn_div_by_zero = |id: usize| {
@@ -458,8 +458,8 @@ impl OwnedExpr {
         env: &deffun::Environ,
         closure_name: &str,
         bits: usize,
-    ) -> parse::Result<Value> {
-        let mut aux = Value::from_u64(0, bits);
+    ) -> parse::Result<BitVec> {
+        let mut aux = BitVec::from_u64(0, bits);
         for _ in 0..=bits {
             let next = self.eval_with_closure(env, &aux, closure_name)?;
             if next == aux {
@@ -474,7 +474,7 @@ impl OwnedExpr {
     }
 }
 
-impl Value {
+impl BitVec {
     pub(crate) fn to_binstr(&self, bits: usize) -> String {
         let mut out = String::with_capacity(bits);
         for i in (0..bits).rev() {

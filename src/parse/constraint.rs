@@ -11,7 +11,7 @@ use sygus_parser::ast::{
     Identifier, Index, Literal as SyGuSLiteral, SortedVar, SyGuSCmd, SyGuSFile, SyGuSTerm,
 };
 
-use crate::enumerate::{expr::OwnedExpr, value::Value};
+use crate::enumerate::{expr::OwnedExpr, value::BitVec};
 
 #[cfg(feature = "chatgpt")]
 use crate::exact::Constraint;
@@ -26,10 +26,10 @@ pub fn empty_span() -> Span<'static> {
     Span::new("", 0, 0).expect("empty span should be valid")
 }
 
-pub(crate) fn literal_to_value(lit: &SyGuSLiteral) -> Result<Value> {
+pub(crate) fn literal_to_value(lit: &SyGuSLiteral) -> Result<BitVec> {
     match lit {
-        SyGuSLiteral::Numeral(v) => Ok(Value::from_u64(*v as u64, 64)),
-        SyGuSLiteral::Bool(v) => Ok(Value::from_u64(if *v { 1 } else { 0 }, 1)),
+        SyGuSLiteral::Numeral(v) => Ok(BitVec::from_u64(*v as u64, 64)),
+        SyGuSLiteral::Bool(v) => Ok(BitVec::from_u64(if *v { 1 } else { 0 }, 1)),
         SyGuSLiteral::HexConst(v) => {
             let s = if v.starts_with("#x") {
                 v.clone()
@@ -143,17 +143,17 @@ pub fn extract_indices_from_identifier(id: &Identifier) -> Option<(usize, usize)
 // ---------------------------------------------------------------------------
 
 pub struct BitConstraintExample {
-    pub args: Vec<Value>,
+    pub args: Vec<BitVec>,
     pub known_bits: BTreeMap<usize, bool>,
 }
 
 /// Parse a nullary `(define-fun target () _ body)` whose body evaluates to a
-/// concrete `Value` — the trivial-spec case for the exact engine.
+/// concrete `BitVec` — the trivial-spec case for the exact engine.
 pub fn parse_target_define_fun(
     file: &SyGuSFile,
     target_name: &str,
     arity: usize,
-) -> Result<Option<Value>> {
+) -> Result<Option<BitVec>> {
     if arity != 0 {
         return Ok(None);
     }
@@ -184,7 +184,7 @@ pub fn parse_bit_constraints_grouped(
     args: &[&str],
 ) -> Result<Option<(Vec<BitConstraintExample>, Vec<OwnedExpr>)>> {
     let arity = args.len();
-    let mut example_map: Vec<(Vec<Value>, BTreeMap<usize, bool>)> = Vec::new();
+    let mut example_map: Vec<(Vec<BitVec>, BTreeMap<usize, bool>)> = Vec::new();
     let mut structural = Vec::new();
     let synth_env: Vec<(&str, u64)> = if arity == 0 {
         vec![(target_name, target_bits as u64)]
@@ -276,7 +276,7 @@ fn parse_extract_call_constraint(
     target_name: &str,
     arity: usize,
     target_bits: usize,
-) -> Option<(Vec<Value>, usize, bool)> {
+) -> Option<(Vec<BitVec>, usize, bool)> {
     if let SyGuSTerm::Annotated(inner, _) = term {
         return parse_extract_call_constraint(inner, target_name, arity, target_bits);
     }
@@ -296,7 +296,7 @@ fn try_parse_extract_eq(
     target_name: &str,
     arity: usize,
     target_bits: usize,
-) -> Option<(Vec<Value>, usize, bool)> {
+) -> Option<(Vec<BitVec>, usize, bool)> {
     let SyGuSTerm::Application(extract_op, extract_args) = extract_side else {
         return None;
     };

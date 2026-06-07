@@ -5,15 +5,15 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::{One, Signed, ToPrimitive, Zero};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum Value {
+pub enum BitVec {
     Small { bits: usize, raw: u64 },
     Big { bits: usize, raw: Arc<BigUint> },
 }
 
-impl Value {
+impl BitVec {
     pub fn bits(&self) -> usize {
         match self {
-            Value::Small { bits, .. } | Value::Big { bits, .. } => *bits,
+            BitVec::Small { bits, .. } | BitVec::Big { bits, .. } => *bits,
         }
     }
 
@@ -21,13 +21,13 @@ impl Value {
         if bits <= 64 {
             let mask = mask_u64(bits);
             let raw = raw & mask;
-            Value::Small {
+            BitVec::Small {
                 bits,
                 raw,
             }
         } else {
             let raw = truncate_big(BigUint::from(raw), bits);
-            Value::Big {
+            BitVec::Big {
                 bits,
                 raw: Arc::new(raw),
             }
@@ -37,13 +37,13 @@ impl Value {
     pub fn from_biguint(raw: BigUint, bits: usize) -> Self {
         if bits <= 64 {
             let raw = (raw & BigUint::from(mask_u64(bits))).to_u64().unwrap_or(0);
-            Value::Small {
+            BitVec::Small {
                 bits,
                 raw,
             }
         } else {
             let raw = truncate_big(raw, bits);
-            Value::Big {
+            BitVec::Big {
                 bits,
                 raw: Arc::new(raw),
             }
@@ -56,16 +56,16 @@ impl Value {
 
     pub fn is_zero(&self) -> bool {
         match self {
-            Value::Small { raw, .. } => *raw == 0,
-            Value::Big { raw, .. } => raw.as_ref().is_zero(),
+            BitVec::Small { raw, .. } => *raw == 0,
+            BitVec::Big { raw, .. } => raw.as_ref().is_zero(),
         }
     }
 
-    /// Reinterpret this `Value` as a Bool in dryadsynth's negative-logic
+    /// Reinterpret this `BitVec` as a Bool in dryadsynth's negative-logic
     /// internal encoding (SMT-true ↔ all bits 0, SMT-false ↔ any bit 1).
     /// `(= a b)` is parsed as `Xor(a, b)` so the bit-zero result means
     /// "equal" = "SMT-true"; `and`/`or` invert to internal `Or`/`And` for
-    /// the same reason. Use this whenever a `Value` should be read as a
+    /// the same reason. Use this whenever a `BitVec` should be read as a
     /// SyGuS Bool — it makes the convention visible at the use site and
     /// prevents accidental `!is_zero()` flips.
     pub fn as_bool(&self) -> BoolValue<'_> {
@@ -74,15 +74,15 @@ impl Value {
 
     pub fn as_u64_lossy(&self) -> u64 {
         match self {
-            Value::Small { raw, .. } => *raw,
-            Value::Big { raw, .. } => raw.as_ref().to_u64().unwrap_or(0),
+            BitVec::Small { raw, .. } => *raw,
+            BitVec::Big { raw, .. } => raw.as_ref().to_u64().unwrap_or(0),
         }
     }
 
     pub fn to_biguint(&self) -> BigUint {
         match self {
-            Value::Small { raw, .. } => BigUint::from(*raw),
-            Value::Big { raw, .. } => raw.as_ref().clone(),
+            BitVec::Small { raw, .. } => BigUint::from(*raw),
+            BitVec::Big { raw, .. } => raw.as_ref().clone(),
         }
     }
 
@@ -91,12 +91,12 @@ impl Value {
             return false;
         }
         match self {
-            Value::Small { raw, .. } => ((*raw >> bit) & 1) == 1,
+            BitVec::Small { raw, .. } => ((*raw >> bit) & 1) == 1,
             // `BigUint::bit` is O(1) direct limb access. The previous
             // `iter_u64_digits().nth(limb)` was O(limb) — iterated digits
             // from the start every call. Showed up at ~3% self-time on
             // Reg/0024 from the BitCircuit interpreter's per-bit input reads.
-            Value::Big { raw, .. } => raw.as_ref().bit(bit as u64),
+            BitVec::Big { raw, .. } => raw.as_ref().bit(bit as u64),
         }
     }
 
@@ -106,24 +106,24 @@ impl Value {
             return Self::from_u64(self.bit(lo as usize) as u64, 1);
         }
         match self {
-            Value::Small { raw, .. } => Self::extract_small(*raw, width, lo),
-            Value::Big { raw, .. } => Self::extract_big(raw.as_ref(), width, lo),
+            BitVec::Small { raw, .. } => Self::extract_small(*raw, width, lo),
+            BitVec::Big { raw, .. } => Self::extract_big(raw.as_ref(), width, lo),
         }
     }
 
     pub fn concat(&self, rhs: &Self) -> Self {
         match (self, rhs) {
             (
-                Value::Small {
+                BitVec::Small {
                     bits: lhs_bits,
                     raw: lhs,
                 },
-                Value::Small {
+                BitVec::Small {
                     bits: rhs_bits,
                     raw: rhs,
                 },
             ) if lhs_bits + rhs_bits <= 64 => {
-                Value::from_u64((lhs << rhs_bits) | rhs, lhs_bits + rhs_bits)
+                BitVec::from_u64((lhs << rhs_bits) | rhs, lhs_bits + rhs_bits)
             }
             _ => Self::concat_big(self, rhs),
         }
@@ -133,7 +133,7 @@ impl Value {
         let mut words = Vec::with_capacity(bits.len().div_ceil(64));
         let mut current = 0u64;
         match self {
-            Value::Small { raw, bits: width } => {
+            BitVec::Small { raw, bits: width } => {
                 for (idx, bit) in bits.iter().enumerate() {
                     if *bit < *width && (((*raw >> *bit) & 1) == 1) {
                         current |= 1u64 << (idx % 64);
@@ -144,7 +144,7 @@ impl Value {
                     }
                 }
             }
-            Value::Big { raw, bits: width } => {
+            BitVec::Big { raw, bits: width } => {
                 let digits = raw.as_ref().to_u64_digits();
                 for (idx, bit) in bits.iter().enumerate() {
                     if *bit < *width {
@@ -180,8 +180,8 @@ impl Value {
         }
         let hex_len = bits.div_ceil(4).max(1);
         let v = match self {
-            Value::Small { raw, .. } => format!("{:x}", raw),
-            Value::Big { raw, .. } => format!("{:x}", raw.as_ref()),
+            BitVec::Small { raw, .. } => format!("{:x}", raw),
+            BitVec::Big { raw, .. } => format!("{:x}", raw.as_ref()),
         };
         let padded = if v.len() >= hex_len {
             v
@@ -399,13 +399,13 @@ impl Value {
 
     pub fn ule(&self, other: &Self) -> bool {
         match (self, other) {
-            (Value::Small { raw: a, .. }, Value::Small { raw: b, .. }) => a <= b,
+            (BitVec::Small { raw: a, .. }, BitVec::Small { raw: b, .. }) => a <= b,
             _ => self.to_biguint() <= other.to_biguint(),
         }
     }
     pub fn ult(&self, other: &Self) -> bool {
         match (self, other) {
-            (Value::Small { raw: a, .. }, Value::Small { raw: b, .. }) => a < b,
+            (BitVec::Small { raw: a, .. }, BitVec::Small { raw: b, .. }) => a < b,
             _ => self.to_biguint() < other.to_biguint(),
         }
     }
@@ -439,22 +439,22 @@ impl Value {
         let mut raw = lhs.to_biguint();
         raw <<= rhs_bits;
         match rhs {
-            Value::Small { raw: rhs_raw, .. } => {
+            BitVec::Small { raw: rhs_raw, .. } => {
                 if *rhs_raw != 0 {
                     raw |= BigUint::from(*rhs_raw);
                 }
             }
-            Value::Big { raw: rhs_raw, .. } => {
+            BitVec::Big { raw: rhs_raw, .. } => {
                 raw |= rhs_raw.as_ref();
             }
         }
         if total_bits <= 64 {
-            Value::Small {
+            BitVec::Small {
                 bits: total_bits,
                 raw: raw.to_u64().unwrap_or(0) & mask_u64(total_bits),
             }
         } else {
-            Value::Big {
+            BitVec::Big {
                 bits: total_bits,
                 raw: Arc::new(raw),
             }
@@ -462,16 +462,16 @@ impl Value {
     }
 }
 
-impl fmt::Display for Value {
+impl fmt::Display for BitVec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.to_smt_hex())
     }
 }
 
-/// View of a `Value` interpreted as a SyGuS Bool under the internal
+/// View of a `BitVec` interpreted as a SyGuS Bool under the internal
 /// negative-logic convention. Holds when the underlying value is zero.
 #[derive(Clone, Copy)]
-pub struct BoolValue<'a>(&'a Value);
+pub struct BoolValue<'a>(&'a BitVec);
 
 impl<'a> BoolValue<'a> {
     /// `true` iff the wrapped value encodes SMT-true (bit pattern all-zero).

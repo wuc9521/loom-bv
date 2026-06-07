@@ -165,7 +165,7 @@ def expr(mname, name, rec_type, l = [], owned = False):
     expr.add('Var', ['usize'], ['debug(fmt = "v{:?}", _0)', 'display(fmt = "v{:?}", _0)'])
     expr.add(
         'Const',
-        ['crate::enumerate::value::Value'],
+        ['crate::enumerate::value::BitVec'],
         ['debug(fmt = "{:?}", _0)', 'display(fmt = "{}", _0)'],
     )
     

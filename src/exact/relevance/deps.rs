@@ -251,33 +251,7 @@ fn compute_generic_dep_bit(
                     )?);
                     Some(dep)
                 }
-                PlanInstr::Fop0Dyn { fid } => get_deffun_dep_bit(*fid, bit, cache),
-                PlanInstr::Fop1Dyn { fid, arg } => {
-                    let outer = get_deffun_dep_bit(*fid, bit, cache)?;
-                    let mut combined = BitDep::empty(arg_bits);
-                    for inner_bit in outer.per_arg[0].iter_ones() {
-                        combined.union_inplace(&slot_dep(
-                            *arg, inner_bit, slot_bits, instrs, arg_bits, cache, memo,
-                        )?);
-                    }
-                    Some(combined)
-                }
-                PlanInstr::Fop2Dyn { fid, lhs, rhs } => {
-                    let outer = get_deffun_dep_bit(*fid, bit, cache)?;
-                    let mut combined = BitDep::empty(arg_bits);
-                    for inner_bit in outer.per_arg[0].iter_ones() {
-                        combined.union_inplace(&slot_dep(
-                            *lhs, inner_bit, slot_bits, instrs, arg_bits, cache, memo,
-                        )?);
-                    }
-                    for inner_bit in outer.per_arg[1].iter_ones() {
-                        combined.union_inplace(&slot_dep(
-                            *rhs, inner_bit, slot_bits, instrs, arg_bits, cache, memo,
-                        )?);
-                    }
-                    Some(combined)
-                }
-                PlanInstr::FopDyn { fid, args } => {
+                PlanInstr::Func { fid, args } => {
                     let outer = get_deffun_dep_bit(*fid, bit, cache)?;
                     let mut combined = BitDep::empty(arg_bits);
                     for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
@@ -392,22 +366,12 @@ fn compute_generic_dep_bits(
                 enqueue_slot(*then_slot, &delta, &mut demanded_by_slot, &mut stack);
                 enqueue_slot(*else_slot, &delta, &mut demanded_by_slot, &mut stack);
             }
-            PlanInstr::Fop0Dyn { fid } => {
-                let _ = get_deffun_dep_bits(*fid, &delta, cache)?;
-            }
-            PlanInstr::Fop1Dyn { fid, arg } => {
-                let outer = get_deffun_dep_bits(*fid, &delta, cache)?;
-                enqueue_slot(*arg, &outer.per_arg[0], &mut demanded_by_slot, &mut stack);
-            }
-            PlanInstr::Fop2Dyn { fid, lhs, rhs } => {
-                let outer = get_deffun_dep_bits(*fid, &delta, cache)?;
-                enqueue_slot(*lhs, &outer.per_arg[0], &mut demanded_by_slot, &mut stack);
-                enqueue_slot(*rhs, &outer.per_arg[1], &mut demanded_by_slot, &mut stack);
-            }
-            PlanInstr::FopDyn { fid, args } => {
+            PlanInstr::Func { fid, args } => {
                 let outer = get_deffun_dep_bits(*fid, &delta, cache)?;
                 for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
-                    enqueue_slot(args[arg_idx], bits, &mut demanded_by_slot, &mut stack);
+                    if let Some(&slot) = args.get(arg_idx) {
+                        enqueue_slot(slot, bits, &mut demanded_by_slot, &mut stack);
+                    }
                 }
             }
             PlanInstr::Neg { src } => {

@@ -5,7 +5,7 @@ use tree_sitter::{Language, Node, Parser};
 
 use crate::{
     all_ops,
-    enumerate::{expr::OwnedExpr, value::Value},
+    enumerate::{expr::OwnedExpr, value::BitVec},
     parse::literals::u64_constant_python,
 };
 
@@ -163,7 +163,7 @@ impl<'a> Env<'a> {
             }
             "integer" => {
                 let value = u64_constant_python(self.text(node)).ok_or(ParsingError)?;
-                Ok(OwnedExpr::Const(Value::from_u64(value, 64)))
+                Ok(OwnedExpr::Const(BitVec::from_u64(value, 64)))
             }
             "arrow_bracket" => {
                 let v = OwnedExpr::Var(self.var, 64);

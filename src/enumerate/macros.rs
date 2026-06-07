@@ -77,7 +77,7 @@ macro_rules! enum_expr {
             Var(usize, usize),
             #[debug(fmt = "{:?}", _0)]
             #[display(fmt = "{}", _0)]
-            Const(crate::enumerate::value::Value),
+            Const(crate::enumerate::value::BitVec),
         }
     };
 }
@@ -164,7 +164,7 @@ macro_rules! enum_ownedexpr {
             Var(usize, usize),
             #[debug(fmt = "{:?}", _0)]
             #[display(fmt = "{}", _0)]
-            Const(crate::enumerate::value::Value),
+            Const(crate::enumerate::value::BitVec),
         }
     };
 }

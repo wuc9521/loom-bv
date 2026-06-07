@@ -9,7 +9,7 @@ use crate::{
     enumerate::{
         expr::{DivideByZero, OwnedExpr},
         op,
-        value::Value,
+        value::BitVec,
     },
     debg,
 };
@@ -66,9 +66,9 @@ impl DefineFun {
     pub fn eval(
         &self,
         env: &Environ,
-        args: &[Value],
-        closure: Option<(&str, &Value)>,
-    ) -> Result<Value, DivideByZero> {
+        args: &[BitVec],
+        closure: Option<(&str, &BitVec)>,
+    ) -> Result<BitVec, DivideByZero> {
         match closure {
             Some((closure_name, closure_value)) if !self.closure_args.is_empty() => {
                 // Matches the layout established at parse time: real args
@@ -82,7 +82,7 @@ impl DefineFun {
                     if *name == closure_name {
                         extended.push(closure_value.clone());
                     } else {
-                        extended.push(Value::from_u64(0, *bits));
+                        extended.push(BitVec::from_u64(0, *bits));
                     }
                 }
                 self.plan.eval(env, &extended)
@@ -98,7 +98,7 @@ impl DefineFun {
     /// Identity uses `self as *const _`: within one Environ the
     /// `DefineFun` slots never move, so the pointer is a stable per-fun
     /// id for the lifetime of a search.
-    pub fn hash_call(&self, args: &[Value], closure: Option<(&str, &Value)>) -> u64 {
+    pub fn hash_call(&self, args: &[BitVec], closure: Option<(&str, &BitVec)>) -> u64 {
         let mut h = FxHasher::default();
         h.write_usize(self as *const _ as usize);
         h.write_usize(args.len());
@@ -110,7 +110,7 @@ impl DefineFun {
                 if *name == closure_name {
                     closure_value.hash(&mut h);
                 } else {
-                    Value::from_u64(0, *bits).hash(&mut h);
+                    BitVec::from_u64(0, *bits).hash(&mut h);
                 }
             }
         }
@@ -163,7 +163,7 @@ pub enum BoolAtom {
 
 #[derive(Clone, Debug)]
 pub enum PlanInstr {
-    Const(Value),
+    Const(BitVec),
     Concat { lhs: usize, rhs: usize },
     Extract { src: usize, hi: u64, lo: u64 },
     Not { src: usize },
@@ -186,14 +186,11 @@ pub enum PlanInstr {
     BVsle { lhs: usize, rhs: usize },
     BVslt { lhs: usize, rhs: usize },
     Ite { cond: usize, then_slot: usize, else_slot: usize },
-    Fop0Dyn { fid: usize },
-    Fop1Dyn { fid: usize, arg: usize },
-    Fop2Dyn { fid: usize, lhs: usize, rhs: usize },
-    FopDyn { fid: usize, args: Vec<usize> },
+    Func { fid: usize, args: Vec<usize> },
 }
 
 impl DefineFunPlan {
-    fn eval(&self, env: &Environ, args: &[Value]) -> Result<Value, DivideByZero> {
+    fn eval(&self, env: &Environ, args: &[BitVec]) -> Result<BitVec, DivideByZero> {
         match self {
             DefineFunPlan::Generic {
                 root,
@@ -266,18 +263,10 @@ impl DefineFunPlan {
                             slots[*then_slot].clone(),
                             slots[*else_slot].clone(),
                         ),
-                        PlanInstr::Fop0Dyn { fid } => env.eval_defined(*fid, &[])?,
-                        PlanInstr::Fop1Dyn { fid, arg } => {
-                            env.eval_defined(*fid, &[slots[*arg].clone()])?
-                        }
-                        PlanInstr::Fop2Dyn { fid, lhs, rhs } => env.eval_defined(
-                            *fid,
-                            &[slots[*lhs].clone(), slots[*rhs].clone()],
-                        )?,
-                        PlanInstr::FopDyn { fid, args } => {
-                            let dyn_args =
+                        PlanInstr::Func { fid, args } => {
+                            let func_args =
                                 args.iter().map(|slot| slots[*slot].clone()).collect::<Vec<_>>();
-                            env.eval_defined(*fid, &dyn_args)?
+                            env.eval_defined(*fid, &func_args)?
                         }
                     };
                     slots.push(value);
@@ -405,7 +394,7 @@ impl BitCircuitPlan {
 }
 
 impl BitCircuitPlan {
-    pub fn eval(&self, args: &[Value]) -> Result<Value, DivideByZero> {
+    pub fn eval(&self, args: &[BitVec]) -> Result<BitVec, DivideByZero> {
         let mut temps = Vec::with_capacity(self.bindings.len());
         for binding in &self.bindings {
             let value = binding.eval(args, &temps);
@@ -425,7 +414,7 @@ impl BitCircuitPlan {
     /// Evaluate the circuit for up to 64 input sets simultaneously.
     /// `args_batch[candidate][arg]` gives the Value for that candidate's argument.
     /// Returns one Value per candidate (up to `count`).
-    pub fn eval_batch(&self, args_batch: &[&[Value]], count: usize) -> Vec<Value> {
+    pub fn eval_batch(&self, args_batch: &[&[BitVec]], count: usize) -> Vec<BitVec> {
         debug_assert!(count <= 64 && count > 0);
         let nargs = args_batch[0].len();
         let stride = args_batch[0].iter().map(|v| v.bits()).max().unwrap_or(0);
@@ -554,7 +543,7 @@ impl BoolNode {
 }
 
 impl BoolNode {
-    fn eval(&self, args: &[Value], temps: &[bool]) -> bool {
+    fn eval(&self, args: &[BitVec], temps: &[bool]) -> bool {
         match self {
             BoolNode::Atom(atom) => atom.eval(args, temps),
             BoolNode::Not(atom) => !atom.eval(args, temps),
@@ -573,7 +562,7 @@ impl BoolNode {
 }
 
 impl BoolAtom {
-    fn eval(&self, args: &[Value], temps: &[bool]) -> bool {
+    fn eval(&self, args: &[BitVec], temps: &[bool]) -> bool {
         match self {
             BoolAtom::Const(value) => *value,
             BoolAtom::InputBit { arg, bit } => args[*arg].bit(*bit),
@@ -724,16 +713,16 @@ impl BoolNode {
     }
 }
 
-fn value_from_words(words: Vec<u64>, bits: usize) -> Value {
+fn value_from_words(words: Vec<u64>, bits: usize) -> BitVec {
     if bits <= 64 {
-        Value::from_u64(words.first().copied().unwrap_or(0), bits)
+        BitVec::from_u64(words.first().copied().unwrap_or(0), bits)
     } else {
         let mut raw = num_bigint::BigUint::from(0u8);
         for word in words.iter().enumerate().rev() {
             raw <<= 64;
             raw |= num_bigint::BigUint::from(word.1.to_owned());
         }
-        Value::from_biguint(raw, bits)
+        BitVec::from_biguint(raw, bits)
     }
 }
 
@@ -1024,39 +1013,13 @@ fn compile_generic(expr: &OwnedExpr, arg_bits: &[usize], _ret_bits: usize) -> De
                     .iter()
                     .map(|arg| compile_expr(arg, env_slots, next_slot, slot_bits, instrs))
                     .collect();
-                if compiled_args.is_empty() {
-                    push(
-                        PlanInstr::Fop0Dyn { fid: *fid },
-                        expr.width(),
-                        next_slot,
-                        slot_bits,
-                        instrs,
-                    )
-                } else if compiled_args.len() == 1 {
-                    push(
-                        PlanInstr::Fop1Dyn { fid: *fid, arg: compiled_args[0] },
-                        expr.width(),
-                        next_slot,
-                        slot_bits,
-                        instrs,
-                    )
-                } else if compiled_args.len() == 2 {
-                    push(
-                        PlanInstr::Fop2Dyn { fid: *fid, lhs: compiled_args[0], rhs: compiled_args[1] },
-                        expr.width(),
-                        next_slot,
-                        slot_bits,
-                        instrs,
-                    )
-                } else {
-                    push(
-                        PlanInstr::FopDyn { fid: *fid, args: compiled_args },
-                        expr.width(),
-                        next_slot,
-                        slot_bits,
-                        instrs,
-                    )
-                }
+                push(
+                    PlanInstr::Func { fid: *fid, args: compiled_args },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
         }
     }
@@ -1208,8 +1171,8 @@ impl Environ {
     pub fn eval_defined(
         &self,
         id: usize,
-        args: &[Value],
-    ) -> Result<Value, DivideByZero> {
+        args: &[BitVec],
+    ) -> Result<BitVec, DivideByZero> {
         self.plan(id).eval(self, args)
     }
 }
@@ -1227,7 +1190,7 @@ lazy_static::lazy_static!(
 mod tests {
     use super::*;
 
-    fn make_random_value(bits: usize, seed: u64) -> Value {
+    fn make_random_value(bits: usize, seed: u64) -> BitVec {
         let mut rng = seed;
         let num_words = bits.div_ceil(64);
         let mut words = vec![0u64; num_words];
@@ -1252,7 +1215,7 @@ mod tests {
         let max_bits = plan.input_slots.iter().map(|(_, b)| b + 1).max().unwrap_or(1);
 
         for trial in 0..num_trials {
-            let args: Vec<Value> = (0..nargs)
+            let args: Vec<BitVec> = (0..nargs)
                 .map(|a| make_random_value(max_bits, (trial as u64 + 1) * 1000 + a as u64))
                 .collect();
 
@@ -1280,14 +1243,14 @@ mod tests {
         let max_bits = plan.input_slots.iter().map(|(_, b)| b + 1).max().unwrap_or(1);
 
         let batch_size = 64.min(num_trials);
-        let args_batch: Vec<Vec<Value>> = (0..batch_size)
+        let args_batch: Vec<Vec<BitVec>> = (0..batch_size)
             .map(|i| {
                 (0..nargs)
                     .map(|a| make_random_value(max_bits, (i as u64 + 1) * 7919 + a as u64))
                     .collect()
             })
             .collect();
-        let refs: Vec<&[Value]> = args_batch.iter().map(|v| v.as_slice()).collect();
+        let refs: Vec<&[BitVec]> = args_batch.iter().map(|v| v.as_slice()).collect();
 
         let full_results = plan.eval_batch(&refs, batch_size);
         let pruned_results = pruned.eval_batch(&refs, batch_size);

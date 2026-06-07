@@ -11,7 +11,7 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::enumerate::{expr::OwnedExpr, value::Value};
+use crate::enumerate::{expr::OwnedExpr, value::BitVec};
 use crate::exact::relevance;
 use crate::exact::types::{Grammar, ExactRule, Node, NodeId};
 use crate::{debg, info};
@@ -37,14 +37,14 @@ use crate::parse::deffun;
 
 /// Cache state for `eval_defined_with_closure`. The key is a `u64` hash of
 /// `(fid, nargs, args..., closure args...)` computed inline at the call
-/// site. Storing the structural key (`Box<[Value]>`) cost one heap
+/// site. Storing the structural key (`Box<[BitVec]>`) cost one heap
 /// allocation per probe — significant on a 2M+ call hot path even at 92%
 /// hit rate. Collision risk for a u64 key with ~200k entries is on the
 /// order of 10⁻⁹ (birthday paradox), well below the threshold where a
 /// real synthesizer could see a wrong-answer due to it.
 #[derive(Default)]
 struct EvalCacheState {
-    map: FxHashMap<u64, Value>,
+    map: FxHashMap<u64, BitVec>,
     hits: u64,
     misses: u64,
     enabled: bool,
@@ -97,9 +97,9 @@ impl EvalCache {
 #[inline]
 pub fn eval_defined_with_closure(
     fid: usize,
-    args: &[Value],
-    closure: Option<(&str, &Value)>,
-) -> Result<Value, ()> {
+    args: &[BitVec],
+    closure: Option<(&str, &BitVec)>,
+) -> Result<BitVec, ()> {
     let f = deffun::ENV.deffun(fid);
 
     STATE.with(|c| {
@@ -192,9 +192,9 @@ impl<'a> Grammar<'a> {
         &self,
         node_id: NodeId,
         nodes: &[Node],
-        aux: &Value,
+        aux: &BitVec,
         closure_name: &str,
-    ) -> Option<Value> {
+    ) -> Option<BitVec> {
         let node = &nodes[node_id];
         match &self.nts[node.nt_idx].1[node.rule_idx] {
             ExactRule::Alias(_) => self.eval_node_at(node.children[0], nodes, aux, closure_name),
