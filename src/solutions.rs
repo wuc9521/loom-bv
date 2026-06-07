@@ -2,6 +2,7 @@ use std::{sync::Arc, thread, time};
 
 use bumpalo::Bump;
 use itertools::Itertools;
+use rand::{seq::IteratorRandom, Rng};
 use sdset::{duo::OpBuilder, SetBuf, SetOperation};
 use spin::mutex::Mutex;
 
@@ -9,6 +10,7 @@ use crate::tree_learning::bits::BoxSliceExt;
 use crate::{
     enumerate::{
         expr::{Expr, OwnedExpr},
+        Bv,
     },
     exact::Constraint,
     info,
@@ -140,6 +142,23 @@ impl<'a> Solutions<'a> {
             self.tree_learning()
         } else {
             false
+        }
+    }
+    pub fn sample_unsolved<const N: usize, R: Rng>(&self, rng: &mut R) -> (Vec<Bv<N>>, Bv<N>) {
+        let mut rand_index = self.unsolved.iter().cloned().choose_multiple(rng, N);
+        rand_index.resize(N, 0);
+        self.pbecstr.bv_from_slice(&rand_index.try_into().unwrap())
+    }
+    pub fn sample_all<const N: usize, R: Rng>(&self, rng: &mut R) -> (Vec<Bv<N>>, Bv<N>) {
+        let mut rand_index = (0..self.pbecstr.len()).into_iter().choose_multiple(rng, N);
+        rand_index.resize(N, 0);
+        self.pbecstr.bv_from_slice(&rand_index.try_into().unwrap())
+    }
+    pub fn sample<const N: usize, R: Rng>(&self, rng: &mut R) -> (Vec<Bv<N>>, Bv<N>) {
+        if self.sample_all {
+            self.sample_all(rng)
+        } else {
+            self.sample_unsolved(rng)
         }
     }
     pub fn remaining(&self) -> usize {

@@ -156,7 +156,7 @@ impl SearchConfig {
         }
         let cond = Arc::new(Mutex::new(Vec::new()));
         if self.limited_ite {
-            self.cond_search.count_limit = 10000;
+            self.cond_search.filter.count_limit = 10000;
         }
         let mut rng = self.rng();
         let cond_worker = JoinOnDrop::new(thread::spawn({
@@ -235,7 +235,7 @@ impl SearchConfig {
 
         while exprs.remaining() > 0 {
             if !self.expr_search.search(&mut exprs, problem, &mut rng)? {
-                self.expr_search.count_limit *= self.ar_ratio;
+                self.expr_search.filter.count_limit_solved *= self.ar_ratio;
             }
         }
         if exprs.solved.last().unwrap().1.len() == pbecstr.len() {
@@ -260,10 +260,10 @@ impl SearchConfig {
         if !limited_ite {
             info!("Improving Expressions.");
             self.improve_search.cover_limit = pbecstr.len() / ((self.ite_tree_limit + 1) / 2 - 1);
-            self.improve_search.count_limit +=
-                self.expr_search.count_limit;
+            self.improve_search.filter.count_limit_solved +=
+                self.expr_search.filter.count_limit_solved;
             while !self.improve_search.search(&mut exprs, problem, &mut rng)? {
-                self.improve_search.count_limit *= self.ar_ratio;
+                self.improve_search.filter.count_limit_solved *= self.ar_ratio;
             }
         }
         if let Some(best) = exprs.best_solution() {

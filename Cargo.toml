@@ -35,6 +35,7 @@ thiserror = "1.0.38"
 tokio = {version = "1", features = ["macros", "rt-multi-thread"], optional = true}
 tree-sitter = { version = "0.20.10", optional = true }
 you-can = "0.0.14"
+iter_fixed = "0.3.1"
 lazy_static = "1.5.0"
 openai = { version = "1.0.0-alpha.13", optional = true }
 spin = "0.9.8"

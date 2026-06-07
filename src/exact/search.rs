@@ -50,11 +50,10 @@ pub fn enumerate_start<'a>(
     spec: &Constraint,
     min: bool,
     max_size: usize,
-    max_candidates: usize,
     mut callback: impl FnMut(&OwnedExpr) -> Result<(), ()>,
 ) -> parse::Result<()> {
     let mut searcher = Searcher::new(grammar, spec, min, None);
-    searcher.run_with_callback(max_size, max_candidates, &mut callback)
+    searcher.run_with_callback(max_size, &mut callback)
 }
 
 struct Searcher<'a, 'g> {
@@ -210,11 +209,9 @@ impl<'a, 'g> Searcher<'a, 'g> {
     fn run_with_callback(
         &mut self,
         max_size: usize,
-        max_candidates: usize,
         callback: &mut impl FnMut(&OwnedExpr) -> Result<(), ()>,
     ) -> parse::Result<()> {
         log_grammar_summary(&self.grammar);
-        let mut total_candidates = 0usize;
         for size in 1..=max_size {
             for buckets in &mut self.by_size {
                 buckets.push(Vec::new());
@@ -253,14 +250,6 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 if !changed {
                     break;
                 }
-            }
-            // Count candidates added at this size level
-            let size_total: usize = self.by_size.iter()
-                .map(|buckets| buckets.get(size).map(|b| b.len()).unwrap_or(0))
-                .sum();
-            total_candidates += size_total;
-            if total_candidates >= max_candidates {
-                return Ok(());
             }
             // Yield all novel start-NT candidates added at this size level
             let start_nt = self.grammar.start;

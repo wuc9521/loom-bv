@@ -11,6 +11,7 @@ use crate::{
     enumerate::{
         expr::{Expr, OwnedExpr},
         value::BitVec,
+        Bv,
     },
     exact::{
         relevance::{bits, Relevance},
@@ -280,6 +281,17 @@ impl Constraint {
         self.examples[i].args.iter().cloned().collect()
     }
 
+    pub fn bv_from_slice<const N: usize>(&self, iter: &[usize; N]) -> (Vec<Bv<N>>, Bv<N>) {
+        let inputs: Vec<Bv<N>> = (0..self.args)
+            .map(|arg_idx| {
+                Bv(iter
+                    .map(|i| self.examples[i].args[arg_idx].as_u64_lossy())
+                    .into())
+            })
+            .collect();
+        let output = Bv(iter.map(|i| self.examples[i].output.as_u64_lossy()).into());
+        (inputs, output)
+    }
 
     pub fn test(&self, expr: &Expr) -> SetBuf<usize> {
         SetBuf::new_unchecked(
