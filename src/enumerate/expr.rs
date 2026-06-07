@@ -721,9 +721,23 @@ impl OwnedExpr {
             );
         }
         if let OwnedExpr::Ite(a, b, c) = self {
+            let cond_str = a.to_sygus_with_env(names);
+            let cond_is_bool = matches!(
+                a.as_ref(),
+                OwnedExpr::BVule(_, _)
+                    | OwnedExpr::BVult(_, _)
+                    | OwnedExpr::BVsle(_, _)
+                    | OwnedExpr::BVslt(_, _)
+            );
+            let cond_fmt = if cond_is_bool {
+                cond_str
+            } else {
+                let zero = "0".repeat(a.width().div_ceil(4).max(1));
+                format!("(= {} #x{})", cond_str, zero)
+            };
             return format!(
-                "(ite (= {} #x0000000000000000) {} {})",
-                a.to_sygus_with_env(names),
+                "(ite {} {} {})",
+                cond_fmt,
                 b.to_sygus_with_env(names),
                 c.to_sygus_with_env(names)
             );

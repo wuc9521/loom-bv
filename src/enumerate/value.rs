@@ -173,6 +173,11 @@ impl Value {
 
     pub fn to_smt_hex(&self) -> String {
         let bits = self.bits();
+        if bits <= 3 {
+            let raw = self.as_u64_lossy();
+            let bin: String = (0..bits).rev().map(|i| if (raw >> i) & 1 == 1 { '1' } else { '0' }).collect();
+            return format!("#b{}", bin);
+        }
         let hex_len = bits.div_ceil(4).max(1);
         let v = match self {
             Value::Small { raw, .. } => format!("{:x}", raw),

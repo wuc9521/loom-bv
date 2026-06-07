@@ -43,7 +43,14 @@ impl CegisState {
                 .declare_const(VAR_NAMES[i], &format!("(_ BitVec {})", self.bits))
                 .map_err(|e| format!("failed to declare verifier var {}: {e}", VAR_NAMES[i]))?;
         }
-        let s = format!("(not (= {} {}))", self.constraint.ref_impl, expr);
+        let arg_names: Vec<&str> = VAR_NAMES[..self.constraint.args].to_vec();
+        let refimpl_smt = self.constraint.ref_impl.to_sygus(&arg_names);
+        let expr_smt = expr.to_sygus(&arg_names);
+        let s = if self.bits == 1 {
+            format!("(not (= {} (= {} #b0)))", refimpl_smt, expr_smt)
+        } else {
+            format!("(not (= {} {}))", refimpl_smt, expr_smt)
+        };
         solver
             .assert(s)
             .map_err(|e| format!("failed to assert verifier constraint: {e}"))?;
