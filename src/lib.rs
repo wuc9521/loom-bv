@@ -109,42 +109,35 @@ fn solve_file_inner(
     let pbecstr =
         Constraint::parse_pbe_from_view(problem.name, problem.args.len(), problem.bits, &view)?;
     if let Some(spec) = exact::Constraint::from_file(file, &problem)? {
-        // Non-nullary specs with no structural constraints route through the
-        // sample-and-learn engine (better for problems with many examples and
-        // ITE decompositions). Nullary / structural specs use the exact
-        // bottom-up engine.
         let use_sampling = spec.structural.is_empty()
             && spec.examples.first().map_or(false, |e| !e.args.is_empty())
             && !spec.examples.is_empty();
-        if use_sampling {
+        let defaults = if use_sampling {
+            debg!("sampling search: {} examples, {} bits", spec.len(), spec.bits);
+            SearchConfig::default_pbe()
+        } else {
             debg!(
-                "sampling search: {} examples, {} bits",
-                spec.len(),
-                spec.bits
+                "exact search: {} (bits={}, examples={}, cmds={})",
+                problem.name, problem.bits, spec.num_examples(), file.cmds.len()
             );
-            let fig = Figment::new().merge(Serialized::defaults(SearchConfig::default_pbe()));
-            let fig = if let Some(path) = config_path {
-                fig.merge(Toml::file(path))
-            } else {
-                fig
-            };
-            let mut config: SearchConfig = fig.extract()?;
+            SearchConfig::default_exact()
+        };
+        let fig = Figment::new().merge(Serialized::defaults(defaults));
+        let fig = if let Some(path) = config_path {
+            fig.merge(Toml::file(path))
+        } else {
+            fig
+        };
+        let mut config: SearchConfig = fig.extract()?;
+        config.min = min;
+        if use_sampling {
             config.is_pbe = true;
-            let result = config.search(
-                &problem,
-                &spec,
-                Constraint::empty(problem.args.len(), problem.bits),
-            )?;
-            return Ok(problem.format_solution(&result));
         }
-        debg!(
-            "exact search: {} (bits={}, examples={}, cmds={})",
-            problem.name,
-            problem.bits,
-            spec.num_examples(),
-            file.cmds.len()
-        );
-        let result = spec.search(&problem, min, None)?;
+        let result = config.search(
+            &problem,
+            &spec,
+            Constraint::empty(problem.args.len(), problem.bits),
+        )?;
         return Ok(problem.format_solution(&result));
     }
     if pbecstr.len() > 0 {
@@ -156,6 +149,8 @@ fn solve_file_inner(
         };
         let mut config: SearchConfig = fig.extract()?;
         config.is_pbe = true;
+        config.min = min;
+        config.min = min;
         let result = config.search(
             &problem,
             &pbecstr,

@@ -53,7 +53,13 @@ pub struct SearchConfig {
     pub improve_search: SampleConfig,
     pub is_pbe: bool,
     pub seed: usize,
+    #[serde(default = "default_true")]
+    pub enable_sampling: bool,
+    #[serde(default = "default_true")]
+    pub min: bool,
 }
+
+fn default_true() -> bool { true }
 
 impl SearchConfig {
     pub fn default_pbe() -> Self {
@@ -71,6 +77,7 @@ impl SearchConfig {
             gpt_version: "gpt-4o".into(),
             is_pbe: false,
             seed: usize::MAX,
+            enable_sampling: true, min: true,
         }
     }
     pub fn default_refimpl() -> Self {
@@ -88,6 +95,7 @@ impl SearchConfig {
             gpt_version: "gpt-4o".into(),
             is_pbe: false,
             seed: usize::MAX,
+            enable_sampling: true, min: true,
         }
     }
     pub fn default_refimpl_classic() -> Self {
@@ -105,6 +113,25 @@ impl SearchConfig {
             gpt_version: "gpt-4o".into(),
             is_pbe: false,
             seed: usize::MAX,
+            enable_sampling: true, min: true,
+        }
+    }
+    pub fn default_exact() -> Self {
+        Self {
+            random_example: 0,
+            additional_check: 0,
+            ar_ratio: 2,
+            ite_tree_limit: 0,
+            smt_solver: "bitwuzla".into(),
+            limited_ite: false,
+            chatgpt: false,
+            cond_search: SampleConfig::cond_default(),
+            expr_search: SampleConfig::expr_default(),
+            improve_search: SampleConfig::improve_default(),
+            gpt_version: "gpt-4o".into(),
+            is_pbe: false,
+            seed: usize::MAX,
+            enable_sampling: false, min: true,
         }
     }
     pub fn rng(&self) -> rand::rngs::StdRng {
@@ -120,6 +147,9 @@ impl SearchConfig {
         pbecstr: &Constraint,
         additional_example: Constraint,
     ) -> parse::Result<OwnedExpr> {
+        if !self.enable_sampling {
+            return crate::exact::search::search_problem(problem, pbecstr, self.min, None);
+        }
         let mut limited_ite = self.limited_ite;
         if self.ite_tree_limit == 1 || pbecstr.len() <= 1 {
             limited_ite = true;
