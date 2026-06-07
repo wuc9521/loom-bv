@@ -109,13 +109,16 @@ fn solve_file_inner(
     let pbecstr =
         Constraint::parse_pbe_from_view(problem.name, problem.args.len(), problem.bits, &view)?;
     if let Some(spec) = exact::Constraint::from_file(file, &problem)? {
-        if env::var("DRYADSYNTH_USE_PBE").is_ok()
-            && spec.structural.is_empty()
-            && spec.examples.first().map_or(false, |e| e.args.len() > 0)
-            && !spec.examples.is_empty()
-        {
+        // Non-nullary specs with no structural constraints route through the
+        // sample-and-learn engine (better for problems with many examples and
+        // ITE decompositions). Nullary / structural specs use the exact
+        // bottom-up engine.
+        let use_sampling = spec.structural.is_empty()
+            && spec.examples.first().map_or(false, |e| !e.args.is_empty())
+            && !spec.examples.is_empty();
+        if use_sampling {
             debg!(
-                "exact->pbe reroute: {} examples, {} bits",
+                "sampling search: {} examples, {} bits",
                 spec.len(),
                 spec.bits
             );
