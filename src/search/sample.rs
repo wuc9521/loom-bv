@@ -89,6 +89,52 @@ impl SampleConfig {
         );
         Ok(result)
     }
+
+    pub fn search_inner_exact(
+        &self,
+        sol: &mut Solutions,
+        problem: &SynthProblem<'static>,
+        rng: &mut StdRng,
+    ) -> parse::Result<bool> {
+        use crate::enumerate::grammar::Config;
+        use crate::exact::{Constraint, search::enumerate_start, types::Grammar};
+        use rand::seq::IteratorRandom;
+
+        let n = min(self.sample, sol.pbecstr.len());
+        let indices: Vec<usize> = sol.unsolved.iter().cloned().choose_multiple(rng, n);
+
+        let mut examples = Vec::with_capacity(indices.len());
+        for &i in &indices {
+            examples.push(sol.pbecstr.examples[i].clone());
+        }
+        let spec = Constraint {
+            bits: sol.pbecstr.bits,
+            args: sol.pbecstr.args,
+            examples,
+            structural: Vec::new(),
+            closure: None,
+        };
+
+        let multi = Config::from_problem(problem)?;
+        let grammar = Grammar::from_config(&multi);
+        let max_size = 7;
+
+        let mut solved = false;
+        let count_limit = self.filter.count_limit;
+        let mut count = 0usize;
+
+        enumerate_start(grammar, &spec, false, max_size, |expr| {
+            count += 1;
+            sol.add_solution_owned(expr, count);
+            if sol.unsolved.is_empty() || count >= count_limit {
+                solved = sol.unsolved.is_empty();
+                return Err(());
+            }
+            Ok(())
+        })?;
+
+        Ok(!solved)
+    }
     #[inline(always)]
     pub fn search(
         &self,
@@ -96,6 +142,9 @@ impl SampleConfig {
         problem: &SynthProblem<'static>,
         rng: &mut StdRng,
     ) -> parse::Result<bool> {
+        if std::env::var("DRYADSYNTH_EXACT_ENUM").is_ok() {
+            return self.search_inner_exact(sol, problem, rng);
+        }
         sol.set_cover_limit(if self.cover_limit == 0 {
             1
         } else {

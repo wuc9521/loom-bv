@@ -7,7 +7,7 @@ use rustc_hash::FxHashMap;
 
 use crate::enumerate::{
     expr::OwnedExpr,
-    grammar::{build_owned_application, RuleClass, TemplateExpr},
+    grammar::{RuleClass, TemplateExpr},
     value::BitVec,
 };
 
@@ -47,9 +47,6 @@ pub struct ExactEvalCache {
 }
 
 impl TemplateExpr {
-    /// Evaluate a `TemplateExpr` rule from the exact-search grammar at
-    /// concrete argument values. Caches the leaf evaluations because the
-    /// same constant leaf appears across many template instantiations.
     pub fn evaluate(
         &self,
         args: &[BitVec],
@@ -68,16 +65,11 @@ impl TemplateExpr {
                     .iter()
                     .map(|part| part.evaluate(args, cache))
                     .collect::<Result<Vec<_>, _>>()?;
-                let const_args = values.into_iter().map(OwnedExpr::Const).collect::<Vec<_>>();
-                build_owned_application(id, &const_args)
-                    .ok()
-                    .and_then(|expr| expr.eval(&[]).ok())
-                    .ok_or(())
+                eval_op_on_values(id.get_name(), &values)
             }
         }
     }
 
-    /// Evaluate a childless template with synth-fun example args.
     pub fn evaluate_with_args(
         &self,
         synth_args: &[BitVec],
@@ -102,16 +94,11 @@ impl TemplateExpr {
                     .iter()
                     .map(|part| part.evaluate_with_args(synth_args, cache))
                     .collect::<Result<Vec<_>, _>>()?;
-                let const_args = values.into_iter().map(OwnedExpr::Const).collect::<Vec<_>>();
-                build_owned_application(id, &const_args)
-                    .ok()
-                    .and_then(|expr| expr.eval(&[]).ok())
-                    .ok_or(())
+                eval_op_on_values(id.get_name(), &values)
             }
         }
     }
 
-    /// Evaluate a template with both synth-fun args and child-NT slot values.
     pub fn evaluate_with_args_and_children(
         &self,
         synth_args: &[BitVec],
@@ -137,11 +124,56 @@ impl TemplateExpr {
                     .iter()
                     .map(|part| part.evaluate_with_args_and_children(synth_args, children, cache))
                     .collect::<Result<Vec<_>, _>>()?;
-                let const_args = values.into_iter().map(OwnedExpr::Const).collect::<Vec<_>>();
-                build_owned_application(id, &const_args)
-                    .ok()
-                    .and_then(|expr| expr.eval(&[]).ok())
-                    .ok_or(())
+                eval_op_on_values(id.get_name(), &values)
+            }
+        }
+    }
+}
+
+fn eval_op_on_values(op: &str, values: &[BitVec]) -> Result<BitVec, ()> {
+    use crate::enumerate::op;
+    use crate::parse::deffun;
+    match (op, values.len()) {
+        ("bvnot" | "not", 1) => Ok(values[0].clone().bitnot()),
+        ("bvneg", 1) => Ok(values[0].clone().neg()),
+        ("bvand", 2) => Ok(values[0].clone().bitand(values[1].clone())),
+        ("bvor", 2) => Ok(values[0].clone().bitor(values[1].clone())),
+        ("bvxor", 2) | ("=", 2) => Ok(values[0].clone().bitxor(values[1].clone())),
+        ("bvadd", 2) => Ok(values[0].clone().add(values[1].clone())),
+        ("bvsub", 2) => Ok(values[0].clone().sub(values[1].clone())),
+        ("bvmul", 2) => Ok(values[0].clone().mul(values[1].clone())),
+        ("bvudiv", 2) => values[0].clone().udiv(values[1].clone()).ok_or(()),
+        ("bvurem", 2) => values[0].clone().urem(values[1].clone()).ok_or(()),
+        ("bvsdiv", 2) => values[0].clone().sdiv(values[1].clone()).ok_or(()),
+        ("bvsrem", 2) => values[0].clone().srem(values[1].clone()).ok_or(()),
+        ("bvlshr", 2) => Ok(values[0].clone().lshr(values[1].clone())),
+        ("bvashr", 2) => Ok(values[0].clone().ashr(values[1].clone())),
+        ("bvshl", 2) => Ok(values[0].clone().shl(values[1].clone())),
+        ("concat", 2) => Ok(values[0].concat(&values[1])),
+        ("bvule", 2) => Ok(op::ule(values[0].clone(), values[1].clone())),
+        ("bvult", 2) => Ok(op::ult(values[0].clone(), values[1].clone())),
+        ("bvsle", 2) => Ok(op::sle(values[0].clone(), values[1].clone())),
+        ("bvslt", 2) => Ok(op::slt(values[0].clone(), values[1].clone())),
+        ("bvugt", 2) => Ok(op::ult(values[1].clone(), values[0].clone())),
+        ("bvuge", 2) => Ok(op::ule(values[1].clone(), values[0].clone())),
+        ("bvsgt", 2) => Ok(op::slt(values[1].clone(), values[0].clone())),
+        ("bvsge", 2) => Ok(op::sle(values[1].clone(), values[0].clone())),
+        ("and", n) if n >= 2 => {
+            let mut acc = values[0].clone();
+            for a in &values[1..] { acc = acc.bitor(a.clone()); }
+            Ok(acc)
+        }
+        ("or", n) if n >= 2 => {
+            let mut acc = values[0].clone();
+            for a in &values[1..] { acc = acc.bitand(a.clone()); }
+            Ok(acc)
+        }
+        ("ite", 3) => Ok(op::ite(values[0].clone(), values[1].clone(), values[2].clone())),
+        _ => {
+            if let Some(fid) = deffun::ENV.lookup(op, values.len()) {
+                deffun::ENV.eval_defined(fid, values).map_err(|_| ())
+            } else {
+                Err(())
             }
         }
     }

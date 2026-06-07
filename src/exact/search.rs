@@ -251,6 +251,15 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     break;
                 }
             }
+            // Yield all novel start-NT candidates added at this size level
+            let start_nt = self.grammar.start;
+            for cand in &self.by_size[start_nt][size] {
+                if let Some(expr) = self.grammar.materialize_node(cand.node, &self.nodes) {
+                    if callback(&expr).is_err() {
+                        return Ok(());
+                    }
+                }
+            }
         }
         Ok(())
     }

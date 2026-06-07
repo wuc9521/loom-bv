@@ -98,6 +98,52 @@ impl<'a> Solutions<'a> {
             false
         }
     }
+    pub fn add_solution_owned(&mut self, sol: &OwnedExpr, counter: usize) -> bool {
+        let set = self.pbecstr.test_owned(sol);
+        if set.len() >= self.cover_limit || set.len() >= self.unsolved.len() {
+            if self.additional_check.len() > 0 {
+                if self.additional_check.test_owned(sol).len() < self.additional_check.len() {
+                    return false;
+                }
+            }
+            if self.check_dups {
+                for (_, existed) in self.solved.iter() {
+                    let diff: SetBuf<usize> = OpBuilder::new(set.as_set(), existed.as_set())
+                        .difference()
+                        .into_set_buf();
+                    if diff.len() == 0 {
+                        return false;
+                    }
+                }
+                self.unsolved = OpBuilder::new(self.unsolved.as_set(), set.as_set())
+                    .difference()
+                    .into_set_buf();
+                info!("Partial Solution Found: {:?}, when searching {}th expression, {} solved, {} remaining.", sol, counter, set.len(), self.remaining());
+            } else {
+                if set.len() == self.pbecstr.len() {
+                    return false;
+                }
+            }
+            if let Some(buf) = &self.cond_buffer {
+                let mut guard = buf.lock();
+                let l = &self.solved[guard.len()..];
+                let len = self.pbecstr.len();
+                let mut a = l
+                    .iter()
+                    .map(|(x, y)| (x.clone(), Bits::from_bit_iter(y.iter().cloned(), len)))
+                    .collect_vec();
+                guard.append(&mut a)
+            }
+            if set.len() == self.pbecstr.len() {
+                self.solved.push((sol.clone(), set));
+                return true;
+            }
+            self.solved.push((sol.clone(), set));
+            self.tree_learning()
+        } else {
+            false
+        }
+    }
     pub fn sample_unsolved<const N: usize, R: Rng>(&self, rng: &mut R) -> (Vec<Bv<N>>, Bv<N>) {
         let mut rand_index = self.unsolved.iter().cloned().choose_multiple(rng, N);
         rand_index.resize(N, 0);

@@ -312,7 +312,6 @@ impl Constraint {
         )
     }
 
-    #[cfg(feature = "chatgpt")]
     pub fn test_owned(&self, expr: &OwnedExpr) -> SetBuf<usize> {
         SetBuf::new_unchecked(
             (0..self.len())
