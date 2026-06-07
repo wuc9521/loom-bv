@@ -45,6 +45,17 @@ pub fn run_search<'a>(
     Searcher::new(grammar, spec, min, fixpoint).run()
 }
 
+pub fn enumerate_start<'a>(
+    grammar: Grammar<'a>,
+    spec: &Constraint,
+    min: bool,
+    max_size: usize,
+    mut callback: impl FnMut(&OwnedExpr) -> Result<(), ()>,
+) -> parse::Result<()> {
+    let mut searcher = Searcher::new(grammar, spec, min, None);
+    searcher.run_with_callback(max_size, &mut callback)
+}
+
 struct Searcher<'a, 'g> {
     grammar: Grammar<'a>,
     spec: &'g Constraint,
@@ -193,6 +204,55 @@ impl<'a, 'g> Searcher<'a, 'g> {
             DedupStats::snapshot_line(&format!("dedup@size={}", size));
         }
         unreachable!("nullary enumeration should either find a solution or diverge");
+    }
+
+    fn run_with_callback(
+        &mut self,
+        max_size: usize,
+        callback: &mut impl FnMut(&OwnedExpr) -> Result<(), ()>,
+    ) -> parse::Result<()> {
+        log_grammar_summary(&self.grammar);
+        for size in 1..=max_size {
+            for buckets in &mut self.by_size {
+                buckets.push(Vec::new());
+            }
+            for nt_idx in 0..self.grammar.nts.len() {
+                for rule_idx in 0..self.grammar.nts[nt_idx].1.len() {
+                    if let Some(expr) = self.expand_rule(nt_idx, rule_idx, size)? {
+                        if callback(&expr).is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            loop {
+                let mut changed = false;
+                for nt_idx in 0..self.grammar.nts.len() {
+                    for rule_idx in 0..self.grammar.nts[nt_idx].1.len() {
+                        let ExactRule::Alias(child_nt) =
+                            &self.grammar.nts[nt_idx].1[rule_idx]
+                        else {
+                            continue;
+                        };
+                        let child_nt = *child_nt;
+                        let before = self.by_size[nt_idx][size].len();
+                        let staged = self.by_size[child_nt][size].clone();
+                        for candidate in staged {
+                            if let Some(expr) = self.try_push_existing(nt_idx, candidate, size) {
+                                if callback(&expr).is_err() {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        changed |= self.by_size[nt_idx][size].len() > before;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn expand_rule(
