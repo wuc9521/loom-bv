@@ -20,7 +20,6 @@ use crate::{exact::Constraint, parse::SynthProblem, search::search::SearchConfig
 mod cegis;
 #[cfg(feature = "chatgpt")]
 pub mod chatgpt;
-mod deductive;
 pub mod enumerate;
 mod exact;
 pub mod hash;

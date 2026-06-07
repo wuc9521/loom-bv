@@ -5,14 +5,13 @@ use thiserror::Error;
 // use z3::{ast::{BV, Ast}, Symbol};
 
 use crate::{
-    all_ops, bv_op_of, enum_expr, enum_ownedexpr,
+    all_ops, enum_expr, enum_ownedexpr,
     enumerate::op,
     enumerate::value::BitVec,
     parse::{self, deffun, empty_span, new_custom_error_span},
     smt_name_of,
 };
 
-use super::Bv;
 
 enum_expr!();
 
@@ -122,45 +121,6 @@ impl<'a> Expr<'a> {
         all_ops!(arity nonzero);
         panic!("should not reach here. {:?}", self);
     }
-    pub fn eval_bv<const N: usize>(&self, args: &[Bv<N>]) -> Bv<N> {
-        macro_rules! foreach_op {
-            (1, $op: ident) => {
-                if let Expr::$op(e1) = self {
-                    return crate::bv_op_of![$op](e1.eval_bv(args));
-                }
-            };
-            (2, $op: ident) => {
-                if let Expr::$op(e1, e2) = self {
-                    return crate::bv_op_of![$op](e1.eval_bv(args), e2.eval_bv(args));
-                }
-            };
-        }
-        if let Expr::Var(a, _) = self {
-            return args[*a];
-        }
-        if let Expr::Concat(a, b) = self {
-            return a.eval_bv(args).concat_low(b.eval_bv(args), b.width());
-        }
-        if let Expr::Extract(a, hi, lo) = self {
-            return a.eval_bv(args).extract(*hi, *lo);
-        }
-        if let Expr::Func(id, args_expr) = self {
-            let values: Vec<_> = args_expr.iter().map(|a| a.eval_bv(args)).collect();
-            return deffun::ENV.apply(*id).eval_bv(&values);
-        }
-        if let Expr::Const(a) = self {
-            return Bv([a.as_u64_lossy(); N].into());
-        }
-        if let Expr::Ite(a, b, c) = self {
-            return op::bv::ite(a.eval_bv(args), b.eval_bv(args), c.eval_bv(args));
-        }
-        if let Expr::BVule(a, b) = self { return op::bv::ule(a.eval_bv(args), b.eval_bv(args)); }
-        if let Expr::BVult(a, b) = self { return op::bv::ult(a.eval_bv(args), b.eval_bv(args)); }
-        if let Expr::BVsle(a, b) = self { return op::bv::sle(a.eval_bv(args), b.eval_bv(args)); }
-        if let Expr::BVslt(a, b) = self { return op::bv::slt(a.eval_bv(args), b.eval_bv(args)); }
-        all_ops!(arity);
-        panic!("should not reach here. {:?}", self);
-    }
     pub fn is_shift(&self) -> bool {
         match self {
             Expr::LShr(_, _) => true,
@@ -221,118 +181,6 @@ impl<'a> Expr<'a> {
         if let OwnedExpr::BVslt(a, b) = expr { return bump.alloc(Expr::BVslt(Self::from_owned(bump, a), Self::from_owned(bump, b))); }
         all_ops!(arity);
         panic!();
-    }
-    pub fn for_each_subexpr<const N: usize>(
-        &'a self,
-        f: &mut impl FnMut(&'a Expr, Bv<N>) -> Result<(), ()>,
-        args: &[Bv<N>],
-    ) -> Result<Option<Bv<N>>, ()> {
-        macro_rules! foreach_op {
-            (1, false, $op: ident) => {
-                if let Expr::$op(e1) = self {
-                    let v1 = e1.for_each_subexpr(f, args)?;
-                    let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
-                    f(e1, v1)?;
-                    return Ok(Some(bv_op_of![$op](v1)));
-                }
-            };
-            (2, false, $op:ident) => {{
-                if let Expr::$op(e1, e2) = self {
-                    let v1 = e1.for_each_subexpr(f, args)?;
-                    let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
-                    f(e1, v1)?;
-                    let v2 = e2.for_each_subexpr(f, args)?;
-                    let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
-                    f(e2, v2)?;
-                    let v = bv_op_of![$op](v1, v2);
-                    return Ok(Some(v));
-                }
-            }};
-            (2, true, $op:ident) => {{
-                if let Expr::$op(e1, e2) = self {
-                    let v1 = e1.for_each_subexpr(f, args)?;
-                    let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
-                    f(e1, v1)?;
-                    let v2 = e2.for_each_subexpr(f, args)?;
-                    let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
-                    f(e2, v2)?;
-                    if v2.any_eq(&Bv::ZEROS) {
-                        return Ok(None);
-                    }
-                    let v = bv_op_of![$op](v1, v2);
-                    return Ok(Some(v));
-                }
-            }};
-        }
-        if let Expr::Var(i, _) = self {
-            return Ok(Some(args[*i].clone()));
-        }
-        if let Expr::Concat(a, b) = self {
-            let v1 = a.for_each_subexpr(f, args)?;
-            let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
-            f(a, v1)?;
-            let v2 = b.for_each_subexpr(f, args)?;
-            let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
-            f(b, v2)?;
-            return Ok(Some(v1.concat_low(v2, b.width())));
-        }
-        if let Expr::Extract(a, hi, lo) = self {
-            let v = a.for_each_subexpr(f, args)?;
-            let v = if let Some(v) = v { v } else { return Ok(None) };
-            f(a, v)?;
-            return Ok(Some(v.extract(*hi, *lo)));
-        }
-        if let Expr::Func(id, args_expr) = self {
-            let mut values = Vec::with_capacity(args_expr.len());
-            for e in args_expr.iter() {
-                let v = e.for_each_subexpr(f, args)?;
-                let v = if let Some(v) = v { v } else { return Ok(None) };
-                f(*e, v)?;
-                values.push(v);
-            }
-            return Ok(Some(deffun::ENV.apply(*id).eval_bv(&values)));
-        }
-        if let Expr::Const(c) = self {
-            return Ok(Some(Bv([c.as_u64_lossy(); N].into())));
-        }
-        if let Expr::BVule(e1, e2) = self {
-            let v1 = e1.for_each_subexpr(f, args)?;
-            let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
-            f(e1, v1)?;
-            let v2 = e2.for_each_subexpr(f, args)?;
-            let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
-            f(e2, v2)?;
-            return Ok(Some(op::bv::ule(v1, v2)));
-        }
-        if let Expr::BVult(e1, e2) = self {
-            let v1 = e1.for_each_subexpr(f, args)?;
-            let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
-            f(e1, v1)?;
-            let v2 = e2.for_each_subexpr(f, args)?;
-            let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
-            f(e2, v2)?;
-            return Ok(Some(op::bv::ult(v1, v2)));
-        }
-        if let Expr::BVsle(e1, e2) = self {
-            let v1 = e1.for_each_subexpr(f, args)?;
-            let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
-            f(e1, v1)?;
-            let v2 = e2.for_each_subexpr(f, args)?;
-            let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
-            f(e2, v2)?;
-            return Ok(Some(op::bv::sle(v1, v2)));
-        }
-        if let Expr::BVslt(e1, e2) = self {
-            let v1 = e1.for_each_subexpr(f, args)?;
-            let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
-            f(e1, v1)?;
-            let v2 = e2.for_each_subexpr(f, args)?;
-            let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
-            f(e2, v2)?;
-            return Ok(Some(op::bv::slt(v1, v2)));
-        }
-        all_ops!(arity nonzero);
-        return Ok(None);
     }
 }
 
@@ -794,20 +642,6 @@ impl OwnedExpr {
         }
     }
 
-    fn eval_bv_let_chain<const N: usize>(&self, args: &[Bv<N>]) -> Bv<N> {
-        let mut scoped = args.to_vec();
-        let mut current = self;
-        loop {
-            match current {
-                OwnedExpr::Let(_, value, body) => {
-                    let bound = value.eval_bv(&scoped);
-                    scoped.push(bound);
-                    current = body;
-                }
-                other => return other.eval_bv(&scoped),
-            }
-        }
-    }
 
     pub fn eval(&self, args: &[BitVec]) -> Result<BitVec, DivideByZero> {
         macro_rules! foreach_op {
@@ -861,47 +695,5 @@ impl OwnedExpr {
         if let OwnedExpr::BVslt(a, b) = self { return Ok(op::slt(a.eval(args)?, b.eval(args)?)); }
         all_ops!(arity nonzero);
         panic!("should not reach here.");
-    }
-    pub fn eval_bv<const N: usize>(&self, args: &[Bv<N>]) -> Bv<N> {
-        macro_rules! foreach_op {
-            (1, $op: ident) => {
-                if let OwnedExpr::$op(e1) = self {
-                    return crate::bv_op_of![$op](e1.eval_bv(args));
-                }
-            };
-            (2, $op: ident) => {
-                if let OwnedExpr::$op(e1, e2) = self {
-                    return crate::bv_op_of![$op](e1.eval_bv(args), e2.eval_bv(args));
-                }
-            };
-        }
-        if let OwnedExpr::Var(a, _) = self {
-            return args[*a];
-        }
-        if let OwnedExpr::Concat(a, b) = self {
-            return a.eval_bv(args).concat_low(b.eval_bv(args), b.width());
-        }
-        if let OwnedExpr::Extract(a, hi, lo) = self {
-            return a.eval_bv(args).extract(*hi, *lo);
-        }
-        if let OwnedExpr::Func(id, exprs) = self {
-            let values = exprs.iter().map(|expr| expr.eval_bv(args)).collect::<Vec<_>>();
-            return deffun::ENV.apply(*id).eval_bv(&values);
-        }
-        if let OwnedExpr::Const(a) = self {
-            return Bv([a.as_u64_lossy(); N].into());
-        }
-        if let OwnedExpr::Let(_, _, _) = self {
-            return self.eval_bv_let_chain(args);
-        }
-        if let OwnedExpr::Ite(e1, e2, e3) = self {
-            return op::bv::ite(e1.eval_bv(args), e2.eval_bv(args), e3.eval_bv(args));
-        }
-        if let OwnedExpr::BVule(a, b) = self { return op::bv::ule(a.eval_bv(args), b.eval_bv(args)); }
-        if let OwnedExpr::BVult(a, b) = self { return op::bv::ult(a.eval_bv(args), b.eval_bv(args)); }
-        if let OwnedExpr::BVsle(a, b) = self { return op::bv::sle(a.eval_bv(args), b.eval_bv(args)); }
-        if let OwnedExpr::BVslt(a, b) = self { return op::bv::slt(a.eval_bv(args), b.eval_bv(args)); }
-        all_ops!(arity);
-        panic!("Should not reach here.")
     }
 }
