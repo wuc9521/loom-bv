@@ -229,6 +229,14 @@ impl<'a> Expr<'a> {
         if let OwnedExpr::BVult(a, b) = expr { return bump.alloc(Expr::BVult(Self::from_owned(bump, a), Self::from_owned(bump, b))); }
         if let OwnedExpr::BVsle(a, b) = expr { return bump.alloc(Expr::BVsle(Self::from_owned(bump, a), Self::from_owned(bump, b))); }
         if let OwnedExpr::BVslt(a, b) = expr { return bump.alloc(Expr::BVslt(Self::from_owned(bump, a), Self::from_owned(bump, b))); }
+        if let OwnedExpr::FopDyn(id, args) = expr {
+            match args.len() {
+                0 => return bump.alloc(Expr::Fop0Dyn(*id)),
+                1 => return bump.alloc(Expr::Fop1Dyn(*id, Self::from_owned(bump, &args[0]))),
+                2 => return bump.alloc(Expr::Fop2Dyn(*id, Self::from_owned(bump, &args[0]), Self::from_owned(bump, &args[1]))),
+                _ => panic!("Expr::from_owned: FopDyn with arity {} not supported in arena form", args.len()),
+            }
+        }
         all_ops!(arity);
         panic!();
     }
@@ -744,8 +752,14 @@ impl OwnedExpr {
             let cond_fmt = if cond_is_bool {
                 cond_str
             } else {
-                let zero = "0".repeat(a.width().div_ceil(4).max(1));
-                format!("(= {} #x{})", cond_str, zero)
+                let w = a.width();
+                if w <= 3 {
+                    let zeros = "0".repeat(w.max(1));
+                    format!("(= {} #b{})", cond_str, zeros)
+                } else {
+                    let zeros = "0".repeat(w.div_ceil(4).max(1));
+                    format!("(= {} #x{})", cond_str, zeros)
+                }
             };
             return format!(
                 "(ite {} {} {})",
