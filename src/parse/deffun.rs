@@ -1019,46 +1019,44 @@ fn compile_generic(expr: &OwnedExpr, arg_bits: &[usize], _ret_bits: usize) -> De
                 env_slots.pop();
                 body_slot
             }
-            OwnedExpr::Fop0Dyn(fid) => push(
-                PlanInstr::Fop0Dyn { fid: *fid },
-                expr.width(),
-                next_slot,
-                slot_bits,
-                instrs,
-            ),
-            OwnedExpr::Fop1Dyn(fid, arg) => {
-                let arg = compile_expr(arg, env_slots, next_slot, slot_bits, instrs);
-                push(
-                    PlanInstr::Fop1Dyn { fid: *fid, arg },
-                    expr.width(),
-                    next_slot,
-                    slot_bits,
-                    instrs,
-                )
-            }
-            OwnedExpr::Fop2Dyn(fid, lhs, rhs) => {
-                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
-                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(
-                    PlanInstr::Fop2Dyn { fid: *fid, lhs, rhs },
-                    expr.width(),
-                    next_slot,
-                    slot_bits,
-                    instrs,
-                )
-            }
-            OwnedExpr::FopDyn(fid, args) => {
-                let args = args
+            OwnedExpr::Func(fid, args) => {
+                let compiled_args: Vec<usize> = args
                     .iter()
                     .map(|arg| compile_expr(arg, env_slots, next_slot, slot_bits, instrs))
                     .collect();
-                push(
-                    PlanInstr::FopDyn { fid: *fid, args },
-                    expr.width(),
-                    next_slot,
-                    slot_bits,
-                    instrs,
-                )
+                if compiled_args.is_empty() {
+                    push(
+                        PlanInstr::Fop0Dyn { fid: *fid },
+                        expr.width(),
+                        next_slot,
+                        slot_bits,
+                        instrs,
+                    )
+                } else if compiled_args.len() == 1 {
+                    push(
+                        PlanInstr::Fop1Dyn { fid: *fid, arg: compiled_args[0] },
+                        expr.width(),
+                        next_slot,
+                        slot_bits,
+                        instrs,
+                    )
+                } else if compiled_args.len() == 2 {
+                    push(
+                        PlanInstr::Fop2Dyn { fid: *fid, lhs: compiled_args[0], rhs: compiled_args[1] },
+                        expr.width(),
+                        next_slot,
+                        slot_bits,
+                        instrs,
+                    )
+                } else {
+                    push(
+                        PlanInstr::FopDyn { fid: *fid, args: compiled_args },
+                        expr.width(),
+                        next_slot,
+                        slot_bits,
+                        instrs,
+                    )
+                }
             }
         }
     }

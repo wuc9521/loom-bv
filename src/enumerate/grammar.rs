@@ -450,22 +450,8 @@ pub fn build_owned_application(id: &Identifier, args: &[OwnedExpr]) -> parse::Re
             Box::new(args[2].clone()),
         ));
     }
-    if args.len() == 1 {
-        if let Some(fid) = deffun::ENV.lookup(opname, 1) {
-            return Ok(OwnedExpr::Fop1Dyn(fid, Box::new(args[0].clone())));
-        }
-    }
-    if args.len() == 2 {
-        if let Some(fid) = deffun::ENV.lookup(opname, 2) {
-            return Ok(OwnedExpr::Fop2Dyn(
-                fid,
-                Box::new(args[0].clone()),
-                Box::new(args[1].clone()),
-            ));
-        }
-    }
     if let Some(fid) = deffun::ENV.lookup(opname, args.len()) {
-        return Ok(OwnedExpr::FopDyn(fid, args.to_vec()));
+        return Ok(OwnedExpr::Func(fid, args.to_vec()));
     }
     Err(new_custom_error_span(
         format!("Unrecongnized Expression: ({} ...)", opname),

@@ -405,22 +405,7 @@ impl<'a, const N: usize> Algo<'a, N> {
                 let c = self.eval_owned_abs(c, vars, depth + 1)?;
                 b.union(c)
             }
-            OwnedExpr::Fop0Dyn(fid) => {
-                let body = crate::parse::deffun::ENV.apply(*fid);
-                self.eval_owned_abs(body, &[], depth + 1)?
-            }
-            OwnedExpr::Fop1Dyn(fid, a) => {
-                let arg = self.eval_owned_abs(a, vars, depth + 1)?;
-                let body = crate::parse::deffun::ENV.apply(*fid);
-                self.eval_owned_abs(body, &[arg], depth + 1)?
-            }
-            OwnedExpr::Fop2Dyn(fid, a, b) => {
-                let a = self.eval_owned_abs(a, vars, depth + 1)?;
-                let b = self.eval_owned_abs(b, vars, depth + 1)?;
-                let body = crate::parse::deffun::ENV.apply(*fid);
-                self.eval_owned_abs(body, &[a, b], depth + 1)?
-            }
-            OwnedExpr::FopDyn(fid, args) => {
+            OwnedExpr::Func(fid, args) => {
                 let mut abs_args = Vec::with_capacity(args.len());
                 for arg in args {
                     abs_args.push(self.eval_owned_abs(arg, vars, depth + 1)?);
@@ -509,12 +494,12 @@ impl<'a, const N: usize> Algo<'a, N> {
         };
 
         // Optional rhs filter: shifts restrict the rhs to size-1 leaves
-        // (Var / Const / Fop0Dyn — anything that lives at exprs[NT][1]).
+        // (Var / Const / Func — anything that lives at exprs[NT][1]).
         let rhs_is_leaf = |c: &Candidate<N>| {
             matches!(
                 c.expr,
-                OwnedExpr::Var(_, _) | OwnedExpr::Const(_) | OwnedExpr::Fop0Dyn(_)
-            )
+                OwnedExpr::Var(_, _) | OwnedExpr::Const(_)
+            ) || matches!(&c.expr, OwnedExpr::Func(_, args) if args.is_empty())
         };
 
         let bucket = |nt: usize, size: usize| -> &[Candidate<N>] {
@@ -637,19 +622,17 @@ impl OwnedExpr {
     match self {
         OwnedExpr::Concat(a, b) => a.bit_width() + b.bit_width(),
         OwnedExpr::Extract(_, hi, lo) => (*hi - *lo + 1) as usize,
-        OwnedExpr::Fop0Dyn(id) => crate::parse::deffun::ENV.ret_bits(*id),
-        OwnedExpr::FopDyn(id, ..) => crate::parse::deffun::ENV.ret_bits(*id),
+        OwnedExpr::Func(id, _) => crate::parse::deffun::ENV.ret_bits(*id),
         OwnedExpr::Const(v) => v.bits(),
         OwnedExpr::Var(_, width) => *width,
         OwnedExpr::Let(_, _, body) => body.bit_width(),
-        OwnedExpr::Not(a) | OwnedExpr::Neg(a) | OwnedExpr::Fop1Dyn(_, a) => a.bit_width(),
+        OwnedExpr::Not(a) | OwnedExpr::Neg(a) => a.bit_width(),
         OwnedExpr::Add(a, _)
         | OwnedExpr::Xor(a, _)
         | OwnedExpr::And(a, _)
         | OwnedExpr::Or(a, _)
         | OwnedExpr::Mul(a, _)
         | OwnedExpr::Sub(a, _)
-        | OwnedExpr::Fop2Dyn(_, a, _)
         | OwnedExpr::LShr(a, _)
         | OwnedExpr::AShr(a, _)
         | OwnedExpr::Shl(a, _)

@@ -164,25 +164,14 @@ impl<'a> Grammar<'a> {
         match &self.nts[node.nt_idx].1[node.rule_idx] {
             ExactRule::Alias(_) => self.materialize_node(node.children[0], nodes),
             ExactRule::Leaf(expr) => Some(expr.clone()),
-            ExactRule::Op { fid, child_nts } => {
-                match child_nts.len() {
-                    1 => Some(OwnedExpr::Fop1Dyn(
-                        *fid,
-                        Box::new(self.materialize_node(node.children[0], nodes)?),
-                    )),
-                    2 => Some(OwnedExpr::Fop2Dyn(
-                        *fid,
-                        Box::new(self.materialize_node(node.children[0], nodes)?),
-                        Box::new(self.materialize_node(node.children[1], nodes)?),
-                    )),
-                    _ => Some(OwnedExpr::FopDyn(
-                        *fid,
-                        node.children
-                            .iter()
-                            .map(|child| self.materialize_node(*child, nodes))
-                            .collect::<Option<Vec<_>>>()?,
-                    )),
-                }
+            ExactRule::Op { fid, child_nts: _ } => {
+                Some(OwnedExpr::Func(
+                    *fid,
+                    node.children
+                        .iter()
+                        .map(|child| self.materialize_node(*child, nodes))
+                        .collect::<Option<Vec<_>>>()?,
+                ))
             }
             ExactRule::GenericTemplate { template, .. } => {
                 let child_exprs = node

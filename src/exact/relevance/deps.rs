@@ -534,36 +534,20 @@ fn compute_expr_dep_bit(
             dep.union_inplace(&compute_expr_dep_bit(else_expr, arg_bits, bit, cache)?);
             Some(dep)
         }
-        OwnedExpr::Fop0Dyn(fid) => get_deffun_dep_bit(*fid, bit, cache),
-        OwnedExpr::Fop1Dyn(fid, arg) => {
-            let outer = get_deffun_dep_bit(*fid, bit, cache)?;
-            let mut combined = BitDep::empty(arg_bits);
-            for inner_bit in outer.per_arg[0].iter_ones() {
-                combined.union_inplace(&compute_expr_dep_bit(arg, arg_bits, inner_bit, cache)?);
-            }
-            Some(combined)
-        }
-        OwnedExpr::Fop2Dyn(fid, lhs, rhs) => {
-            let outer = get_deffun_dep_bit(*fid, bit, cache)?;
-            let mut combined = BitDep::empty(arg_bits);
-            for inner_bit in outer.per_arg[0].iter_ones() {
-                combined.union_inplace(&compute_expr_dep_bit(lhs, arg_bits, inner_bit, cache)?);
-            }
-            for inner_bit in outer.per_arg[1].iter_ones() {
-                combined.union_inplace(&compute_expr_dep_bit(rhs, arg_bits, inner_bit, cache)?);
-            }
-            Some(combined)
-        }
-        OwnedExpr::FopDyn(fid, args) => {
-            let outer = get_deffun_dep_bit(*fid, bit, cache)?;
-            let mut combined = BitDep::empty(arg_bits);
-            for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
-                let arg = args.get(arg_idx)?;
-                for inner_bit in bits.iter_ones() {
-                    combined.union_inplace(&compute_expr_dep_bit(arg, arg_bits, inner_bit, cache)?);
+        OwnedExpr::Func(fid, args) => {
+            if args.is_empty() {
+                get_deffun_dep_bit(*fid, bit, cache)
+            } else {
+                let outer = get_deffun_dep_bit(*fid, bit, cache)?;
+                let mut combined = BitDep::empty(arg_bits);
+                for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
+                    let arg = args.get(arg_idx)?;
+                    for inner_bit in bits.iter_ones() {
+                        combined.union_inplace(&compute_expr_dep_bit(arg, arg_bits, inner_bit, cache)?);
+                    }
                 }
+                Some(combined)
             }
-            Some(combined)
         }
         other => {
             let width = other.width();

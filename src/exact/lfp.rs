@@ -424,23 +424,7 @@ impl OwnedExpr {
                 .eval_with_closure(env, closure_value, closure_name)?
                 .srem(b.eval_with_closure(env, closure_value, closure_name)?)
                 .ok_or_else(div_by_zero),
-            OwnedExpr::Fop0Dyn(id) => {
-                eval_defined_with_closure(*id, &[], closure).map_err(|_| fn_div_by_zero(*id))
-            }
-            OwnedExpr::Fop1Dyn(id, a) => {
-                let args = [a.eval_with_closure(env, closure_value, closure_name)?];
-                eval_defined_with_closure(*id, &args, closure)
-                    .map_err(|_| fn_div_by_zero(*id))
-            }
-            OwnedExpr::Fop2Dyn(id, a, b) => {
-                let args = [
-                    a.eval_with_closure(env, closure_value, closure_name)?,
-                    b.eval_with_closure(env, closure_value, closure_name)?,
-                ];
-                eval_defined_with_closure(*id, &args, closure)
-                    .map_err(|_| fn_div_by_zero(*id))
-            }
-            OwnedExpr::FopDyn(id, exprs) => {
+            OwnedExpr::Func(id, exprs) => {
                 let args = exprs
                     .iter()
                     .map(|arg| arg.eval_with_closure(env, closure_value, closure_name))
