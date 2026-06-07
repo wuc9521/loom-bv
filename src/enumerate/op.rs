@@ -79,6 +79,23 @@ pub fn ite(v1: Value, v2: Value, v3: Value) -> Value {
 }
 
 #[inline(always)]
+pub fn ule(a: Value, b: Value) -> Value {
+    Value::from_u64(if a.ule(&b) { 0 } else { 1 }, 1)
+}
+#[inline(always)]
+pub fn ult(a: Value, b: Value) -> Value {
+    Value::from_u64(if a.ult(&b) { 0 } else { 1 }, 1)
+}
+#[inline(always)]
+pub fn sle(a: Value, b: Value) -> Value {
+    Value::from_u64(if a.sle(&b) { 0 } else { 1 }, 1)
+}
+#[inline(always)]
+pub fn slt(a: Value, b: Value) -> Value {
+    Value::from_u64(if a.slt(&b) { 0 } else { 1 }, 1)
+}
+
+#[inline(always)]
 fn u64_not(v1: u64) -> u64 {
     !v1
 }
@@ -157,6 +174,22 @@ fn u64_srem(v1: u64, v2: u64) -> u64 {
     } else {
         (v1 as i64).overflowing_rem(v2 as i64).0 as u64
     }
+}
+#[inline(always)]
+fn u64_ule(v1: u64, v2: u64) -> u64 {
+    if v1 <= v2 { 0 } else { 1 }
+}
+#[inline(always)]
+fn u64_ult(v1: u64, v2: u64) -> u64 {
+    if v1 < v2 { 0 } else { 1 }
+}
+#[inline(always)]
+fn u64_sle(v1: u64, v2: u64) -> u64 {
+    if (v1 as i64) <= (v2 as i64) { 0 } else { 1 }
+}
+#[inline(always)]
+fn u64_slt(v1: u64, v2: u64) -> u64 {
+    if (v1 as i64) < (v2 as i64) { 0 } else { 1 }
 }
 #[inline(always)]
 fn u64_ite(v1: u64, v2: u64, v3: u64) -> u64 {
@@ -291,6 +324,22 @@ pub mod bv {
             .zip(v3.into_iter_fixed())
             .map(|((a, b), c)| super::u64_ite(a, b, c))
             .collect())
+    }
+    #[inline(always)]
+    pub fn ule<const N: usize>(v1: Bv<N>, v2: Bv<N>) -> Bv<N> {
+        Bv(v1.into_iter_fixed().zip(v2.into_iter_fixed()).map(|(a, b)| super::u64_ule(a, b)).collect())
+    }
+    #[inline(always)]
+    pub fn ult<const N: usize>(v1: Bv<N>, v2: Bv<N>) -> Bv<N> {
+        Bv(v1.into_iter_fixed().zip(v2.into_iter_fixed()).map(|(a, b)| super::u64_ult(a, b)).collect())
+    }
+    #[inline(always)]
+    pub fn sle<const N: usize>(v1: Bv<N>, v2: Bv<N>) -> Bv<N> {
+        Bv(v1.into_iter_fixed().zip(v2.into_iter_fixed()).map(|(a, b)| super::u64_sle(a, b)).collect())
+    }
+    #[inline(always)]
+    pub fn slt<const N: usize>(v1: Bv<N>, v2: Bv<N>) -> Bv<N> {
+        Bv(v1.into_iter_fixed().zip(v2.into_iter_fixed()).map(|(a, b)| super::u64_slt(a, b)).collect())
     }
 
 }

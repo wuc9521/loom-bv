@@ -401,6 +401,10 @@ pub fn build_owned_application(id: &Identifier, args: &[OwnedExpr]) -> parse::Re
         };
     }
     all_ops!(arity);
+    operator2!("bvule", BVule);
+    operator2!("bvult", BVult);
+    operator2!("bvsle", BVsle);
+    operator2!("bvslt", BVslt);
     operator1!("not", Not);
     if opname == "and" && args.len() >= 2 {
         let mut it = args.iter();

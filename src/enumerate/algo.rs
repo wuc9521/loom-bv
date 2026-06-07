@@ -658,6 +658,7 @@ impl OwnedExpr {
         | OwnedExpr::SDiv(a, _)
         | OwnedExpr::SRem(a, _) => a.bit_width(),
         OwnedExpr::Ite(_, a, _) => a.bit_width(),
+        OwnedExpr::BVule(_, _) | OwnedExpr::BVult(_, _) | OwnedExpr::BVsle(_, _) | OwnedExpr::BVslt(_, _) => 1,
     }
     }
 }

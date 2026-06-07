@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use sygus_parser::ast::{GrammarDef, Literal, Sort, SyGuSTerm};
 
 use crate::enumerate::expr::OwnedExpr;
+use crate::enumerate::op;
 use crate::enumerate::value::Value;
 use crate::exact::util::{empty_span, extract_single_bit_idx};
 use crate::exact::{eval_defined_with_closure};
@@ -455,6 +456,10 @@ impl OwnedExpr {
                     else_e.eval_with_closure(env, closure_value, closure_name)
                 }
             }
+            OwnedExpr::BVule(a, b) => Ok(op::ule(a.eval_with_closure(env, closure_value, closure_name)?, b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::BVult(a, b) => Ok(op::ult(a.eval_with_closure(env, closure_value, closure_name)?, b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::BVsle(a, b) => Ok(op::sle(a.eval_with_closure(env, closure_value, closure_name)?, b.eval_with_closure(env, closure_value, closure_name)?)),
+            OwnedExpr::BVslt(a, b) => Ok(op::slt(a.eval_with_closure(env, closure_value, closure_name)?, b.eval_with_closure(env, closure_value, closure_name)?)),
             OwnedExpr::Let(_, _, _) => self
                 .eval(std::slice::from_ref(closure_value))
                 .map_err(|_| new_custom_error_span("lfp: let-eval failed".into(), empty_span())),

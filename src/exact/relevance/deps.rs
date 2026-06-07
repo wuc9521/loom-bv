@@ -300,7 +300,11 @@ fn compute_generic_dep_bit(
                 | PlanInstr::UDiv { .. }
                 | PlanInstr::URem { .. }
                 | PlanInstr::SDiv { .. }
-                | PlanInstr::SRem { .. } => Some(BitDep::full(arg_bits)),
+                | PlanInstr::SRem { .. }
+                | PlanInstr::BVule { .. }
+                | PlanInstr::BVult { .. }
+                | PlanInstr::BVsle { .. }
+                | PlanInstr::BVslt { .. } => Some(BitDep::full(arg_bits)),
             }
         };
         memo.insert((slot, bit), dep.clone());
@@ -423,7 +427,11 @@ fn compute_generic_dep_bits(
             | PlanInstr::UDiv { lhs, rhs }
             | PlanInstr::URem { lhs, rhs }
             | PlanInstr::SDiv { lhs, rhs }
-            | PlanInstr::SRem { lhs, rhs } => {
+            | PlanInstr::SRem { lhs, rhs }
+            | PlanInstr::BVule { lhs, rhs }
+            | PlanInstr::BVult { lhs, rhs }
+            | PlanInstr::BVsle { lhs, rhs }
+            | PlanInstr::BVslt { lhs, rhs } => {
                 enqueue_slot(
                     *lhs,
                     &BitSet::full(slot_bits[*lhs]),

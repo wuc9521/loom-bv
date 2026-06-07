@@ -392,6 +392,25 @@ impl Value {
         Self::from_biguint(as_unsigned, bits)
     }
 
+    pub fn ule(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Small { raw: a, .. }, Value::Small { raw: b, .. }) => a <= b,
+            _ => self.to_biguint() <= other.to_biguint(),
+        }
+    }
+    pub fn ult(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Small { raw: a, .. }, Value::Small { raw: b, .. }) => a < b,
+            _ => self.to_biguint() < other.to_biguint(),
+        }
+    }
+    pub fn sle(&self, other: &Self) -> bool {
+        self.to_signed_bigint() <= other.to_signed_bigint()
+    }
+    pub fn slt(&self, other: &Self) -> bool {
+        self.to_signed_bigint() < other.to_signed_bigint()
+    }
+
     #[inline]
     fn extract_small(raw: u64, width: usize, lo: u64) -> Self {
         Self::from_u64(raw >> lo, width)

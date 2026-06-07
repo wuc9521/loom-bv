@@ -181,6 +181,10 @@ pub enum PlanInstr {
     URem { lhs: usize, rhs: usize },
     SDiv { lhs: usize, rhs: usize },
     SRem { lhs: usize, rhs: usize },
+    BVule { lhs: usize, rhs: usize },
+    BVult { lhs: usize, rhs: usize },
+    BVsle { lhs: usize, rhs: usize },
+    BVslt { lhs: usize, rhs: usize },
     Ite { cond: usize, then_slot: usize, else_slot: usize },
     Fop0Dyn { fid: usize },
     Fop1Dyn { fid: usize, arg: usize },
@@ -249,6 +253,10 @@ impl DefineFunPlan {
                         PlanInstr::SRem { lhs, rhs } => {
                             op::srem(slots[*lhs].clone(), slots[*rhs].clone())?
                         }
+                        PlanInstr::BVule { lhs, rhs } => crate::enumerate::op::ule(slots[*lhs].clone(), slots[*rhs].clone()),
+                        PlanInstr::BVult { lhs, rhs } => crate::enumerate::op::ult(slots[*lhs].clone(), slots[*rhs].clone()),
+                        PlanInstr::BVsle { lhs, rhs } => crate::enumerate::op::sle(slots[*lhs].clone(), slots[*rhs].clone()),
+                        PlanInstr::BVslt { lhs, rhs } => crate::enumerate::op::slt(slots[*lhs].clone(), slots[*rhs].clone()),
                         PlanInstr::Ite {
                             cond,
                             then_slot,
@@ -971,6 +979,26 @@ fn compile_generic(expr: &OwnedExpr, arg_bits: &[usize], _ret_bits: usize) -> De
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
                 push(PlanInstr::SRem { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+            }
+            OwnedExpr::BVule(lhs, rhs) => {
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::BVule { lhs, rhs }, 1, next_slot, slot_bits, instrs)
+            }
+            OwnedExpr::BVult(lhs, rhs) => {
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::BVult { lhs, rhs }, 1, next_slot, slot_bits, instrs)
+            }
+            OwnedExpr::BVsle(lhs, rhs) => {
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::BVsle { lhs, rhs }, 1, next_slot, slot_bits, instrs)
+            }
+            OwnedExpr::BVslt(lhs, rhs) => {
+                let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
+                let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
+                push(PlanInstr::BVslt { lhs, rhs }, 1, next_slot, slot_bits, instrs)
             }
             OwnedExpr::Ite(cond, then_expr, else_expr) => {
                 let cond = compile_expr(cond, env_slots, next_slot, slot_bits, instrs);

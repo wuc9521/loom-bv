@@ -45,6 +45,7 @@ impl<'a> Expr<'a> {
             | Expr::SDiv(a, _)
             | Expr::SRem(a, _) => a.width(),
             Expr::Ite(_, a, _) => a.width(),
+            Expr::BVule(_, _) | Expr::BVult(_, _) | Expr::BVsle(_, _) | Expr::BVslt(_, _) => 1,
         }
     }
 }
@@ -109,6 +110,10 @@ impl<'a> Expr<'a> {
             return deffun::ENV
                 .eval_defined(*id, &[e1.eval(args)?, e2.eval(args)?]);
         }
+        if let Expr::BVule(a, b) = self { return Ok(op::ule(a.eval(args)?, b.eval(args)?)); }
+        if let Expr::BVult(a, b) = self { return Ok(op::ult(a.eval(args)?, b.eval(args)?)); }
+        if let Expr::BVsle(a, b) = self { return Ok(op::sle(a.eval(args)?, b.eval(args)?)); }
+        if let Expr::BVslt(a, b) = self { return Ok(op::slt(a.eval(args)?, b.eval(args)?)); }
         all_ops!(arity nonzero);
         panic!("should not reach here. {:?}", self);
     }
@@ -151,6 +156,10 @@ impl<'a> Expr<'a> {
                 .apply(*id)
                 .eval_bv(&[e1.eval_bv(args), e2.eval_bv(args)]);
         }
+        if let Expr::BVule(a, b) = self { return op::bv::ule(a.eval_bv(args), b.eval_bv(args)); }
+        if let Expr::BVult(a, b) = self { return op::bv::ult(a.eval_bv(args), b.eval_bv(args)); }
+        if let Expr::BVsle(a, b) = self { return op::bv::sle(a.eval_bv(args), b.eval_bv(args)); }
+        if let Expr::BVslt(a, b) = self { return op::bv::slt(a.eval_bv(args), b.eval_bv(args)); }
         all_ops!(arity);
         panic!("should not reach here. {:?}", self);
     }
@@ -216,6 +225,10 @@ impl<'a> Expr<'a> {
                 Self::from_owned(bump, b),
             ));
         }
+        if let OwnedExpr::BVule(a, b) = expr { return bump.alloc(Expr::BVule(Self::from_owned(bump, a), Self::from_owned(bump, b))); }
+        if let OwnedExpr::BVult(a, b) = expr { return bump.alloc(Expr::BVult(Self::from_owned(bump, a), Self::from_owned(bump, b))); }
+        if let OwnedExpr::BVsle(a, b) = expr { return bump.alloc(Expr::BVsle(Self::from_owned(bump, a), Self::from_owned(bump, b))); }
+        if let OwnedExpr::BVslt(a, b) = expr { return bump.alloc(Expr::BVslt(Self::from_owned(bump, a), Self::from_owned(bump, b))); }
         all_ops!(arity);
         panic!();
     }
@@ -299,6 +312,42 @@ impl<'a> Expr<'a> {
             let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
             f(e2, v2)?;
             return Ok(Some(deffun::ENV.apply(*id).eval_bv(&[v1, v2])));
+        }
+        if let Expr::BVule(e1, e2) = self {
+            let v1 = e1.for_each_subexpr(f, args)?;
+            let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
+            f(e1, v1)?;
+            let v2 = e2.for_each_subexpr(f, args)?;
+            let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
+            f(e2, v2)?;
+            return Ok(Some(op::bv::ule(v1, v2)));
+        }
+        if let Expr::BVult(e1, e2) = self {
+            let v1 = e1.for_each_subexpr(f, args)?;
+            let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
+            f(e1, v1)?;
+            let v2 = e2.for_each_subexpr(f, args)?;
+            let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
+            f(e2, v2)?;
+            return Ok(Some(op::bv::ult(v1, v2)));
+        }
+        if let Expr::BVsle(e1, e2) = self {
+            let v1 = e1.for_each_subexpr(f, args)?;
+            let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
+            f(e1, v1)?;
+            let v2 = e2.for_each_subexpr(f, args)?;
+            let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
+            f(e2, v2)?;
+            return Ok(Some(op::bv::sle(v1, v2)));
+        }
+        if let Expr::BVslt(e1, e2) = self {
+            let v1 = e1.for_each_subexpr(f, args)?;
+            let v1 = if let Some(v) = v1 { v } else { return Ok(None) };
+            f(e1, v1)?;
+            let v2 = e2.for_each_subexpr(f, args)?;
+            let v2 = if let Some(v) = v2 { v } else { return Ok(None) };
+            f(e2, v2)?;
+            return Ok(Some(op::bv::slt(v1, v2)));
         }
         all_ops!(arity nonzero);
         return Ok(None);
@@ -470,6 +519,10 @@ impl OwnedExpr {
                     };
                 }
                 all_ops!(arity);
+                operator2!("bvule", BVule);
+                operator2!("bvult", BVult);
+                operator2!("bvsle", BVsle);
+                operator2!("bvslt", BVslt);
                 // SyGuS boolean connectives may appear in define-fun bodies; booleans
                 // are represented as 1-bit bitvectors in this codebase.
                 operator1!("not", Not);
@@ -604,6 +657,10 @@ impl OwnedExpr {
         if let OwnedExpr::Fop2Dyn(_, a, b) = self {
             return 1 + a.size() + b.size();
         }
+        if let OwnedExpr::BVule(a, b) = self { return 1 + a.size() + b.size(); }
+        if let OwnedExpr::BVult(a, b) = self { return 1 + a.size() + b.size(); }
+        if let OwnedExpr::BVsle(a, b) = self { return 1 + a.size() + b.size(); }
+        if let OwnedExpr::BVslt(a, b) = self { return 1 + a.size() + b.size(); }
         all_ops!(arity);
         panic!();
     }
@@ -690,6 +747,10 @@ impl OwnedExpr {
                 b.to_sygus_with_env(names)
             );
         }
+        if let OwnedExpr::BVule(a, b) = self { return format!("(bvule {} {})", a.to_sygus_with_env(names), b.to_sygus_with_env(names)); }
+        if let OwnedExpr::BVult(a, b) = self { return format!("(bvult {} {})", a.to_sygus_with_env(names), b.to_sygus_with_env(names)); }
+        if let OwnedExpr::BVsle(a, b) = self { return format!("(bvsle {} {})", a.to_sygus_with_env(names), b.to_sygus_with_env(names)); }
+        if let OwnedExpr::BVslt(a, b) = self { return format!("(bvslt {} {})", a.to_sygus_with_env(names), b.to_sygus_with_env(names)); }
         all_ops!(arity);
         unreachable!()
     }
@@ -725,6 +786,10 @@ impl<'a> From<&Expr<'a>> for OwnedExpr {
         if let Expr::Fop2Dyn(id, e1, e2) = value {
             return OwnedExpr::Fop2Dyn(*id, Box::new((*e1).into()), Box::new((*e2).into()));
         }
+        if let Expr::BVule(a, b) = value { return OwnedExpr::BVule(Box::new((*a).into()), Box::new((*b).into())); }
+        if let Expr::BVult(a, b) = value { return OwnedExpr::BVult(Box::new((*a).into()), Box::new((*b).into())); }
+        if let Expr::BVsle(a, b) = value { return OwnedExpr::BVsle(Box::new((*a).into()), Box::new((*b).into())); }
+        if let Expr::BVslt(a, b) = value { return OwnedExpr::BVslt(Box::new((*a).into()), Box::new((*b).into())); }
         macro_rules! foreach_op {
             (1, $op:ident) => {
                 if let Expr::$op(e1) = value {
@@ -797,6 +862,7 @@ impl OwnedExpr {
             | OwnedExpr::SDiv(a, _)
             | OwnedExpr::SRem(a, _) => a.width(),
             OwnedExpr::Ite(_, a, _) => a.width(),
+            OwnedExpr::BVule(_, _) | OwnedExpr::BVult(_, _) | OwnedExpr::BVsle(_, _) | OwnedExpr::BVslt(_, _) => 1,
         }
     }
 
@@ -899,6 +965,10 @@ impl OwnedExpr {
             return deffun::ENV
                 .eval_defined(*id, &[e1.eval(args)?, e2.eval(args)?]);
         }
+        if let OwnedExpr::BVule(a, b) = self { return Ok(op::ule(a.eval(args)?, b.eval(args)?)); }
+        if let OwnedExpr::BVult(a, b) = self { return Ok(op::ult(a.eval(args)?, b.eval(args)?)); }
+        if let OwnedExpr::BVsle(a, b) = self { return Ok(op::sle(a.eval(args)?, b.eval(args)?)); }
+        if let OwnedExpr::BVslt(a, b) = self { return Ok(op::slt(a.eval(args)?, b.eval(args)?)); }
         all_ops!(arity nonzero);
         panic!("should not reach here.");
     }
@@ -948,6 +1018,10 @@ impl OwnedExpr {
                 .apply(*id)
                 .eval_bv(&[e1.eval_bv(args), e2.eval_bv(args)]);
         }
+        if let OwnedExpr::BVule(a, b) = self { return op::bv::ule(a.eval_bv(args), b.eval_bv(args)); }
+        if let OwnedExpr::BVult(a, b) = self { return op::bv::ult(a.eval_bv(args), b.eval_bv(args)); }
+        if let OwnedExpr::BVsle(a, b) = self { return op::bv::sle(a.eval_bv(args), b.eval_bv(args)); }
+        if let OwnedExpr::BVslt(a, b) = self { return op::bv::slt(a.eval_bv(args), b.eval_bv(args)); }
         all_ops!(arity);
         panic!("Should not reach here.")
     }

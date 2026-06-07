@@ -63,6 +63,18 @@ macro_rules! enum_expr {
             #[debug(fmt = "(f2{} {:?} {:?})", _0, _1, _2)]
             #[display(fmt = "({} {} {})", "crate::parse::deffun::ENV.name(*_0)", _1, _2)]
             Fop2Dyn(usize, &'a Expr<'a>, &'a Expr<'a>),
+            #[debug(fmt = "(ule {:?} {:?})", _0, _1)]
+            #[display(fmt = "(bvule {} {})", _0, _1)]
+            BVule(&'a Expr<'a>, &'a Expr<'a>),
+            #[debug(fmt = "(ult {:?} {:?})", _0, _1)]
+            #[display(fmt = "(bvult {} {})", _0, _1)]
+            BVult(&'a Expr<'a>, &'a Expr<'a>),
+            #[debug(fmt = "(sle {:?} {:?})", _0, _1)]
+            #[display(fmt = "(bvsle {} {})", _0, _1)]
+            BVsle(&'a Expr<'a>, &'a Expr<'a>),
+            #[debug(fmt = "(slt {:?} {:?})", _0, _1)]
+            #[display(fmt = "(bvslt {} {})", _0, _1)]
+            BVslt(&'a Expr<'a>, &'a Expr<'a>),
             #[debug(fmt = "(ite {:?} {:?} {:?})", _0, _1, _2)]
             #[display(fmt = "(ite (= {} #x0000000000000000) {} {})", _0, _1, _2)]
             Ite(&'a Expr<'a>, &'a Expr<'a>, &'a Expr<'a>),
@@ -144,6 +156,18 @@ macro_rules! enum_ownedexpr {
             #[debug(fmt = "{}", "crate::enumerate::expr::format_owned_dyn_app(*_0, _1)")]
             #[display(fmt = "{}", "crate::enumerate::expr::format_owned_dyn_app(*_0, _1)")]
             FopDyn(usize, Vec<OwnedExpr>),
+            #[debug(fmt = "(ule {:?} {:?})", _0, _1)]
+            #[display(fmt = "(bvule {} {})", _0, _1)]
+            BVule(Box<OwnedExpr>, Box<OwnedExpr>),
+            #[debug(fmt = "(ult {:?} {:?})", _0, _1)]
+            #[display(fmt = "(bvult {} {})", _0, _1)]
+            BVult(Box<OwnedExpr>, Box<OwnedExpr>),
+            #[debug(fmt = "(sle {:?} {:?})", _0, _1)]
+            #[display(fmt = "(bvsle {} {})", _0, _1)]
+            BVsle(Box<OwnedExpr>, Box<OwnedExpr>),
+            #[debug(fmt = "(slt {:?} {:?})", _0, _1)]
+            #[display(fmt = "(bvslt {} {})", _0, _1)]
+            BVslt(Box<OwnedExpr>, Box<OwnedExpr>),
             #[debug(fmt = "(ite {:?} {:?} {:?})", _0, _1, _2)]
             #[display(fmt = "(ite (= {} #x0000000000000000) {} {})", _0, _1, _2)]
             Ite(Box<OwnedExpr>, Box<OwnedExpr>, Box<OwnedExpr>),
