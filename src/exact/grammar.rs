@@ -21,6 +21,7 @@ impl Grammar<'static> {
                         base_size,
                         ..
                     } => ExactRule::from_template(template, child_nts, *base_size),
+                    MultiRule::ChatGPT { expr, .. } => ExactRule::Leaf(expr.clone()),
                 })
                 .collect();
             (*name, compiled)

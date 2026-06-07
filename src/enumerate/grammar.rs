@@ -45,6 +45,25 @@ impl TemplateExpr {
     }
 }
 
+/// Operator-specific search-time metadata. Detected once at grammar
+/// compile time by looking at the outermost `App` of the rule template.
+/// Algorithm consumers (currently `algo::Algo` via the legacy `Rule<N>`,
+/// soon `algo_multi::Algo`) use this to prune the bottom-up enumeration:
+///
+/// - `commutative`: with two same-NT children, only iterate `i ≤ size/2`.
+/// - `idempotent`: additionally skip `e == e` pairs (e.g. `a & a = a`).
+/// - `nonzero_rhs`: skip candidate tuples whose rhs evaluates to 0 (UDiv,
+///   URem, SDiv, SRem).
+/// - `shift_rhs_literal`: when present, only consider size-1 leaves on the
+///   rhs (matches `algo::Algo`'s shift-by-symbol restriction).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct RuleClass {
+    pub commutative: bool,
+    pub idempotent: bool,
+    pub nonzero_rhs: bool,
+    pub shift_rhs_literal: bool,
+}
+
 #[derive(Clone)]
 pub enum MultiRule {
     Alias(usize),
@@ -52,6 +71,14 @@ pub enum MultiRule {
         template: TemplateExpr,
         child_nts: Vec<usize>,
         base_size: usize,
+        class: RuleClass,
+    },
+    /// ChatGPT-suggested subexpression injected at a fixed size (currently
+    /// always size 1). Only emitted when `problem.chatgpt_exprs` is
+    /// non-empty.
+    ChatGPT {
+        expr: OwnedExpr,
+        size: usize,
     },
 }
 
@@ -80,8 +107,19 @@ impl<'a> MultiConfig<'a> {
             })
             .collect::<Vec<_>>();
         let mut nts = Vec::with_capacity(problem.cfg.len());
-        for nt in problem.cfg.iter() {
+        for (idx, nt) in problem.cfg.iter().enumerate() {
             let mut rules = Vec::new();
+            // Inject ChatGPT suggestions only into the start non-terminal.
+            // `algo::Algo` did the same via `Rule::ChatGPT(_, 1)` at the
+            // single (start) NT; preserve that semantics here.
+            if idx == 0 {
+                for expr in problem.chatgpt_exprs.iter() {
+                    rules.push(MultiRule::ChatGPT {
+                        expr: expr.clone(),
+                        size: 1,
+                    });
+                }
+            }
             for gterm in &nt.1 {
                 let term = match gterm {
                     SyGuSGTerm::SyGuSTerm(term) => term,
@@ -95,6 +133,36 @@ impl<'a> MultiConfig<'a> {
             nts.push((nt.0, rules));
         }
         Ok(MultiConfig { nts, start: 0 })
+    }
+}
+
+/// Operator-class metadata for the standard BV ops. Maps SMT-LIB names to
+/// their commutativity / idempotency / non-zero-rhs / shift-rhs-literal
+/// flags. Anything not matched here defaults to no specialisation.
+fn classify_op(op: &str, child_nts: &[usize]) -> RuleClass {
+    // Symmetry shortcuts only kick in when both binary children come from
+    // the same non-terminal — otherwise the child pools are disjoint and
+    // the i ≤ size/2 trick would *miss* candidates.
+    let same_nt_pair = child_nts.len() == 2 && child_nts[0] == child_nts[1];
+    match op {
+        "bvadd" | "bvmul" | "bvxor" => RuleClass {
+            commutative: same_nt_pair,
+            ..Default::default()
+        },
+        "bvand" | "bvor" => RuleClass {
+            commutative: same_nt_pair,
+            idempotent: same_nt_pair,
+            ..Default::default()
+        },
+        "bvudiv" | "bvurem" | "bvsdiv" | "bvsrem" => RuleClass {
+            nonzero_rhs: child_nts.len() == 2,
+            ..Default::default()
+        },
+        "bvlshr" | "bvashr" | "bvshl" => RuleClass {
+            shift_rhs_literal: child_nts.len() == 2,
+            ..Default::default()
+        },
+        _ => RuleClass::default(),
     }
 }
 
@@ -141,6 +209,7 @@ fn term_to_rule(
                     template: TemplateExpr::Leaf(atom),
                     child_nts: Vec::new(),
                     base_size: 1,
+                    class: RuleClass::default(),
                 }))
             } else {
                 Err(new_custom_error_span(
@@ -155,20 +224,34 @@ fn term_to_rule(
                 template: TemplateExpr::Leaf(atom),
                 child_nts: Vec::new(),
                 base_size: 1,
+                class: RuleClass::default(),
             }))
         }
         SyGuSTerm::Application(_, _) | SyGuSTerm::Annotated(_, _) => {
             let (template, child_nts, base_size) = template_from_term(term, nt_lookup, env)?;
+            let class = head_op_name(term)
+                .map(|op| classify_op(op, &child_nts))
+                .unwrap_or_default();
             Ok(Some(MultiRule::Template {
                 template,
                 child_nts,
                 base_size,
+                class,
             }))
         }
         _ => Err(new_custom_error_span(
             format!("Enumeration: unsupported grammar term {}", term),
             empty_span(),
         )),
+    }
+}
+
+/// Walk through `Annotated` wrappers to find the head operator name.
+fn head_op_name(term: &SyGuSTerm) -> Option<&str> {
+    match term {
+        SyGuSTerm::Application(id, _) => Some(id.get_name()),
+        SyGuSTerm::Annotated(inner, _) => head_op_name(inner),
+        _ => None,
     }
 }
 

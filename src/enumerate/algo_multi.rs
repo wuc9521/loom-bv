@@ -69,6 +69,10 @@ pub struct Algo<'a, const N: usize> {
     bump: &'a Bump,
     counter2: usize,
     current_size: usize,
+    /// Reserved for the upcoming sub-expression-reuse port from `algo::Algo`.
+    /// Currently unused; setting it has no effect.
+    #[allow(dead_code)]
+    dag_size: bool,
 }
 
 impl<'a, const N: usize> AlgoTrait<'a, N> for Algo<'a, N> {
@@ -115,6 +119,7 @@ impl<'a, const N: usize> Algo<'a, N> {
         problem: &SynthProblem<'static>,
         args: Vec<Bv<N>>,
         output: Bv<N>,
+        dag_size: bool,
         bump: &'a Bump,
     ) -> parse::Result<Self> {
         let config = MultiConfig::from_problem(problem)?;
@@ -139,6 +144,7 @@ impl<'a, const N: usize> Algo<'a, N> {
             bump,
             counter2: 0,
             current_size: 0,
+            dag_size,
         })
     }
 
@@ -171,6 +177,7 @@ impl<'a, const N: usize> Algo<'a, N> {
                             template,
                             child_nts,
                             base_size,
+                            class: _class,
                         } => {
                             if base_size > size {
                                 continue;
@@ -246,6 +253,18 @@ impl<'a, const N: usize> Algo<'a, N> {
                             );
                             for (expr, value) in staged {
                                 self.insert_candidate(nt, expr, value, &mut next[nt], &mut f)?;
+                            }
+                        }
+                        MultiRule::ChatGPT { expr, size: target_size } => {
+                            if size == target_size {
+                                let value = expr.eval_bv(&self.args);
+                                self.insert_candidate(
+                                    nt,
+                                    expr.clone(),
+                                    value,
+                                    &mut next[nt],
+                                    &mut f,
+                                )?;
                             }
                         }
                     }

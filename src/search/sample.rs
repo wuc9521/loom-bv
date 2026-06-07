@@ -97,7 +97,8 @@ impl SampleConfig {
             );
             Ok(result)
         } else {
-            let mut algo = algo_multi::Algo::new(problem, args, out.clone(), &bump)?;
+            let mut algo =
+                algo_multi::Algo::new(problem, args, out.clone(), self.dag_size, &bump)?;
             let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
             let result = !filter.solved;
             info!(
