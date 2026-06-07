@@ -171,7 +171,7 @@ impl SearchConfig {
                                             &Var(i, problem.bits),
                                             &Const(Value::from_u64(shift as u64, problem.bits)),
                                         ),
-                                        &Const(Value::from_u64(1, 1)),
+                                        &Const(Value::from_u64(1, problem.bits)),
                                     ),
                                     0,
                                 );
