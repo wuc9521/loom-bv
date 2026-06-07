@@ -1,25 +1,20 @@
-//! SyGuS constraint parsing — produces `PbeConstraint`, `RefImplConstraint`,
-//! and the bit-extract / structural-constraint shapes consumed by `BitSpec`.
+//! SyGuS constraint parsing — produces `RefImplConstraint` and the
+//! bit-extract / structural-constraint shapes consumed by `BitSpec`.
 
 use std::collections::BTreeMap;
 
 use derive_more::DebugCustom;
-use itertools::Itertools;
 use pest::Span;
-use rand::{rngs::StdRng, Rng};
 #[cfg(feature = "chatgpt")]
-use rand::seq::SliceRandom;
-use sdset::SetBuf;
-use smallvec::SmallVec;
+use rand::{rngs::StdRng, seq::SliceRandom};
 use sygus_parser::ast::{
     Identifier, Index, Literal as SyGuSLiteral, SortedVar, SyGuSCmd, SyGuSFile, SyGuSTerm,
 };
 
-use crate::enumerate::{
-    expr::{Expr, OwnedExpr},
-    value::Value,
-    Bv,
-};
+use crate::enumerate::{expr::OwnedExpr, value::Value};
+
+#[cfg(feature = "chatgpt")]
+use crate::exact::BitSpec;
 
 use super::{literals, new_custom_error_span, ProblemView, Result};
 
@@ -67,7 +62,7 @@ fn term_app(term: &SyGuSTerm) -> Option<(&str, &[SyGuSTerm])> {
     Some((id.get_name(), args.as_slice()))
 }
 
-fn term_eq(term: &SyGuSTerm) -> Option<(&SyGuSTerm, &SyGuSTerm)> {
+pub(crate) fn term_eq(term: &SyGuSTerm) -> Option<(&SyGuSTerm, &SyGuSTerm)> {
     let ("=", args) = term_app(term)? else {
         return None;
     };
@@ -77,7 +72,11 @@ fn term_eq(term: &SyGuSTerm) -> Option<(&SyGuSTerm, &SyGuSTerm)> {
     Some((&args[0], &args[1]))
 }
 
-fn term_call_to<'a>(term: &'a SyGuSTerm, name: &str, arity: usize) -> Option<&'a [SyGuSTerm]> {
+pub(crate) fn term_call_to<'a>(
+    term: &'a SyGuSTerm,
+    name: &str,
+    arity: usize,
+) -> Option<&'a [SyGuSTerm]> {
     let (head, args) = term_app(term)?;
     if head == name && args.len() == arity {
         Some(args)
@@ -533,185 +532,6 @@ fn extract_bit_of_target(term: &SyGuSTerm, target_name: &str) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
-//  PbeConstraint — concrete `(input → output)` examples with optional
-//  per-bit don't-care mask. The `BitSpec` type in `exact::bitspec` is a
-//  strict generalisation of this; both will collapse in a later commit.
-// ---------------------------------------------------------------------------
-
-#[derive(DebugCustom, Clone)]
-#[debug(fmt = "{:#x?} -> {:#x?}", input, output)]
-pub struct PbeConstraint {
-    input: Vec<Vec<Value>>,
-    output: Vec<Value>,
-    mask: Option<Value>,
-}
-
-impl PbeConstraint {
-    pub fn new(args: usize) -> Self {
-        Self {
-            input: (0..args).map(|_| Vec::new()).collect(),
-            output: Vec::new(),
-            mask: None,
-        }
-    }
-    pub fn from_parts(input: Vec<Vec<Value>>, output: Vec<Value>) -> Self {
-        Self { input, output, mask: None }
-    }
-    pub fn from_parts_masked(input: Vec<Vec<Value>>, output: Vec<Value>, mask: Value) -> Self {
-        Self { input, output, mask: Some(mask) }
-    }
-    pub fn len(&self) -> usize {
-        self.output.len()
-    }
-    pub fn args_count(&self) -> usize {
-        self.input.len()
-    }
-    pub fn parse_from_file(func: &str, arity: usize, file: &SyGuSFile) -> Result<Self> {
-        let view = ProblemView::from_file(file);
-        Self::parse_from_view(func, arity, &view)
-    }
-
-    pub fn parse_from_view(
-        func: &str,
-        arity: usize,
-        view: &ProblemView<'_>,
-    ) -> Result<Self> {
-        let mut input: Vec<Vec<Value>> = (0..arity).map(|_| Vec::new()).collect();
-        let mut output = Vec::new();
-        for value in &view.constraints {
-            let Some((lhs, rhs)) = term_eq(value) else {
-                continue;
-            };
-            let Some(args) = term_call_to(lhs, func, arity) else {
-                continue;
-            };
-            let mut row = Vec::with_capacity(arity);
-            for arg in args {
-                let SyGuSTerm::Literal(lit) = arg else {
-                    row.clear();
-                    break;
-                };
-                row.push(literal_to_value(lit)?);
-            }
-            if row.len() != arity {
-                continue;
-            }
-            let SyGuSTerm::Literal(lit) = rhs else {
-                continue;
-            };
-            for (value, vec) in row.into_iter().zip(input.iter_mut()) {
-                vec.push(value);
-            }
-            output.push(literal_to_value(lit)?);
-        }
-        Ok(PbeConstraint { input, output, mask: None })
-    }
-
-    pub fn bv_from_slice<const N: usize>(&self, iter: &[usize; N]) -> (Vec<Bv<N>>, Bv<N>) {
-        (
-            self.input
-                .iter()
-                .map(|x| Bv(iter.map(|i| x[i].as_u64_lossy()).into()))
-                .collect(),
-            Bv(iter.map(|i| self.output[i].as_u64_lossy()).into()),
-        )
-    }
-    pub fn args(&self, i: usize) -> SmallVec<[Value; 4]> {
-        self.input.iter().map(|x| x[i].clone()).collect()
-    }
-    pub fn test(&self, expr: &Expr) -> SetBuf<usize> {
-        SetBuf::new_unchecked(
-            (0..self.len())
-                .into_iter()
-                .flat_map(|i| {
-                    let ok = expr
-                        .eval(self.args(i).as_slice())
-                        .map(|x| match &self.mask {
-                            None => x == self.output[i],
-                            Some(m) => x.bitxor(self.output[i].clone()).bitand(m.clone()).is_zero(),
-                        })
-                        .unwrap_or(false);
-                    if ok { Some(i) } else { None }
-                })
-                .collect(),
-        )
-    }
-    #[cfg(feature = "chatgpt")]
-    pub fn test_owned(&self, expr: &OwnedExpr) -> SetBuf<usize> {
-        SetBuf::new_unchecked(
-            (0..self.len())
-                .into_iter()
-                .flat_map(|i| {
-                    if expr
-                        .eval(self.args(i).as_slice())
-                        .map(|x| x == self.output[i].clone())
-                        .unwrap_or(false)
-                    {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        )
-    }
-    pub fn test_and(&self, expr: &Expr) -> bool {
-        (0..self.len()).into_iter().all(|i| {
-            expr.eval(self.args(i).as_slice())
-                .map(|x| self.output[i].clone().bitand(x.bitnot()).is_zero())
-                .unwrap_or(false)
-        })
-    }
-    pub fn test_or(&self, expr: &Expr) -> bool {
-        (0..self.len()).into_iter().all(|i| {
-            expr.eval(self.args(i).as_slice())
-                .map(|x| self.output[i].clone().bitnot().bitand(x).is_zero())
-                .unwrap_or(false)
-        })
-    }
-
-    pub fn set_output(mut self, value: Value) -> Self {
-        self.output.iter_mut().for_each(|x| *x = value.clone());
-        self
-    }
-    pub fn add_example(&mut self, input: &[Value], output: Value) {
-        self.input
-            .iter_mut()
-            .zip(input.iter())
-            .for_each(|(x, p)| x.push(p.clone()));
-        self.output.push(output)
-    }
-    pub fn random_example(&mut self, rng: &mut StdRng, mask: u64, expr: &OwnedExpr, len: usize) {
-        loop {
-            let args = (0..len)
-                .map(|_| Value::from_u64(rng.gen::<u64>() & mask, 64))
-                .collect_vec();
-            if let Ok(a) = expr.eval(&*args) {
-                self.add_example(&args, a);
-                break;
-            }
-        }
-    }
-    #[cfg(feature = "chatgpt")]
-    pub fn fmt(&self, arity: usize) -> String {
-        let iter = (0..self.output.len()).map(|x| {
-            (
-                (0..arity).map(|i| self.input[i][x].clone()).collect_vec(),
-                self.output[x].clone(),
-            )
-        });
-        let mut siter = iter.map(|(v, o)| {
-            format!(
-                "({}) -> {}",
-                v.iter().map(|j| format!("{}", j)).join(", "),
-                o
-            )
-        });
-        format!("Here are some examples:\n{}", siter.join("\n"))
-    }
-}
-
-// ---------------------------------------------------------------------------
 //  RefImplConstraint — symbolic reference implementation. CEGIS uses it both
 //  to seed examples and to verify candidate equivalence via SMT.
 // ---------------------------------------------------------------------------
@@ -851,8 +671,14 @@ impl RefImplConstraint {
         Ok(None)
     }
     #[cfg(feature = "chatgpt")]
-    pub fn generate_pbe(&self, count: usize, arity: usize, rng: &mut StdRng) -> PbeConstraint {
-        let mut res = PbeConstraint::new(arity);
+    pub fn generate_pbe(
+        &self,
+        count: usize,
+        arity: usize,
+        bits: usize,
+        rng: &mut StdRng,
+    ) -> BitSpec {
+        let mut res = BitSpec::empty(arity, bits);
         for _ in 0..count {
             let mask = [
                 u64::MAX,
@@ -875,7 +701,7 @@ impl RefImplConstraint {
 mod tests {
     use sygus_parser::ast::SyGuSFile;
 
-    use super::PbeConstraint;
+    use crate::exact::BitSpec;
 
     #[test]
     fn test_constraint() {
@@ -885,7 +711,7 @@ mod tests {
         ",
         )
         .unwrap();
-        let contraint = PbeConstraint::parse_from_file("f", 2, &e).unwrap();
-        println!("{:?}", contraint);
+        let spec = BitSpec::parse_pbe_from_file("f", 2, 64, &e).unwrap();
+        assert_eq!(spec.examples.len(), 2);
     }
 }

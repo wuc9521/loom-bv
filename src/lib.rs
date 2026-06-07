@@ -9,13 +9,13 @@ use figment::{
 };
 #[cfg(feature = "chatgpt")]
 use itertools::Itertools;
-use parse::{constraint::RefImplConstraint, deffun, PbeConstraint, ProblemView};
+use parse::{constraint::RefImplConstraint, deffun, ProblemView};
 use sygus_parser::ast::{SyGuSCmd, SyGuSFile};
 #[cfg(feature = "chatgpt")]
 use std::sync::mpsc;
 use std::{env, thread};
 
-use crate::{parse::SynthProblem, search::search::SearchConfig};
+use crate::{exact::BitSpec, parse::SynthProblem, search::search::SearchConfig};
 extern crate pest;
 
 mod cegis;
@@ -106,34 +106,19 @@ fn solve_file_inner(
 
     let mut problem = SynthProblem::parse_from_view(&view)?;
     problem.description = description;
-    let pbecstr = PbeConstraint::parse_from_view(problem.name, problem.args.len(), &view)?;
+    let pbecstr =
+        BitSpec::parse_pbe_from_view(problem.name, problem.args.len(), problem.bits, &view)?;
     if let Some(spec) = exact::BitSpec::from_file(file, &problem)? {
         if env::var("DRYADSYNTH_USE_PBE").is_ok()
             && spec.structural.is_empty()
             && spec.examples.first().map_or(false, |e| e.args.len() > 0)
             && !spec.examples.is_empty()
         {
-            let arity = spec.examples[0].args.len();
-            let mut input: Vec<Vec<_>> = (0..arity).map(|_| Vec::new()).collect();
-            let mut output = Vec::new();
-            let mut mask_raw = num_bigint::BigUint::ZERO;
-            for example in &spec.examples {
-                for (i, arg) in example.args.iter().enumerate() {
-                    input[i].push(arg.clone());
-                }
-                let mut out_raw = num_bigint::BigUint::ZERO;
-                for (&bit, &val) in &example.known_bits {
-                    mask_raw |= num_bigint::BigUint::from(1u64) << bit;
-                    if val {
-                        out_raw |= num_bigint::BigUint::from(1u64) << bit;
-                    }
-                }
-                output.push(enumerate::value::Value::from_biguint(out_raw, spec.bits));
-            }
-            let mask = enumerate::value::Value::from_biguint(mask_raw, spec.bits);
-            let pbe = PbeConstraint::from_parts_masked(input, output, mask);
-            debg!("exact->pbe reroute: {} examples, {} bits, {}/{} known",
-                pbe.len(), spec.bits, spec.examples[0].known_bits.len(), spec.bits);
+            debg!(
+                "exact->pbe reroute: {} examples, {} bits",
+                spec.len(),
+                spec.bits
+            );
             let fig = Figment::new().merge(Serialized::defaults(SearchConfig::default_pbe()));
             let fig = if let Some(path) = config_path {
                 fig.merge(Toml::file(path))
@@ -142,7 +127,11 @@ fn solve_file_inner(
             };
             let mut config: SearchConfig = fig.extract()?;
             config.is_pbe = true;
-            let result = config.search(&problem, &pbe, PbeConstraint::new(arity))?;
+            let result = config.search(
+                &problem,
+                &spec,
+                BitSpec::empty(problem.args.len(), problem.bits),
+            )?;
             return Ok(problem.format_solution(&result));
         }
         debg!(
@@ -164,7 +153,11 @@ fn solve_file_inner(
         };
         let mut config: SearchConfig = fig.extract()?;
         config.is_pbe = true;
-        let result = config.search(&problem, &pbecstr, PbeConstraint::new(problem.args.len()))?;
+        let result = config.search(
+            &problem,
+            &pbecstr,
+            BitSpec::empty(problem.args.len(), problem.bits),
+        )?;
         Ok(problem.format_solution(&result))
     } else if let Some(refimpl) =
         RefImplConstraint::parse_from_view(&view, problem.name, problem.args.len())?
@@ -207,7 +200,7 @@ fn solve_file_inner(
             });
             let _ = thread::spawn(move || {
                 log::set_log_level(l);
-                let pbe = refimpl.generate_pbe(3, problem.args.len(), &mut config.rng());
+                let pbe = refimpl.generate_pbe(3, problem.args.len(), problem.bits, &mut config.rng());
                 info!("Use ChatGPT to guide the search");
                 let result = chatgpt::ask(&problem, pbe.clone(), config.gpt_version.clone());
                 info!("Use ChatGPT to guide the search: {:?}", result);

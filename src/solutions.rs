@@ -12,8 +12,8 @@ use crate::{
         expr::{Expr, OwnedExpr},
         Bv,
     },
+    exact::BitSpec,
     info,
-    parse::PbeConstraint,
     tree_learning::{self, Bits},
 };
 
@@ -22,18 +22,18 @@ pub type CondBuffer = Arc<Mutex<Vec<(OwnedExpr, Bits)>>>;
 pub struct Solutions<'a> {
     pub unsolved: SetBuf<usize>,
     pub solved: Vec<(OwnedExpr, SetBuf<usize>)>,
-    pub pbecstr: &'a PbeConstraint,
+    pub pbecstr: &'a BitSpec,
     pub check_dups: bool,
     pub sample_all: bool,
     pub check_tree_learning: Option<(CondBuffer, usize)>,
     pub cover_limit: usize,
-    pub additional_check: PbeConstraint,
+    pub additional_check: BitSpec,
     pub cond_buffer: Option<CondBuffer>,
     pub wait_cond: usize,
 }
 
 impl<'a> Solutions<'a> {
-    pub fn new(cstr: &'a PbeConstraint, check_dups: bool, sample_all: bool) -> Self {
+    pub fn new(cstr: &'a BitSpec, check_dups: bool, sample_all: bool) -> Self {
         let unsolved = sdset::SetBuf::new_unchecked((0..cstr.len()).collect());
         let solved = Vec::new();
         Self {
@@ -44,7 +44,7 @@ impl<'a> Solutions<'a> {
             check_dups,
             sample_all,
             check_tree_learning: None,
-            additional_check: PbeConstraint::new(cstr.args_count()),
+            additional_check: BitSpec::empty(cstr.args_count(), cstr.bits),
             cond_buffer: None,
             wait_cond: 0,
         }

@@ -7,12 +7,13 @@ use rsmt2::{
 
 use crate::{
     enumerate::{expr::OwnedExpr, utils::run_with_timeout, value::Value},
+    exact::BitSpec,
     info,
-    parse::{constraint::RefImplConstraint, literals, PbeConstraint},
+    parse::{constraint::RefImplConstraint, literals},
 };
 
 pub struct CegisState {
-    pub examples: PbeConstraint,
+    pub examples: BitSpec,
     constraint: RefImplConstraint,
     bits: usize,
     conf: SmtConf,
@@ -21,7 +22,7 @@ pub struct CegisState {
 impl CegisState {
     pub fn new(args: usize, bits: usize, refimpl: RefImplConstraint, conf: SmtConf) -> Self {
         Self {
-            examples: PbeConstraint::new(args),
+            examples: BitSpec::empty(args, bits),
             constraint: refimpl,
             bits,
             conf,

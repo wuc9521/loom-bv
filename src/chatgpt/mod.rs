@@ -8,7 +8,8 @@ use openai::chat::{
 use crate::{
     debg,
     enumerate::expr::OwnedExpr,
-    parse::{PbeConstraint, SynthProblem},
+    exact::BitSpec,
+    parse::SynthProblem,
 };
 
 use self::parsing::Env;
@@ -78,7 +79,7 @@ pub async fn ask_chatgpt(
 #[tokio::main]
 pub async fn ask(
     problem: &SynthProblem<'_>,
-    pbe: PbeConstraint,
+    pbe: BitSpec,
     gpt_version: String,
 ) -> Vec<HashMap<String, OwnedExpr>> {
     let system = "You are a helpful assistant helping user synthesizing bit-vector programs. Please just give the result without comments.";
