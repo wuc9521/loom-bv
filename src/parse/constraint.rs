@@ -1,5 +1,5 @@
 //! SyGuS constraint parsing — produces `RefImplConstraint` and the
-//! bit-extract / structural-constraint shapes consumed by `BitSpec`.
+//! bit-extract / structural-constraint shapes consumed by `Constraint`.
 
 use std::collections::BTreeMap;
 
@@ -14,7 +14,7 @@ use sygus_parser::ast::{
 use crate::enumerate::{expr::OwnedExpr, value::Value};
 
 #[cfg(feature = "chatgpt")]
-use crate::exact::BitSpec;
+use crate::exact::Constraint;
 
 use super::{literals, new_custom_error_span, ProblemView, Result};
 
@@ -139,7 +139,7 @@ pub fn extract_indices_from_identifier(id: &Identifier) -> Option<(usize, usize)
 }
 
 // ---------------------------------------------------------------------------
-//  Bit-extract / structural constraint parsing (consumed by `exact::BitSpec`)
+//  Bit-extract / structural constraint parsing (consumed by `exact::Constraint`)
 // ---------------------------------------------------------------------------
 
 pub struct BitConstraintExample {
@@ -677,8 +677,8 @@ impl RefImplConstraint {
         arity: usize,
         bits: usize,
         rng: &mut StdRng,
-    ) -> BitSpec {
-        let mut res = BitSpec::empty(arity, bits);
+    ) -> Constraint {
+        let mut res = Constraint::empty(arity, bits);
         for _ in 0..count {
             let mask = [
                 u64::MAX,
@@ -701,7 +701,7 @@ impl RefImplConstraint {
 mod tests {
     use sygus_parser::ast::SyGuSFile;
 
-    use crate::exact::BitSpec;
+    use crate::exact::Constraint;
 
     #[test]
     fn test_constraint() {
@@ -711,7 +711,7 @@ mod tests {
         ",
         )
         .unwrap();
-        let spec = BitSpec::parse_pbe_from_file("f", 2, 64, &e).unwrap();
+        let spec = Constraint::parse_pbe_from_file("f", 2, 64, &e).unwrap();
         assert_eq!(spec.examples.len(), 2);
     }
 }

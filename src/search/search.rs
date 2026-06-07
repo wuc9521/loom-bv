@@ -12,7 +12,7 @@ use crate::{
         expr::{Expr, OwnedExpr},
         value::Value,
     },
-    exact::BitSpec,
+    exact::Constraint,
     info,
     parse::{self, constraint::RefImplConstraint, SynthProblem},
     solutions::Solutions,
@@ -117,8 +117,8 @@ impl SearchConfig {
     pub fn search(
         &mut self,
         problem: &SynthProblem<'static>,
-        pbecstr: &BitSpec,
-        additional_example: BitSpec,
+        pbecstr: &Constraint,
+        additional_example: Constraint,
     ) -> parse::Result<OwnedExpr> {
         let mut limited_ite = self.limited_ite;
         if self.ite_tree_limit == 1 || pbecstr.len() <= 1 {
@@ -249,8 +249,8 @@ impl SearchConfig {
             refimpl.clone(),
             self.get_smt_conf(),
         );
-        let no_additional_check = BitSpec::empty(problem.args.len(), problem.bits);
-        let mut additional_check = BitSpec::empty(problem.args.len(), problem.bits);
+        let no_additional_check = Constraint::empty(problem.args.len(), problem.bits);
+        let mut additional_check = Constraint::empty(problem.args.len(), problem.bits);
         {
             let mut rng = self.rng();
             for _ in 0..self.additional_check {

@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::{enumerate::expr::OwnedExpr, info, parse::deffun};
 
-use super::{ExactGrammar, ExactRule};
+use super::{Grammar, ExactRule};
 
 use bits::{BitDep, BitSet, WorkItem};
 use deps::{
@@ -23,7 +23,7 @@ use deps::{
 };
 
 pub struct Relevance<'a> {
-    grammar: &'a ExactGrammar<'a>,
+    grammar: &'a Grammar<'a>,
     nt_bits: Vec<usize>,
     dep_cache: DepCache,
     template_dep_cache: TemplateDepCache,
@@ -38,7 +38,7 @@ pub struct Relevance<'a> {
 
 impl<'a> Relevance<'a> {
     pub fn new(
-        grammar: &'a ExactGrammar<'a>,
+        grammar: &'a Grammar<'a>,
         bits: usize,
         known_bits: &BTreeMap<usize, bool>,
     ) -> Option<Self> {

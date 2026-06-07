@@ -197,7 +197,7 @@ impl<'a> LfpSpec<'a> {
             axioms: None,
         };
         let labels: BTreeMap<usize, bool> = self.labels().iter().copied().collect();
-        let spec = super::bitspec::BitSpec::from_labels(
+        let spec = super::bitspec::Constraint::from_labels(
             self.bits(),
             labels,
         );

@@ -16,7 +16,7 @@ use crate::{
     exact::{
         relevance::{bits, Relevance},
         search::search_problem,
-        types::ExactGrammar,
+        types::Grammar,
     },
     parse::{
         self,
@@ -58,7 +58,7 @@ pub struct ClosureInfo;
 
 #[derive(DebugCustom, Clone)]
 #[debug(fmt = "{} examples, bits={}", "examples.len()", bits)]
-pub struct BitSpec {
+pub struct Constraint {
     pub bits: usize,
     pub args: usize,
     pub examples: Vec<Example>,
@@ -74,7 +74,7 @@ fn all_ones(bits: usize) -> Value {
     }
 }
 
-impl BitSpec {
+impl Constraint {
     pub fn empty(args: usize, bits: usize) -> Self {
         Self {
             bits,
@@ -419,7 +419,7 @@ impl BitSpec {
 
     pub fn compute_relevant_bits(
         &self,
-        grammar: &ExactGrammar<'_>,
+        grammar: &Grammar<'_>,
     ) -> Option<Vec<Vec<usize>>> {
         if !self.structural.is_empty() {
             return None;

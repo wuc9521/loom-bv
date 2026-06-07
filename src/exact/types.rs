@@ -1,5 +1,5 @@
 //! Core data types for the exact-nullary search engine: `Node` /
-//! `ExactGrammar` / `ExactRule` describe the compiled grammar, `Candidate`
+//! `Grammar` / `ExactRule` describe the compiled grammar, `Candidate`
 //! is the search-time tuple of (NodeId, value, value_top), and
 //! `ExactEvalCache` is the leaf-eval memo used by `TemplateExpr::evaluate`.
 
@@ -20,7 +20,7 @@ pub struct Node {
 }
 
 #[derive(Clone)]
-pub struct ExactGrammar<'a> {
+pub struct Grammar<'a> {
     pub nts: Vec<(&'a str, Vec<ExactRule>)>,
     pub start: usize,
 }

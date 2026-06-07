@@ -31,10 +31,10 @@ pub mod stats;
 pub mod types;
 pub mod util;
 
-pub use bitspec::BitSpec;
+pub use bitspec::Constraint;
 pub use eval::{eval_defined_with_closure, EvalCache};
 pub use stats::DedupStats;
-pub use types::{ExactGrammar, ExactRule};
+pub use types::{Grammar, ExactRule};
 
 // Backward-compat free-function shims kept for the LFP frontend (lfp.rs)
 // while we land the method-style API. These will be inlined once lfp.rs

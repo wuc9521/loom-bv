@@ -13,7 +13,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::enumerate::value::Value;
-use crate::exact::types::{ExactGrammar, Node, NodeId};
+use crate::exact::types::{Grammar, Node, NodeId};
 use crate::info;
 
 #[derive(Default)]
@@ -134,7 +134,7 @@ impl DedupStats {
         size: usize,
         node: NodeId,
         value_at_zero: &Value,
-        grammar: &ExactGrammar<'_>,
+        grammar: &Grammar<'_>,
         nodes: &[Node],
         closure_name: &str,
     ) {

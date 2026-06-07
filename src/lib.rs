@@ -15,7 +15,7 @@ use sygus_parser::ast::{SyGuSCmd, SyGuSFile};
 use std::sync::mpsc;
 use std::{env, thread};
 
-use crate::{exact::BitSpec, parse::SynthProblem, search::search::SearchConfig};
+use crate::{exact::Constraint, parse::SynthProblem, search::search::SearchConfig};
 extern crate pest;
 
 mod cegis;
@@ -107,8 +107,8 @@ fn solve_file_inner(
     let mut problem = SynthProblem::parse_from_view(&view)?;
     problem.description = description;
     let pbecstr =
-        BitSpec::parse_pbe_from_view(problem.name, problem.args.len(), problem.bits, &view)?;
-    if let Some(spec) = exact::BitSpec::from_file(file, &problem)? {
+        Constraint::parse_pbe_from_view(problem.name, problem.args.len(), problem.bits, &view)?;
+    if let Some(spec) = exact::Constraint::from_file(file, &problem)? {
         if env::var("DRYADSYNTH_USE_PBE").is_ok()
             && spec.structural.is_empty()
             && spec.examples.first().map_or(false, |e| e.args.len() > 0)
@@ -130,7 +130,7 @@ fn solve_file_inner(
             let result = config.search(
                 &problem,
                 &spec,
-                BitSpec::empty(problem.args.len(), problem.bits),
+                Constraint::empty(problem.args.len(), problem.bits),
             )?;
             return Ok(problem.format_solution(&result));
         }
@@ -156,7 +156,7 @@ fn solve_file_inner(
         let result = config.search(
             &problem,
             &pbecstr,
-            BitSpec::empty(problem.args.len(), problem.bits),
+            Constraint::empty(problem.args.len(), problem.bits),
         )?;
         Ok(problem.format_solution(&result))
     } else if let Some(refimpl) =

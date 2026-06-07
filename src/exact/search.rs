@@ -1,4 +1,4 @@
-//! Bottom-up enumeration over the compiled `ExactGrammar`, with value-based
+//! Bottom-up enumeration over the compiled `Grammar`, with value-based
 //! dedup. Two modes (selected by `Searcher::closure`):
 //!
 //! - **Direct** (`closure = None`): each candidate's value is composed from
@@ -27,18 +27,18 @@ use crate::enumerate::{
     grammar::{for_each_candidate_tuple, for_each_size_split, MultiConfig},
     value::Value,
 };
-use crate::exact::bitspec::BitSpec;
+use crate::exact::bitspec::Constraint;
 use crate::exact::closure::Closure;
 use crate::exact::dedup::SeenMode;
 use crate::exact::eval::eval_defined_with_closure;
 use crate::exact::stats::DedupStats;
-use crate::exact::types::{Candidate, ExactEvalCache, ExactGrammar, ExactRule, Node, NodeId};
+use crate::exact::types::{Candidate, ExactEvalCache, Grammar, ExactRule, Node, NodeId};
 use crate::parse::{self, deffun, SynthProblem};
 use crate::parse::deffun::BitCircuitPlan;
 
 pub fn run_search<'a>(
-    grammar: ExactGrammar<'a>,
-    spec: &BitSpec,
+    grammar: Grammar<'a>,
+    spec: &Constraint,
     min: bool,
     fixpoint: Option<&str>,
 ) -> parse::Result<OwnedExpr> {
@@ -46,8 +46,8 @@ pub fn run_search<'a>(
 }
 
 struct Searcher<'a, 'g> {
-    grammar: ExactGrammar<'a>,
-    spec: &'g BitSpec,
+    grammar: Grammar<'a>,
+    spec: &'g Constraint,
     num_examples: usize,
     closure: Option<Closure>,
     nodes: Vec<Node>,
@@ -59,8 +59,8 @@ struct Searcher<'a, 'g> {
 
 impl<'a, 'g> Searcher<'a, 'g> {
     fn new(
-        grammar: ExactGrammar<'a>,
-        spec: &'g BitSpec,
+        grammar: Grammar<'a>,
+        spec: &'g Constraint,
         min: bool,
         fixpoint: Option<&str>,
     ) -> Self {
@@ -638,7 +638,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
     }
 }
 
-fn log_grammar_summary(grammar: &ExactGrammar<'_>) {
+fn log_grammar_summary(grammar: &Grammar<'_>) {
     let mut leaf = 0usize;
     let mut alias = 0usize;
     let mut op = 0usize;
@@ -663,11 +663,11 @@ fn log_grammar_summary(grammar: &ExactGrammar<'_>) {
     );
 }
 
-/// Build the `ExactGrammar` and dispatch to the `Searcher`. Replaces the
+/// Build the `Grammar` and dispatch to the `Searcher`. Replaces the
 /// old free-function `search_nullary_multi_nt`.
 pub fn search_problem<'a>(
     problem: &'a SynthProblem<'static>,
-    spec: &BitSpec,
+    spec: &Constraint,
     min: bool,
     fixpoint: Option<&'a str>,
 ) -> parse::Result<OwnedExpr> {
@@ -678,7 +678,7 @@ pub fn search_problem<'a>(
         cfg_start.elapsed()
     );
     let grammar_start = Instant::now();
-    let grammar = ExactGrammar::from_config(&multi);
+    let grammar = Grammar::from_config(&multi);
     debg!(
         "exact grammar built in {:?}",
         grammar_start.elapsed()

@@ -3,9 +3,9 @@ use crate::{
     parse::deffun,
 };
 
-use super::{ExactGrammar, ExactRule};
+use super::{Grammar, ExactRule};
 
-impl ExactGrammar<'static> {
+impl Grammar<'static> {
     pub fn from_config(grammar: &MultiConfig<'static>) -> Self {
     let nts = grammar
         .nts

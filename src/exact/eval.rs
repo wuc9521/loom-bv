@@ -5,7 +5,7 @@
 //!   and a thread-local cross-call memo keyed on `(fid, args, aux)`.
 //! - `EvalCache`: the memo cache itself, controlled via static methods
 //!   (`EvalCache::enable` / `EvalCache::dump_and_disable`).
-//! - `ExactGrammar::materialize_node` / `ExactGrammar::eval_node_at`:
+//! - `Grammar::materialize_node` / `Grammar::eval_node_at`:
 //!   walks over the Node DAG. Used by the LFP-mode Kleene loop and by
 //!   the final solution materialization.
 
@@ -13,7 +13,7 @@ use rustc_hash::FxHashMap;
 
 use crate::enumerate::{expr::OwnedExpr, value::Value};
 use crate::exact::relevance;
-use crate::exact::types::{ExactGrammar, ExactRule, Node, NodeId};
+use crate::exact::types::{Grammar, ExactRule, Node, NodeId};
 use crate::{debg, info};
 use crate::parse::deffun;
 
@@ -120,10 +120,10 @@ pub fn eval_defined_with_closure(
 }
 
 // ---------------------------------------------------------------------------
-//  ExactGrammar — Node-DAG materialization and evaluation
+//  Grammar — Node-DAG materialization and evaluation
 // ---------------------------------------------------------------------------
 
-impl<'a> ExactGrammar<'a> {
+impl<'a> Grammar<'a> {
     pub fn log_relevance_summary(
         &self,
         relevant_bits: &[Vec<usize>],
