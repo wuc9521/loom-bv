@@ -20,6 +20,7 @@ use super::{literal_to_value, term_call_to, term_eq};
 pub struct PbeConstraint {
     input: Vec<Vec<Value>>,
     output: Vec<Value>,
+    mask: Option<Value>,
 }
 
 impl PbeConstraint {
@@ -27,7 +28,14 @@ impl PbeConstraint {
         Self {
             input: (0..args).map(|_| Vec::new()).collect(),
             output: Vec::new(),
+            mask: None,
         }
+    }
+    pub fn from_parts(input: Vec<Vec<Value>>, output: Vec<Value>) -> Self {
+        Self { input, output, mask: None }
+    }
+    pub fn from_parts_masked(input: Vec<Vec<Value>>, output: Vec<Value>, mask: Value) -> Self {
+        Self { input, output, mask: Some(mask) }
     }
     pub fn len(&self) -> usize {
         self.output.len()
@@ -73,7 +81,7 @@ impl PbeConstraint {
             }
             output.push(literal_to_value(lit)?);
         }
-        Ok(PbeConstraint { input, output })
+        Ok(PbeConstraint { input, output, mask: None })
     }
 
     pub fn bv_from_slice<const N: usize>(&self, iter: &[usize; N]) -> (Vec<Bv<N>>, Bv<N>) {
@@ -93,15 +101,14 @@ impl PbeConstraint {
             (0..self.len())
                 .into_iter()
                 .flat_map(|i| {
-                    if expr
+                    let ok = expr
                         .eval(self.args(i).as_slice())
-                        .map(|x| x == self.output[i].clone())
-                        .unwrap_or(false)
-                    {
-                        Some(i)
-                    } else {
-                        None
-                    }
+                        .map(|x| match &self.mask {
+                            None => x == self.output[i],
+                            Some(m) => x.bitxor(self.output[i].clone()).bitand(m.clone()).is_zero(),
+                        })
+                        .unwrap_or(false);
+                    if ok { Some(i) } else { None }
                 })
                 .collect(),
         )

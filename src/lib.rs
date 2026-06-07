@@ -108,6 +108,43 @@ fn solve_file_inner(
     problem.description = description;
     let pbecstr = PbeConstraint::parse_from_view(problem.name, problem.args.len(), &view)?;
     if let Some(spec) = exact::BitSpec::from_file(file, &problem)? {
+        if env::var("DRYADSYNTH_USE_PBE").is_ok()
+            && spec.structural.is_empty()
+            && spec.examples.first().map_or(false, |e| e.args.len() > 0)
+            && !spec.examples.is_empty()
+        {
+            let arity = spec.examples[0].args.len();
+            let mut input: Vec<Vec<_>> = (0..arity).map(|_| Vec::new()).collect();
+            let mut output = Vec::new();
+            let mut mask_raw = num_bigint::BigUint::ZERO;
+            for example in &spec.examples {
+                for (i, arg) in example.args.iter().enumerate() {
+                    input[i].push(arg.clone());
+                }
+                let mut out_raw = num_bigint::BigUint::ZERO;
+                for (&bit, &val) in &example.known_bits {
+                    mask_raw |= num_bigint::BigUint::from(1u64) << bit;
+                    if val {
+                        out_raw |= num_bigint::BigUint::from(1u64) << bit;
+                    }
+                }
+                output.push(enumerate::value::Value::from_biguint(out_raw, spec.bits));
+            }
+            let mask = enumerate::value::Value::from_biguint(mask_raw, spec.bits);
+            let pbe = PbeConstraint::from_parts_masked(input, output, mask);
+            debg!("exact->pbe reroute: {} examples, {} bits, {}/{} known",
+                pbe.len(), spec.bits, spec.examples[0].known_bits.len(), spec.bits);
+            let fig = Figment::new().merge(Serialized::defaults(SearchConfig::default_pbe()));
+            let fig = if let Some(path) = config_path {
+                fig.merge(Toml::file(path))
+            } else {
+                fig
+            };
+            let mut config: SearchConfig = fig.extract()?;
+            config.is_pbe = true;
+            let result = config.search(&problem, &pbe, PbeConstraint::new(arity))?;
+            return Ok(problem.format_solution(&result));
+        }
         debg!(
             "exact search: {} (bits={}, examples={}, cmds={})",
             problem.name,
