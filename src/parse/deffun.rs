@@ -1093,7 +1093,7 @@ impl Environ {
                         "DefineFun: unsupported return sort for {}: {}",
                         name, def.ret
                     ),
-                    pest::Span::new("", 0, 0).unwrap(),
+                    (),
                 )
             })?;
             let mut symbols = Vec::new();

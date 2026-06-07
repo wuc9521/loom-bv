@@ -61,6 +61,36 @@ impl BitVec {
         }
     }
 
+    pub fn matches_masked(&self, expected: &Self, mask: &Self) -> bool {
+        match (self, expected, mask) {
+            (
+                BitVec::Small { raw: a, .. },
+                BitVec::Small { raw: b, .. },
+                BitVec::Small { raw: m, .. },
+            ) => (a ^ b) & m == 0,
+            (
+                BitVec::Big { bits, raw: a, .. },
+                BitVec::Big { raw: b, .. },
+                BitVec::Big { raw: m, .. },
+            ) => {
+                let n = bits.div_ceil(64);
+                let mut a_iter = a.iter_u64_digits();
+                let mut b_iter = b.iter_u64_digits();
+                let mut m_iter = m.iter_u64_digits();
+                for _ in 0..n {
+                    let a = a_iter.next().unwrap_or(0);
+                    let b = b_iter.next().unwrap_or(0);
+                    let m = m_iter.next().unwrap_or(0);
+                    if (a ^ b) & m != 0 {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => unreachable!(),
+        }
+    }
+
     /// Reinterpret this `BitVec` as a Bool in dryadsynth's negative-logic
     /// internal encoding (SMT-true ↔ all bits 0, SMT-false ↔ any bit 1).
     /// `(= a b)` is parsed as `Xor(a, b)` so the bit-zero result means

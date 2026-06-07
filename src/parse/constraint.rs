@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 
 use derive_more::DebugCustom;
-use pest::Span;
 #[cfg(feature = "chatgpt")]
 use rand::{rngs::StdRng, seq::SliceRandom};
 use sygus_parser::ast::{
@@ -16,42 +15,54 @@ use crate::enumerate::{expr::OwnedExpr, value::BitVec};
 #[cfg(feature = "chatgpt")]
 use crate::exact::Constraint;
 
-use super::{literals, new_custom_error_span, ProblemView, Result};
+use super::{new_custom_error_span, ProblemView, Result};
 
 // ---------------------------------------------------------------------------
 //  Generic SyGuS-term helpers
 // ---------------------------------------------------------------------------
 
-pub fn empty_span() -> Span<'static> {
-    Span::new("", 0, 0).expect("empty span should be valid")
+pub fn empty_span() -> () {
+    ()
 }
 
-pub(crate) fn literal_to_value(lit: &SyGuSLiteral) -> Result<BitVec> {
+pub fn literal_to_value(lit: &SyGuSLiteral) -> Result<BitVec> {
     match lit {
         SyGuSLiteral::Numeral(v) => Ok(BitVec::from_u64(*v as u64, 64)),
         SyGuSLiteral::Bool(v) => Ok(BitVec::from_u64(if *v { 1 } else { 0 }, 1)),
-        SyGuSLiteral::HexConst(v) => {
-            let s = if v.starts_with("#x") {
-                v.clone()
-            } else {
-                format!("#x{}", v)
-            };
-            let bits = v.trim_start_matches("#x").len() * 4;
-            literals::value_constant(&s, bits.max(1), empty_span())
+        SyGuSLiteral::HexConst(digits) => {
+            let bits = digits.len() * 4;
+            parse_bv_digits(digits, 16, bits.max(1))
         }
-        SyGuSLiteral::BinConst(v) => {
-            let s = if v.starts_with("#b") {
-                v.clone()
-            } else {
-                format!("#b{}", v)
-            };
-            let bits = v.trim_start_matches("#b").len();
-            literals::value_constant(&s, bits.max(1), empty_span())
+        SyGuSLiteral::BinConst(digits) => {
+            let bits = digits.len();
+            parse_bv_digits(digits, 2, bits.max(1))
         }
         SyGuSLiteral::Decimal(_) | SyGuSLiteral::StringConst(_) => Err(new_custom_error_span(
             "Constraint parser: expecting a SyGuS constant literal".into(),
             empty_span(),
         )),
+    }
+}
+
+pub fn parse_bv_digits(digits: &str, radix: u32, bits: usize) -> Result<BitVec> {
+    if bits <= 64 {
+        u64::from_str_radix(digits, radix)
+            .map(|v| BitVec::from_u64(v, bits))
+            .map_err(|_| {
+                new_custom_error_span(
+                    format!("Invalid bitvector constant: {}", digits),
+                    empty_span(),
+                )
+            })
+    } else {
+        num_bigint::BigUint::parse_bytes(digits.as_bytes(), radix)
+            .map(|v| BitVec::from_biguint(v, bits))
+            .ok_or_else(|| {
+                new_custom_error_span(
+                    format!("Invalid bitvector constant: {}", digits),
+                    empty_span(),
+                )
+            })
     }
 }
 
@@ -105,37 +116,16 @@ fn numeral_index(idx: &Index) -> Option<usize> {
 }
 
 pub fn extract_indices_from_identifier(id: &Identifier) -> Option<(usize, usize)> {
-    match id {
-        Identifier::Indexed(sym, idxs) if sym == "extract" && idxs.len() >= 2 => {
-            match (numeral_index(&idxs[0]), numeral_index(&idxs[1])) {
-                (Some(hi), Some(lo)) => Some((hi, lo)),
-                _ => None,
-            }
-        }
-        Identifier::Indexed(sym, idxs) if sym == "_" && idxs.len() >= 3 => {
-            match (&idxs[0], numeral_index(&idxs[1]), numeral_index(&idxs[2])) {
-                (Index::Symbol(op), Some(hi), Some(lo)) if op == "extract" => Some((hi, lo)),
-                _ => None,
-            }
-        }
+    let Identifier::Indexed(sym, idxs) = id else {
+        return None;
+    };
+    if sym != "extract" || idxs.len() < 2 {
+        return None;
+    }
+    match (numeral_index(&idxs[0]), numeral_index(&idxs[1])) {
+        (Some(hi), Some(lo)) => Some((hi, lo)),
         _ => None,
     }
-    .or_else(|| {
-        let text = id.to_string();
-        let parts = text
-            .trim_matches(|c| c == '(' || c == ')')
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        match parts.as_slice() {
-            ["_", "extract", hi, lo] | ["extract", hi, lo] => {
-                match (hi.parse::<usize>(), lo.parse::<usize>()) {
-                    (Ok(hi), Ok(lo)) => Some((hi, lo)),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    })
 }
 
 // ---------------------------------------------------------------------------

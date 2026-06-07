@@ -1,7 +1,6 @@
 use bumpalo::Bump;
 use derive_more::{DebugCustom, Display};
-use pest::Span;
-use sygus_parser::ast::{Identifier, Literal as SyGuSLiteral, SyGuSTerm};
+use sygus_parser::ast::{Identifier, SyGuSTerm};
 use thiserror::Error;
 // use z3::{ast::{BV, Ast}, Symbol};
 
@@ -9,7 +8,7 @@ use crate::{
     all_ops, bv_op_of, enum_expr, enum_ownedexpr,
     enumerate::op,
     enumerate::value::BitVec,
-    parse::{self, deffun, literals, new_custom_error_span},
+    parse::{self, deffun, empty_span, new_custom_error_span},
     smt_name_of,
 };
 
@@ -341,83 +340,14 @@ enum_ownedexpr!();
 
 impl OwnedExpr {
     pub fn from_term(term: &SyGuSTerm, env: &[(&str, u64)]) -> parse::Result<Self> {
-        fn empty_span() -> Span<'static> {
-            Span::new("", 0, 0).expect("empty span should be valid")
-        }
-
         fn symbol_name(id: &Identifier) -> &str {
             id.get_name()
         }
 
-        fn index_numeral(idx: &sygus_parser::ast::Index) -> Option<u64> {
-            match idx {
-                sygus_parser::ast::Index::Numeral(v) => Some(*v as u64),
-                sygus_parser::ast::Index::Symbol(_) => None,
-            }
-        }
-
         fn extract_indices(id: &Identifier) -> Option<(u64, u64)> {
-            match id {
-                Identifier::Indexed(sym, idxs) if sym == "_" && idxs.len() >= 3 => {
-                    match (&idxs[0], index_numeral(&idxs[1]), index_numeral(&idxs[2])) {
-                        (sygus_parser::ast::Index::Symbol(op), Some(hi), Some(lo))
-                            if op == "extract" && hi >= lo =>
-                        {
-                            Some((hi, lo))
-                        }
-                        _ => None,
-                    }
-                }
-                Identifier::Indexed(sym, idxs) if sym == "extract" && idxs.len() >= 2 => {
-                    match (index_numeral(&idxs[0]), index_numeral(&idxs[1])) {
-                        (Some(hi), Some(lo)) if hi >= lo => Some((hi, lo)),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }
-            .or_else(|| {
-                let text = id.to_string();
-                let parts = text
-                    .trim_matches(|c| c == '(' || c == ')')
-                    .split_whitespace()
-                    .collect::<Vec<_>>();
-                match parts.as_slice() {
-                    ["_", "extract", hi, lo] => match (hi.parse::<u64>(), lo.parse::<u64>()) {
-                        (Ok(hi), Ok(lo)) if hi >= lo => Some((hi, lo)),
-                        _ => None,
-                    },
-                    _ => None,
-                }
-            })
-        }
-
-        fn literal_to_value(lit: &SyGuSLiteral) -> parse::Result<BitVec> {
-            match lit {
-                SyGuSLiteral::Numeral(v) => Ok(BitVec::from_u64(*v as u64, 64)),
-                SyGuSLiteral::Bool(v) => Ok(BitVec::from_u64(if *v { 1 } else { 0 }, 1)),
-                SyGuSLiteral::HexConst(v) => {
-                    let s = if v.starts_with("#x") {
-                        v.clone()
-                    } else {
-                        format!("#x{}", v)
-                    };
-                    let bits = v.trim_start_matches("#x").len() * 4;
-                    literals::value_constant(&s, bits.max(1), empty_span())
-                }
-                SyGuSLiteral::BinConst(v) => {
-                    let s = if v.starts_with("#b") {
-                        v.clone()
-                    } else {
-                        format!("#b{}", v)
-                    };
-                    let bits = v.trim_start_matches("#b").len();
-                    literals::value_constant(&s, bits.max(1), empty_span())
-                }
-                SyGuSLiteral::Decimal(_) | SyGuSLiteral::StringConst(_) => Err(
-                    new_custom_error_span("Unrecongnized Constant.".into(), empty_span()),
-                ),
-            }
+            let (hi, lo) = crate::parse::extract_indices_from_identifier(id)?;
+            let (hi, lo) = (hi as u64, lo as u64);
+            if hi >= lo { Some((hi, lo)) } else { None }
         }
 
         fn identifier_to_value(id: &Identifier) -> Option<parse::Result<BitVec>> {
@@ -426,14 +356,14 @@ impl OwnedExpr {
                 Some(Ok(BitVec::from_u64(1, 1)))
             } else if name.eq_ignore_ascii_case("false") {
                 Some(Ok(BitVec::from_u64(0, 1)))
-            } else if name.starts_with("#x") {
-                let bits = name.trim_start_matches("#x").len() * 4;
-                Some(literals::value_constant(name, bits.max(1), empty_span()))
-            } else if name.starts_with("#b") {
-                let bits = name.trim_start_matches("#b").len();
-                Some(literals::value_constant(name, bits.max(1), empty_span()))
-            } else if name.starts_with("#d") {
-                Some(literals::value_constant(name, 64, empty_span()))
+            } else if let Some(digits) = name.strip_prefix("#x") {
+                let bits = digits.len() * 4;
+                Some(crate::parse::constraint::parse_bv_digits(digits, 16, bits.max(1)))
+            } else if let Some(digits) = name.strip_prefix("#b") {
+                let bits = digits.len();
+                Some(crate::parse::constraint::parse_bv_digits(digits, 2, bits.max(1)))
+            } else if let Some(digits) = name.strip_prefix("#d") {
+                Some(crate::parse::constraint::parse_bv_digits(digits, 10, 64))
             } else {
                 None
             }
@@ -455,7 +385,7 @@ impl OwnedExpr {
                     ))
                 }
             }
-            SyGuSTerm::Literal(lit) => Ok(Self::Const(literal_to_value(lit)?)),
+            SyGuSTerm::Literal(lit) => Ok(Self::Const(crate::parse::literal_to_value(lit)?)),
             SyGuSTerm::Annotated(inner, _) => Self::from_term(inner, env),
             SyGuSTerm::Application(id, args) => {
                 let opname = symbol_name(id);

@@ -1,5 +1,4 @@
 use derive_more::DebugCustom;
-use pest::Span;
 use sygus_parser::ast::{Identifier, Index, Sort, SortedVar, SyGuSFile};
 
 use crate::enumerate::expr::OwnedExpr;
@@ -13,7 +12,6 @@ pub struct SynthProblem<'i> {
     pub args: Vec<&'i str>,
     pub arg_decls: Vec<SortedVar>,
     pub cfg: Cfg<'i>,
-    pub span: Span<'i>,
     pub description: String,
     pub chatgpt_exprs: Vec<OwnedExpr>,
     pub bits: usize,
@@ -62,7 +60,7 @@ impl<'i> SynthProblem<'i> {
         let synth = view.synth_fun().ok_or_else(|| {
             new_custom_error_span(
                 "SynthProblem: Expecting a `synth-fun`.".into(),
-                Span::new("", 0, 0).unwrap(),
+                (),
             )
         })?;
 
@@ -70,13 +68,12 @@ impl<'i> SynthProblem<'i> {
             .sort_aliases
             .parse_sort_width(synth.ret)
             .ok_or_else(|| {
-                let span = Span::new("", 0, 0).unwrap();
                 new_custom_error_span(
                     format!(
                         "Unknown return value: display={}, debug={:?}",
                         synth.ret, synth.ret
                     ),
-                    span,
+                    (),
                 )
             })?;
 
@@ -88,8 +85,7 @@ impl<'i> SynthProblem<'i> {
             .collect();
 
         let cfg = synth.grammar.ok_or_else(|| {
-            let span = Span::new("", 0, 0).unwrap();
-            new_custom_error_span("SynthProblem: Expecting grammar list".into(), span)
+            new_custom_error_span("SynthProblem: Expecting grammar list".into(), ())
         })?;
         let axioms = AxiomRewriter::from_axioms(
             &view.axioms.iter().map(|a| (*a).clone()).collect::<Vec<_>>(),
@@ -99,7 +95,6 @@ impl<'i> SynthProblem<'i> {
             args,
             arg_decls,
             cfg: Cfg::from_grammar(cfg, axioms.as_ref())?,
-            span: Span::new("", 0, 0).unwrap(),
             description: "".into(),
             chatgpt_exprs: Vec::new(),
             bits,

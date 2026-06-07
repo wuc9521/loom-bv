@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use pest::Span;
 use sygus_parser::ast::{Identifier, SyGuSGTerm, SyGuSTerm};
 
 use crate::{
@@ -319,47 +318,10 @@ impl TemplateExpr {
 }
 
 pub fn build_owned_application(id: &Identifier, args: &[OwnedExpr]) -> parse::Result<OwnedExpr> {
-    fn index_numeral(idx: &sygus_parser::ast::Index) -> Option<u64> {
-        match idx {
-            sygus_parser::ast::Index::Numeral(v) => Some(*v as u64),
-            sygus_parser::ast::Index::Symbol(_) => None,
-        }
-    }
-
     fn extract_indices(id: &Identifier) -> Option<(u64, u64)> {
-        match id {
-            Identifier::Indexed(sym, idxs) if sym == "_" && idxs.len() >= 3 => {
-                match (&idxs[0], index_numeral(&idxs[1]), index_numeral(&idxs[2])) {
-                    (sygus_parser::ast::Index::Symbol(op), Some(hi), Some(lo))
-                        if op == "extract" && hi >= lo =>
-                    {
-                        Some((hi, lo))
-                    }
-                    _ => None,
-                }
-            }
-            Identifier::Indexed(sym, idxs) if sym == "extract" && idxs.len() >= 2 => {
-                match (index_numeral(&idxs[0]), index_numeral(&idxs[1])) {
-                    (Some(hi), Some(lo)) if hi >= lo => Some((hi, lo)),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-        .or_else(|| {
-            let text = id.to_string();
-            let parts = text
-                .trim_matches(|c| c == '(' || c == ')')
-                .split_whitespace()
-                .collect::<Vec<_>>();
-            match parts.as_slice() {
-                ["_", "extract", hi, lo] => match (hi.parse::<u64>(), lo.parse::<u64>()) {
-                    (Ok(hi), Ok(lo)) if hi >= lo => Some((hi, lo)),
-                    _ => None,
-                },
-                _ => None,
-            }
-        })
+        let (hi, lo) = crate::parse::extract_indices_from_identifier(id)?;
+        let (hi, lo) = (hi as u64, lo as u64);
+        if hi >= lo { Some((hi, lo)) } else { None }
     }
 
     let opname = id.get_name();
@@ -502,6 +464,6 @@ pub fn for_each_candidate_tuple<'a, T>(
     }
 }
 
-fn empty_span() -> Span<'static> {
-    Span::new("", 0, 0).expect("empty span should be valid")
+fn empty_span() -> () {
+    ()
 }

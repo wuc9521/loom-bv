@@ -239,12 +239,7 @@ impl Constraint {
             if value.bits() != self.bits {
                 return false;
             }
-            if !value
-                .clone()
-                .bitxor(example.output.clone())
-                .bitand(example.mask.clone())
-                .is_zero()
-            {
+            if !value.matches_masked(&example.output, &example.mask) {
                 return false;
             }
         }
@@ -275,6 +270,11 @@ impl Constraint {
 
     pub fn args_count(&self) -> usize {
         self.args
+    }
+
+    pub fn is_fully_specified(&self) -> bool {
+        let full = all_ones(self.bits);
+        self.examples.iter().all(|e| e.mask == full)
     }
 
     pub fn args(&self, i: usize) -> SmallVec<[BitVec; 4]> {

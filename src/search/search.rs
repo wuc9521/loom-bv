@@ -253,7 +253,7 @@ impl SearchConfig {
             }
             return Err(parse::new_custom_error_span(
                 "Search: no candidate survived expression search.".into(),
-                pest::Span::new("", 0, 0).unwrap(),
+                (),
             ));
         }
 
@@ -341,7 +341,7 @@ impl SearchConfig {
 
         let mut result = self.search(&problem, &cegis.examples, no_additional_check.clone())?;
         while !cegis.verify(&result).map_err(|e| {
-            parse::new_custom_error_span(e, pest::Span::new("", 0, 0).unwrap())
+            parse::new_custom_error_span(e, ())
         })? {
             result = self.search(
                 &problem,

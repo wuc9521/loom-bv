@@ -1,12 +1,18 @@
-use sygus_parser::Rule as SyGuSRule;
+use std::fmt;
 
-pub use pest::Span;
+#[derive(Debug, Clone)]
+pub struct Error {
+    pub message: String,
+}
 
-pub type Error = pest::error::Error<SyGuSRule>;
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
 
-pub fn new_custom_error_span<'i>(msg: String, span: Span<'i>) -> Error {
-    Error::new_from_span(
-        pest::error::ErrorVariant::CustomError { message: msg },
-        span,
-    )
+impl std::error::Error for Error {}
+
+pub fn new_custom_error_span(msg: String, _span: ()) -> Error {
+    Error { message: msg }
 }

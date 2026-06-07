@@ -6,8 +6,17 @@ use tree_sitter::{Language, Node, Parser};
 use crate::{
     all_ops,
     enumerate::{expr::OwnedExpr, value::BitVec},
-    parse::literals::u64_constant_python,
 };
+
+fn u64_constant_python(input: &str) -> Option<u64> {
+    if let Some(hex) = input.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16).ok()
+    } else if let Some(bin) = input.strip_prefix("0b") {
+        u64::from_str_radix(bin, 2).ok()
+    } else {
+        input.parse::<u64>().ok()
+    }
+}
 
 #[derive(Error, Debug)]
 #[error("Parsing Error")]

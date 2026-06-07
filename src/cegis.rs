@@ -9,7 +9,7 @@ use crate::{
     enumerate::{expr::OwnedExpr, utils::run_with_timeout, value::BitVec},
     exact::Constraint,
     info,
-    parse::{constraint::RefImplConstraint, literals},
+    parse::constraint::RefImplConstraint,
 };
 
 pub struct CegisState {
@@ -69,12 +69,7 @@ impl CegisState {
                     .map(|_| BitVec::zero(self.bits))
                     .collect_vec();
                 for (name, _, _, value) in model.into_iter() {
-                    let value = literals::value_constant(
-                        &value,
-                        self.bits,
-                        pest::Span::new("", 0, 0).unwrap(),
-                    )
-                    .unwrap_or_else(|_| BitVec::zero(self.bits));
+                    let value = parse_solver_bv(&value, self.bits);
                     let index = VAR_NAMES
                         .iter()
                         .enumerate()
@@ -137,5 +132,18 @@ impl<'a> ModelParser<String, String, String, &'a str> for Parser {
         _typ: &String,
     ) -> SmtRes<String> {
         Ok(input.into())
+    }
+}
+
+fn parse_solver_bv(s: &str, bits: usize) -> BitVec {
+    use crate::parse::constraint::parse_bv_digits;
+    if let Some(digits) = s.strip_prefix("#x") {
+        parse_bv_digits(digits, 16, bits).unwrap_or_else(|_| BitVec::zero(bits))
+    } else if let Some(digits) = s.strip_prefix("#b") {
+        parse_bv_digits(digits, 2, bits).unwrap_or_else(|_| BitVec::zero(bits))
+    } else if let Some(digits) = s.strip_prefix("#d") {
+        parse_bv_digits(digits, 10, bits).unwrap_or_else(|_| BitVec::zero(bits))
+    } else {
+        BitVec::zero(bits)
     }
 }

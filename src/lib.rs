@@ -16,7 +16,6 @@ use std::sync::mpsc;
 use std::{env, thread};
 
 use crate::{exact::Constraint, parse::SynthProblem, search::search::SearchConfig};
-extern crate pest;
 
 mod cegis;
 #[cfg(feature = "chatgpt")]
@@ -111,7 +110,8 @@ fn solve_file_inner(
     if let Some(spec) = exact::Constraint::from_file(file, &problem)? {
         let use_sampling = spec.structural.is_empty()
             && spec.examples.first().map_or(false, |e| !e.args.is_empty())
-            && !spec.examples.is_empty();
+            && !spec.examples.is_empty()
+            && spec.is_fully_specified();
         let defaults = if use_sampling {
             debg!("sampling search: {} examples, {} bits", spec.len(), spec.bits);
             SearchConfig::default_pbe()

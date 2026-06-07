@@ -190,7 +190,6 @@ impl<'a> LfpSpec<'a> {
                 sort: op.ret.clone(),
             }],
             cfg,
-            span: empty_span(),
             description: String::new(),
             chatgpt_exprs: Vec::new(),
             bits: self.bits(),
