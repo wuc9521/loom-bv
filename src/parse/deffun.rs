@@ -161,6 +161,102 @@ pub enum BoolAtom {
     Temp(usize),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartialBit {
+    Const(bool),
+    Input { arg: usize, bit: usize, negated: bool },
+    Complex,
+}
+
+impl PartialBit {
+    fn negate(self) -> Self {
+        match self {
+            Self::Const(v) => Self::Const(!v),
+            Self::Input { arg, bit, negated } => Self::Input { arg, bit, negated: !negated },
+            Self::Complex => Self::Complex,
+        }
+    }
+
+    fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Const(false), _) | (_, Self::Const(false)) => Self::Const(false),
+            (Self::Const(true), x) | (x, Self::Const(true)) => x,
+            _ => Self::Complex,
+        }
+    }
+
+    fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Const(true), _) | (_, Self::Const(true)) => Self::Const(true),
+            (Self::Const(false), x) | (x, Self::Const(false)) => x,
+            _ => Self::Complex,
+        }
+    }
+
+    fn xor(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Const(a), Self::Const(b)) => Self::Const(a ^ b),
+            (Self::Const(false), x) | (x, Self::Const(false)) => x,
+            (Self::Const(true), x) | (x, Self::Const(true)) => x.negate(),
+            _ => Self::Complex,
+        }
+    }
+
+    fn ite(cond: Self, then_val: Self, else_val: Self) -> Self {
+        match cond {
+            Self::Const(true) => else_val,
+            Self::Const(false) => then_val,
+            _ => {
+                if then_val == else_val { then_val } else { Self::Complex }
+            }
+        }
+    }
+}
+
+impl BoolAtom {
+    fn partial_resolve(&self, fixed_arg: usize, fixed_value: &BitVec, temps: &[PartialBit]) -> PartialBit {
+        match self {
+            BoolAtom::Const(v) => PartialBit::Const(*v),
+            BoolAtom::InputBit { arg, bit } => {
+                if *arg == fixed_arg {
+                    PartialBit::Const(fixed_value.bit(*bit))
+                } else {
+                    PartialBit::Input { arg: *arg, bit: *bit, negated: false }
+                }
+            }
+            BoolAtom::Temp(idx) => temps[*idx],
+        }
+    }
+}
+
+impl BoolNode {
+    fn partial_resolve(&self, fixed_arg: usize, fixed_value: &BitVec, temps: &[PartialBit]) -> PartialBit {
+        let resolve = |atom: &BoolAtom| atom.partial_resolve(fixed_arg, fixed_value, temps);
+        match self {
+            BoolNode::Atom(a) => resolve(a),
+            BoolNode::Not(a) => resolve(a).negate(),
+            BoolNode::And(a, b) => resolve(a).and(resolve(b)),
+            BoolNode::Or(a, b) => resolve(a).or(resolve(b)),
+            BoolNode::Xor(a, b) => resolve(a).xor(resolve(b)),
+            BoolNode::Ite(cond, then_a, else_a) => {
+                PartialBit::ite(resolve(cond), resolve(then_a), resolve(else_a))
+            }
+        }
+    }
+}
+
+impl BitCircuitPlan {
+    pub fn partial_eval(&self, fixed_arg: usize, fixed_value: &BitVec) -> Vec<PartialBit> {
+        let mut temps = Vec::with_capacity(self.bindings.len());
+        for binding in &self.bindings {
+            temps.push(binding.partial_resolve(fixed_arg, fixed_value, &temps));
+        }
+        self.output_bits.iter()
+            .map(|atom| atom.partial_resolve(fixed_arg, fixed_value, &temps))
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum PlanInstr {
     Const(BitVec),
@@ -1174,6 +1270,99 @@ impl Environ {
         args: &[BitVec],
     ) -> Result<BitVec, DivideByZero> {
         self.plan(id).eval(self, args)
+    }
+
+    pub fn probe_properties(&self, fid: usize, same_nt_pair: bool) -> crate::enumerate::grammar::RuleClass {
+        use crate::enumerate::grammar::RuleClass;
+        if !same_nt_pair {
+            return RuleClass::default();
+        }
+        if !self.inner()[fid].closure_args.is_empty() {
+            return RuleClass::default();
+        }
+        let arg_bits = &self.inner()[fid].arg_bits;
+        if arg_bits.len() != 2 || arg_bits[0] != arg_bits[1] {
+            return RuleClass::default();
+        }
+        let bits = arg_bits[0];
+        let ret = self.inner()[fid].ret_bits;
+        if ret != bits {
+            return RuleClass::default();
+        }
+
+        let mut rng = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            fid.hash(&mut h);
+            h.finish()
+        };
+        let next_u64 = |rng: &mut u64| -> u64 {
+            *rng ^= *rng << 13;
+            *rng ^= *rng >> 7;
+            *rng ^= *rng << 17;
+            *rng
+        };
+        let random_bv = |rng: &mut u64, bits: usize| -> BitVec {
+            let n_words = bits.div_ceil(64);
+            let words: Vec<u64> = (0..n_words).map(|_| next_u64(rng)).collect();
+            BitVec::from_u64_words(&words, bits)
+        };
+
+        let n_tests = 16;
+        let mut commutative = true;
+        let mut idempotent = true;
+        let mut associative = true;
+
+        for _ in 0..n_tests {
+            let a = random_bv(&mut rng, bits);
+            let b = random_bv(&mut rng, bits);
+            let c = random_bv(&mut rng, bits);
+
+            if commutative {
+                let ab = self.eval_defined(fid, &[a.clone(), b.clone()]);
+                let ba = self.eval_defined(fid, &[b.clone(), a.clone()]);
+                match (ab, ba) {
+                    (Ok(ab), Ok(ba)) => { if ab != ba { commutative = false; } }
+                    _ => { commutative = false; }
+                }
+            }
+
+            if idempotent {
+                let aa = self.eval_defined(fid, &[a.clone(), a.clone()]);
+                match aa {
+                    Ok(aa) => { if aa != a { idempotent = false; } }
+                    _ => { idempotent = false; }
+                }
+            }
+
+            if associative {
+                let ab = self.eval_defined(fid, &[a.clone(), b.clone()]);
+                let bc = self.eval_defined(fid, &[b.clone(), c.clone()]);
+                match (ab, bc) {
+                    (Ok(ab_val), Ok(bc_val)) => {
+                        let ab_c = self.eval_defined(fid, &[ab_val, c.clone()]);
+                        let a_bc = self.eval_defined(fid, &[a.clone(), bc_val]);
+                        match (ab_c, a_bc) {
+                            (Ok(l), Ok(r)) => { if l != r { associative = false; } }
+                            _ => { associative = false; }
+                        }
+                    }
+                    _ => { associative = false; }
+                }
+            }
+
+            if !commutative && !idempotent && !associative {
+                break;
+            }
+        }
+
+        RuleClass {
+            commutative,
+            idempotent: idempotent && commutative,
+            associative,
+            nonzero_rhs: false,
+            shift_rhs_literal: false,
+        }
     }
 }
 

@@ -89,18 +89,24 @@ fn solve_file_inner(
     deffun::ENV.clear();
     deffun::ENV.parse_from_view(&view)?;
 
-    // LFP pattern: either one self-referencing synth-fun, or two synth-funs
-    // joined by a closure constraint. Handle before SynthProblem construction
-    // because the latter assumes a single synth-fun.
-    if let Some(spec) = exact::lfp::LfpSpec::detect(&view) {
-        debg!(
-            "lfp-closure search: {} (bits={}, labels={})",
-            spec.variant_tag(),
-            spec.bits(),
-            spec.labels().len()
-        );
-        return spec.search(&deffun::ENV)?
-            .ok_or_else(|| "lfp: no solution".to_string().into());
+    let fixpoint_name = view.fixpoint_name().map(|s| {
+        Box::leak(s.to_string().into_boxed_str()) as &'static str
+    });
+
+    // LFP pattern: route through the specialized LfpSpec path when the
+    // problem has the two-synth-fun closure shape that SynthProblem can't
+    // represent (multiple synth-funs).
+    if view.synth_funs.len() > 1 {
+        if let Some(spec) = exact::lfp::LfpSpec::detect(&view) {
+            debg!(
+                "lfp-closure search: {} (bits={}, labels={})",
+                spec.variant_tag(),
+                spec.bits(),
+                spec.labels().len()
+            );
+            return spec.search(&deffun::ENV)?
+                .ok_or_else(|| "lfp: no solution".to_string().into());
+        }
     }
 
     let mut problem = SynthProblem::parse_from_view(&view)?;
@@ -120,6 +126,10 @@ fn solve_file_inner(
         };
         let mut config: SearchConfig = fig.extract()?;
         config.min = min;
+        config.fixpoint = fixpoint_name;
+        if env::var("DRYADSYNTH_COMPOSITION").is_ok() {
+            config.enable_composition = true;
+        }
         let result = config.search(
             &problem,
             &spec,

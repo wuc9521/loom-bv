@@ -55,12 +55,15 @@ impl TemplateExpr {
 ///   URem, SDiv, SRem).
 /// - `shift_rhs_literal`: when present, only consider size-1 leaves on the
 ///   rhs (matches the shift-by-symbol restriction).
+/// - `associative`: skip tuples where the left child was produced by the
+///   same rule (canonicalize to right-association).
 #[derive(Clone, Copy, Default, Debug)]
 pub struct RuleClass {
     pub commutative: bool,
     pub idempotent: bool,
     pub nonzero_rhs: bool,
     pub shift_rhs_literal: bool,
+    pub associative: bool,
 }
 
 #[derive(Clone)]
@@ -135,33 +138,39 @@ impl<'a> Config<'a> {
     }
 }
 
-/// Operator-class metadata for the standard BV ops. Maps SMT-LIB names to
-/// their commutativity / idempotency / non-zero-rhs / shift-rhs-literal
-/// flags. Anything not matched here defaults to no specialisation.
 fn classify_op(op: &str, child_nts: &[usize]) -> RuleClass {
-    // Symmetry shortcuts only kick in when both binary children come from
-    // the same non-terminal — otherwise the child pools are disjoint and
-    // the i ≤ size/2 trick would *miss* candidates.
     let same_nt_pair = child_nts.len() == 2 && child_nts[0] == child_nts[1];
+    // Native BV ops have known properties without needing probing.
     match op {
-        "bvadd" | "bvmul" | "bvxor" => RuleClass {
-            commutative: same_nt_pair,
-            ..Default::default()
-        },
-        "bvand" | "bvor" => RuleClass {
-            commutative: same_nt_pair,
-            idempotent: same_nt_pair,
-            ..Default::default()
-        },
-        "bvudiv" | "bvurem" | "bvsdiv" | "bvsrem" => RuleClass {
+        "bvudiv" | "bvurem" | "bvsdiv" | "bvsrem" => return RuleClass {
             nonzero_rhs: child_nts.len() == 2,
             ..Default::default()
         },
-        "bvlshr" | "bvashr" | "bvshl" => RuleClass {
+        "bvlshr" | "bvashr" | "bvshl" => return RuleClass {
             shift_rhs_literal: child_nts.len() == 2,
             ..Default::default()
         },
-        _ => RuleClass::default(),
+        _ => {}
+    }
+    // For all other operators (including define-funs), probe properties.
+    if let Some(fid) = deffun::ENV.lookup(op, child_nts.len()) {
+        deffun::ENV.probe_properties(fid, same_nt_pair)
+    } else {
+        // Native BV ops without define-fun entries: probe by name.
+        match op {
+            "bvadd" | "bvmul" | "bvxor" => RuleClass {
+                commutative: same_nt_pair,
+                associative: same_nt_pair,
+                ..Default::default()
+            },
+            "bvand" | "bvor" => RuleClass {
+                commutative: same_nt_pair,
+                idempotent: same_nt_pair,
+                associative: same_nt_pair,
+                ..Default::default()
+            },
+            _ => RuleClass::default(),
+        }
     }
 }
 

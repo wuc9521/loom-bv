@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use derive_more::DebugCustom;
-use itertools::Itertools;
+
 use rand::{rngs::StdRng, Rng};
 use sdset::SetBuf;
 use smallvec::SmallVec;
@@ -440,7 +440,7 @@ impl Constraint {
         min: bool,
         fixpoint: Option<&str>,
     ) -> parse::Result<OwnedExpr> {
-        search_problem(problem, self, min, fixpoint)
+        search_problem(problem, self, min, fixpoint, false)
     }
 
     pub fn compute_relevant_bits(

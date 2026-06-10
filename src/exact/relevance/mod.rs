@@ -9,7 +9,7 @@
 //! [`Relevance`] is the underlying worklist engine.
 
 pub mod bits;
-mod deps;
+pub mod deps;
 
 use std::collections::{BTreeMap, VecDeque};
 

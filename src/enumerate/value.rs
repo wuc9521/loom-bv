@@ -50,6 +50,18 @@ impl BitVec {
         }
     }
 
+    pub fn from_u64_words(words: &[u64], bits: usize) -> Self {
+        if bits <= 64 {
+            let raw = words.first().copied().unwrap_or(0) & mask_u64(bits);
+            BitVec::Small { bits, raw }
+        } else {
+            let raw = truncate_big(BigUint::from_slice(
+                &words.iter().flat_map(|w| [*w as u32, (*w >> 32) as u32]).collect::<Vec<_>>()
+            ), bits);
+            BitVec::Big { bits, raw: Arc::new(raw) }
+        }
+    }
+
     pub fn zero(bits: usize) -> Self {
         Self::from_u64(0, bits)
     }
@@ -136,6 +148,16 @@ impl BitVec {
         match self {
             BitVec::Small { raw, .. } => *raw,
             BitVec::Big { raw, .. } => raw.as_ref().to_u64().unwrap_or(0),
+        }
+    }
+
+    pub fn first_u64_word(&self) -> u64 {
+        match self {
+            BitVec::Small { raw, .. } => *raw,
+            BitVec::Big { raw, .. } => {
+                let digits = raw.as_ref().to_u64_digits();
+                digits.first().copied().unwrap_or(0)
+            }
         }
     }
 
