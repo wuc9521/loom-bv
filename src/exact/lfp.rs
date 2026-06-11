@@ -18,16 +18,19 @@
 
 use std::collections::BTreeMap;
 
-use sygus_parser::ast::{GrammarDef, Literal, Sort, SyGuSTerm};
+use sygus_parser::ast::{Literal, Sort, SyGuSTerm};
 
 use crate::enumerate::expr::OwnedExpr;
 use crate::enumerate::op;
 use crate::enumerate::value::BitVec;
 use crate::exact::util::{empty_span, extract_single_bit_idx};
-use crate::exact::{eval_defined_with_closure};
+use crate::exact::eval_defined_with_closure;
 use crate::info;
 use crate::parse::cfg::Cfg;
-use crate::parse::{self, deffun, new_custom_error_span, ProblemView, SynthFunView, SynthProblem};
+use crate::parse::{
+    self, deffun, is_constant_grammar, new_custom_error_span, term_mentions_symbol, ProgramEnv,
+    SynthFunView, SynthProblem,
+};
 
 // ---------------------------------------------------------------------------
 //  LfpSpec — pattern detection + finalization
@@ -54,25 +57,25 @@ pub enum LfpSpec<'a> {
 }
 
 impl<'a> LfpSpec<'a> {
-    pub fn detect(view: &'a ProblemView<'_>) -> Option<Self> {
-        Self::detect_separate(view).or_else(|| Self::detect_recursive(view))
+    pub fn detect(env: &'a ProgramEnv<'_>) -> Option<Self> {
+        Self::detect_separate(env).or_else(|| Self::detect_recursive(env))
     }
 
-    fn detect_separate(view: &'a ProblemView<'_>) -> Option<Self> {
-        if view.synth_funs.len() != 2 {
+    fn detect_separate(env: &'a ProgramEnv<'_>) -> Option<Self> {
+        if env.synth_funs.len() != 2 {
             return None;
         }
-        let (fixpoint, op) = pick_constant_and_structural(&view.synth_funs)?;
+        let (fixpoint, op) = pick_constant_and_structural(&env.synth_funs)?;
         if !fixpoint.args.is_empty() || !op.args.is_empty() {
             return None;
         }
-        let bits = view.sort_aliases.parse_sort_width(fixpoint.ret)?;
-        if bits != view.sort_aliases.parse_sort_width(op.ret)? {
+        let bits = env.sort_aliases.parse_sort_width(fixpoint.ret)?;
+        if bits != env.sort_aliases.parse_sort_width(op.ret)? {
             return None;
         }
         let mut closure_seen = false;
         let mut labels = Vec::new();
-        for c in &view.constraints {
+        for c in &env.constraints {
             if is_closure_constraint(c, op.name, fixpoint.name)
                 || is_closure_constraint(c, fixpoint.name, op.name)
             {
@@ -102,17 +105,17 @@ impl<'a> LfpSpec<'a> {
         })
     }
 
-    fn detect_recursive(view: &'a ProblemView<'_>) -> Option<Self> {
-        if view.synth_funs.len() != 1 {
+    fn detect_recursive(env: &'a ProgramEnv<'_>) -> Option<Self> {
+        if env.synth_funs.len() != 1 {
             return None;
         }
-        let synth = view.synth_funs[0];
+        let synth = env.synth_funs[0];
         if !synth.args.is_empty() {
             return None;
         }
-        let bits = view.sort_aliases.parse_sort_width(synth.ret)?;
+        let bits = env.sort_aliases.parse_sort_width(synth.ret)?;
         let mut labels = Vec::new();
-        for c in &view.constraints {
+        for c in &env.constraints {
             let Some(lbl) = parse_label_constraint(c, synth.name) else {
                 return None;
             };
@@ -121,7 +124,10 @@ impl<'a> LfpSpec<'a> {
         if labels.is_empty() {
             return None;
         }
-        let references_self = view
+        let references_self = env
+            .grammar_deps_for(0)
+            .is_some_and(|deps| deps.requires_recursion())
+            || env
             .define_funs
             .iter()
             .any(|def| term_mentions_symbol(def.body, synth.name));
@@ -266,15 +272,6 @@ fn pick_constant_and_structural<'a>(
     }
 }
 
-fn is_constant_grammar(grammar: &GrammarDef) -> bool {
-    grammar.grouped_rule_lists.len() == 1
-        && grammar.grouped_rule_lists[0].terms.len() == 1
-        && matches!(
-            &grammar.grouped_rule_lists[0].terms[0],
-            sygus_parser::ast::SyGuSGTerm::Constant(_)
-        )
-}
-
 fn is_closure_constraint(term: &SyGuSTerm, left: &str, right: &str) -> bool {
     let SyGuSTerm::Application(id, args) = term else { return false; };
     if id.get_name() != "=" || args.len() != 2 {
@@ -323,24 +320,6 @@ fn parse_label_constraint(term: &SyGuSTerm, target: &str) -> Option<(usize, bool
         expected = !expected;
     }
     Some((bit_idx, expected))
-}
-
-fn term_mentions_symbol(term: &SyGuSTerm, target: &str) -> bool {
-    match term {
-        SyGuSTerm::Identifier(id) => id.get_name() == target,
-        SyGuSTerm::Application(id, args) => {
-            id.get_name() == target || args.iter().any(|arg| term_mentions_symbol(arg, target))
-        }
-        SyGuSTerm::Annotated(inner, _) => term_mentions_symbol(inner, target),
-        SyGuSTerm::Let(bindings, body) => {
-            bindings.iter().any(|b| term_mentions_symbol(&b.term, target))
-                || term_mentions_symbol(body, target)
-        }
-        SyGuSTerm::Forall(_, body) | SyGuSTerm::Exists(_, body) => {
-            term_mentions_symbol(body, target)
-        }
-        SyGuSTerm::Literal(_) => false,
-    }
 }
 
 // ---------------------------------------------------------------------------

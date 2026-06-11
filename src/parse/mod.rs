@@ -1,4 +1,3 @@
-
 pub mod cfg;
 pub mod constraint;
 pub mod deffun;
@@ -13,4 +12,7 @@ pub use constraint::{empty_span, extract_indices_from_identifier, literal_to_val
 pub use problem::SynthProblem;
 pub use sexpr::new_custom_error_span;
 pub use sorts::SortAliases;
-pub use view::{DefineFunView, ProblemView, SynthFunView};
+pub use view::{
+    is_constant_grammar, term_mentions_symbol, DefineFunView, FeatureSet, GrammarDeps, ProblemView,
+    ProgramEnv, SynthFunView,
+};

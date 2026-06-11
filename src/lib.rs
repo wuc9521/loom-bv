@@ -9,7 +9,7 @@ use figment::{
 };
 #[cfg(feature = "chatgpt")]
 use itertools::Itertools;
-use parse::{constraint::parse_ref_impl, deffun, ProblemView};
+use parse::{constraint::parse_ref_impl, deffun, ProgramEnv};
 use sygus_parser::ast::{SyGuSCmd, SyGuSFile};
 #[cfg(feature = "chatgpt")]
 use std::sync::mpsc;
@@ -85,7 +85,7 @@ fn solve_file_inner(
     description: String,
     min: bool,
 ) -> SolverResult<String> {
-    let view = ProblemView::from_file(file);
+    let view = ProgramEnv::from_file(file);
     deffun::ENV.clear();
     deffun::ENV.parse_from_view(&view)?;
 
