@@ -15,9 +15,10 @@
 //!   negative-label early reject, and the converged LFP is matched
 //!   against the spec.
 //!
-//! Cross-call evaluation is memoized via the thread-local
-//! [`eval::EvalCache`]; sub-NT dedup health can be inspected via
-//! [`stats::DedupStats`] (gated by `DELIS_DEDUP_STATS=1`).
+//! Cross-call evaluation is memoized via the thread-local cache on
+//! [`crate::parse::deffun::Environ`] (enable / disable through
+//! `Environ::enable_eval_cache`); sub-NT dedup health can be inspected
+//! via [`stats::DedupStats`] (gated by `DELIS_DEDUP_STATS=1`).
 
 pub mod bitspec;
 pub mod closure;
@@ -32,18 +33,15 @@ pub mod types;
 pub mod util;
 
 pub use bitspec::Constraint;
-pub use eval::{eval_defined_with_closure, EvalCache};
 pub use stats::DedupStats;
 pub use types::{Grammar, ExactRule};
 
-// Backward-compat free-function shims kept for the LFP frontend (lfp.rs)
-// while we land the method-style API. These will be inlined once lfp.rs
-// uses the new methods directly.
+// Cache control wrappers used by the LFP/closure frontend.
 pub fn enable_eval_cache() {
-    EvalCache::enable();
+    crate::parse::deffun::Environ::enable_eval_cache();
 }
 pub fn dump_and_disable_eval_cache(tag: &str) {
-    EvalCache::dump_and_disable(tag);
+    crate::parse::deffun::Environ::dump_and_disable_eval_cache(tag);
 }
 pub fn enable_dedup_stats_if_env(bits: usize) {
     DedupStats::enable_if_env(bits);

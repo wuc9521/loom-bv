@@ -2,7 +2,7 @@ use std::cell::UnsafeCell;
 use std::hash::{Hash, Hasher};
 
 use derive_more::DebugCustom;
-use rustc_hash::FxHasher;
+use rustc_hash::{FxHashMap, FxHasher};
 use sygus_parser::ast::{SyGuSFile, SyGuSTerm};
 
 use crate::{
@@ -15,6 +15,25 @@ use crate::{
 };
 
 use super::{new_custom_error_span, Error, ProblemView};
+
+// Thread-local memo for `Environ::eval_defined`. Disabled by default; the
+// fwd-decls / closure search enables it via `Environ::enable_eval_cache`
+// because the same `(fid, args, bindings)` tuple recurs many times across
+// candidate tuples and Kleene iterations. The key is a u64 from
+// `DefineFun::hash_call` — see the doc on `hash_call` for collision
+// reasoning.
+#[derive(Default)]
+struct EvalCacheState {
+    map: FxHashMap<u64, BitVec>,
+    hits: u64,
+    misses: u64,
+    enabled: bool,
+}
+
+thread_local! {
+    static EVAL_CACHE_STATE: std::cell::RefCell<EvalCacheState> =
+        std::cell::RefCell::new(EvalCacheState::default());
+}
 
 fn collect_term_symbols(term: &SyGuSTerm, out: &mut Vec<String>) {
     match term {
@@ -58,37 +77,34 @@ pub struct DefineFun {
 }
 
 impl DefineFun {
-    /// Evaluate this define-fun's plan on `args`, optionally with a
-    /// closure binding for the synth-fun named `closure_name`. The
-    /// define-fun's `closure_args` slots are filled with `closure_value`
-    /// for the matching name and zero elsewhere. Plan eval needs `&env`
+    /// Evaluate this define-fun's plan on `args`, with closure bindings for
+    /// any synth-funs referenced by the body. Each declared `closure_args`
+    /// slot is filled by name lookup in `closure`; missing names default to
+    /// zero. Pass `&[]` for direct (non-closure) evaluation; the empty case
+    /// is the fast pass-through used by PBE search. Plan eval needs `&env`
     /// because plan instructions can call other define-funs recursively.
     pub fn eval(
         &self,
         env: &Environ,
         args: &[BitVec],
-        closure: Option<(&str, &BitVec)>,
+        closure: &[(&str, &BitVec)],
     ) -> Result<BitVec, DivideByZero> {
-        match closure {
-            Some((closure_name, closure_value)) if !self.closure_args.is_empty() => {
-                // Matches the layout established at parse time: real args
-                // followed by one value per closure_args slot (see
-                // `extended_env` in `parse_from_view`).
-                let mut extended = Vec::with_capacity(args.len() + self.closure_args.len());
-                extended.extend_from_slice(args);
-                for (name, bits) in
-                    self.closure_args.iter().zip(self.closure_arg_bits.iter())
-                {
-                    if *name == closure_name {
-                        extended.push(closure_value.clone());
-                    } else {
-                        extended.push(BitVec::from_u64(0, *bits));
-                    }
-                }
-                self.plan.eval(env, &extended)
-            }
-            _ => self.plan.eval(env, args),
+        if self.closure_args.is_empty() {
+            return self.plan.eval(env, args, closure);
         }
+        // Matches the layout established at parse time: real args
+        // followed by one value per closure_args slot (see
+        // `extended_env` in `parse_from_view`).
+        let mut extended = Vec::with_capacity(args.len() + self.closure_args.len());
+        extended.extend_from_slice(args);
+        for (name, bits) in self.closure_args.iter().zip(self.closure_arg_bits.iter()) {
+            let bound = closure
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| (*v).clone());
+            extended.push(bound.unwrap_or_else(|| BitVec::from_u64(0, *bits)));
+        }
+        self.plan.eval(env, &extended, closure)
     }
 
     /// Hash for a `(self, args, closure)` call — used by the exact-nullary
@@ -98,20 +114,18 @@ impl DefineFun {
     /// Identity uses `self as *const _`: within one Environ the
     /// `DefineFun` slots never move, so the pointer is a stable per-fun
     /// id for the lifetime of a search.
-    pub fn hash_call(&self, args: &[BitVec], closure: Option<(&str, &BitVec)>) -> u64 {
+    pub fn hash_call(&self, args: &[BitVec], closure: &[(&str, &BitVec)]) -> u64 {
         let mut h = FxHasher::default();
         h.write_usize(self as *const _ as usize);
         h.write_usize(args.len());
         for v in args {
             v.hash(&mut h);
         }
-        if let Some((closure_name, closure_value)) = closure {
-            for (name, bits) in self.closure_args.iter().zip(self.closure_arg_bits.iter()) {
-                if *name == closure_name {
-                    closure_value.hash(&mut h);
-                } else {
-                    BitVec::from_u64(0, *bits).hash(&mut h);
-                }
+        for (name, bits) in self.closure_args.iter().zip(self.closure_arg_bits.iter()) {
+            if let Some((_, value)) = closure.iter().find(|(n, _)| n == name) {
+                value.hash(&mut h);
+            } else {
+                BitVec::from_u64(0, *bits).hash(&mut h);
             }
         }
         h.finish()
@@ -286,7 +300,12 @@ pub enum PlanInstr {
 }
 
 impl DefineFunPlan {
-    fn eval(&self, env: &Environ, args: &[BitVec]) -> Result<BitVec, DivideByZero> {
+    fn eval(
+        &self,
+        env: &Environ,
+        args: &[BitVec],
+        bindings: &[(&str, &BitVec)],
+    ) -> Result<BitVec, DivideByZero> {
         match self {
             DefineFunPlan::Generic {
                 root,
@@ -362,7 +381,7 @@ impl DefineFunPlan {
                         PlanInstr::Func { fid, args } => {
                             let func_args =
                                 args.iter().map(|slot| slots[*slot].clone()).collect::<Vec<_>>();
-                            env.eval_defined(*fid, &func_args)?
+                            env.eval_defined(*fid, &func_args, bindings)?
                         }
                     };
                     slots.push(value);
@@ -1268,8 +1287,62 @@ impl Environ {
         &self,
         id: usize,
         args: &[BitVec],
+        bindings: &[(&str, &BitVec)],
     ) -> Result<BitVec, DivideByZero> {
-        self.plan(id).eval(self, args)
+        let f = &self.inner()[id];
+        EVAL_CACHE_STATE.with(|c| {
+            let mut c = c.borrow_mut();
+            if !c.enabled {
+                return f.eval(self, args, bindings);
+            }
+            let key = f.hash_call(args, bindings);
+            if let Some(v) = c.map.get(&key).cloned() {
+                c.hits += 1;
+                return Ok(v);
+            }
+            c.misses += 1;
+            let v = f.eval(self, args, bindings)?;
+            c.map.insert(key, v.clone());
+            Ok(v)
+        })
+    }
+
+    /// Enable the thread-local eval-defined memo cache. Used by the
+    /// fwd-decls/closure search where the same `(fid, args, bindings)`
+    /// tuple recurs many times across candidates and Kleene iterations.
+    pub fn enable_eval_cache() {
+        EVAL_CACHE_STATE.with(|c| {
+            let mut c = c.borrow_mut();
+            c.map.clear();
+            c.hits = 0;
+            c.misses = 0;
+            c.enabled = true;
+        });
+    }
+
+    /// Print stats and disable the eval-defined memo cache.
+    pub fn dump_and_disable_eval_cache(tag: &str) {
+        EVAL_CACHE_STATE.with(|c| {
+            let mut c = c.borrow_mut();
+            let total = c.hits + c.misses;
+            let rate = if total > 0 {
+                c.hits as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            crate::info!(
+                "{}: eval_defined memo: {} calls, {} hits ({:.1}%), {} cached entries",
+                tag,
+                total,
+                c.hits,
+                rate,
+                c.map.len()
+            );
+            c.map.clear();
+            c.hits = 0;
+            c.misses = 0;
+            c.enabled = false;
+        });
     }
 
     pub fn probe_properties(&self, fid: usize, same_nt_pair: bool) -> crate::enumerate::grammar::RuleClass {
@@ -1319,8 +1392,8 @@ impl Environ {
             let c = random_bv(&mut rng, bits);
 
             if commutative {
-                let ab = self.eval_defined(fid, &[a.clone(), b.clone()]);
-                let ba = self.eval_defined(fid, &[b.clone(), a.clone()]);
+                let ab = self.eval_defined(fid, &[a.clone(), b.clone()], &[]);
+                let ba = self.eval_defined(fid, &[b.clone(), a.clone()], &[]);
                 match (ab, ba) {
                     (Ok(ab), Ok(ba)) => { if ab != ba { commutative = false; } }
                     _ => { commutative = false; }
@@ -1328,7 +1401,7 @@ impl Environ {
             }
 
             if idempotent {
-                let aa = self.eval_defined(fid, &[a.clone(), a.clone()]);
+                let aa = self.eval_defined(fid, &[a.clone(), a.clone()], &[]);
                 match aa {
                     Ok(aa) => { if aa != a { idempotent = false; } }
                     _ => { idempotent = false; }
@@ -1336,12 +1409,12 @@ impl Environ {
             }
 
             if associative {
-                let ab = self.eval_defined(fid, &[a.clone(), b.clone()]);
-                let bc = self.eval_defined(fid, &[b.clone(), c.clone()]);
+                let ab = self.eval_defined(fid, &[a.clone(), b.clone()], &[]);
+                let bc = self.eval_defined(fid, &[b.clone(), c.clone()], &[]);
                 match (ab, bc) {
                     (Ok(ab_val), Ok(bc_val)) => {
-                        let ab_c = self.eval_defined(fid, &[ab_val, c.clone()]);
-                        let a_bc = self.eval_defined(fid, &[a.clone(), bc_val]);
+                        let ab_c = self.eval_defined(fid, &[ab_val, c.clone()], &[]);
+                        let a_bc = self.eval_defined(fid, &[a.clone(), bc_val], &[]);
                         match (ab_c, a_bc) {
                             (Ok(l), Ok(r)) => { if l != r { associative = false; } }
                             _ => { associative = false; }

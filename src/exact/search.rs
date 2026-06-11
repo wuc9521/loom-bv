@@ -28,9 +28,8 @@ use crate::enumerate::{
     value::BitVec,
 };
 use crate::exact::bitspec::Constraint;
-use crate::exact::closure::Closure;
+use crate::exact::closure::Bindings;
 use crate::exact::dedup::SeenMode;
-use crate::exact::eval::eval_defined_with_closure;
 use crate::exact::stats::DedupStats;
 use crate::exact::types::{Candidate, ExactEvalCache, Grammar, ExactRule, Node, NodeId};
 use crate::parse::{self, deffun, SynthProblem};
@@ -61,7 +60,7 @@ struct Searcher<'a, 'g> {
     grammar: Grammar<'a>,
     spec: &'g Constraint,
     num_examples: usize,
-    closure: Option<Closure>,
+    closure: Option<Bindings>,
     nodes: Vec<Node>,
     by_size: Vec<Vec<Vec<Candidate>>>,
     seen: SeenMode,
@@ -81,7 +80,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
     ) -> Self {
         let num_examples = spec.num_examples();
         let closure = match fixpoint {
-            Some(name) => Some(Closure::new(name, spec.bits)),
+            Some(name) => Some(Bindings::single(name, spec.bits)),
             None => None,
         };
         let relevance_disabled = !min;
@@ -652,15 +651,23 @@ impl<'a, 'g> Searcher<'a, 'g> {
     fn eval_leaf(&mut self, expr: &OwnedExpr) -> Option<(Vec<BitVec>, Option<Vec<BitVec>>)> {
         if self.closure.is_some() {
             let closure = self.closure.as_ref().unwrap();
-            let (name, v) = closure.binding_zero();
+            let zero_bindings = closure.bindings_zero();
+            let top_bindings = closure.bindings_top();
+            // Legacy LFP path uses Var(0) for self-reference; thread the
+            // primary aux's value through `args` for that, while passing
+            // the full bindings for any closure_args inside Func calls.
+            let v = closure.zero(0).clone();
             let value = self
                 .leaf_cache
                 .leaves
                 .entry(expr.clone())
-                .or_insert_with(|| expr.eval_with_closure(&deffun::ENV, v, name).ok())
+                .or_insert_with(|| {
+                    expr.eval_with_bindings(&[v.clone()], &zero_bindings).ok()
+                })
                 .clone()?;
+            let top = closure.top(0).clone();
             let value_top = expr
-                .eval_with_closure(&deffun::ENV, &closure.top, &closure.name)
+                .eval_with_bindings(&[top], &top_bindings)
                 .ok()?;
             return Some((vec![value], Some(vec![value_top])));
         }
@@ -677,22 +684,24 @@ impl<'a, 'g> Searcher<'a, 'g> {
     fn eval_nary_with_plan(
         fid: usize,
         tuple: &[&Candidate],
-        closure: Option<&Closure>,
+        closure: Option<&Bindings>,
         num_examples: usize,
         pruned_plan: Option<&BitCircuitPlan>,
     ) -> Option<(Vec<BitVec>, Option<Vec<BitVec>>)> {
         if let Some(closure) = closure {
             let args_zero: Vec<BitVec> = tuple.iter().map(|c| c.values[0].clone()).collect();
-            let value = eval_defined_with_closure(
-                fid, &args_zero, Some(closure.binding_zero()),
-            ).ok()?;
+            let zero_bindings = closure.bindings_zero();
+            let value = deffun::ENV
+                .eval_defined(fid, &args_zero, &zero_bindings)
+                .ok()?;
             let args_top: Option<Vec<BitVec>> = tuple.iter().map(|c| {
                 c.values_top.as_ref().map(|vt| vt[0].clone())
             }).collect();
             let args_top = args_top?;
-            let value_top = eval_defined_with_closure(
-                fid, &args_top, Some(closure.binding_top()),
-            ).ok()?;
+            let top_bindings = closure.bindings_top();
+            let value_top = deffun::ENV
+                .eval_defined(fid, &args_top, &top_bindings)
+                .ok()?;
             return Some((vec![value], Some(vec![value_top])));
         }
         let k = num_examples;
@@ -702,7 +711,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
             let v = if let Some(plan) = pruned_plan {
                 plan.eval(&args).ok()?
             } else {
-                eval_defined_with_closure(fid, &args, None).ok()?
+                deffun::ENV.eval_defined(fid, &args, &[]).ok()?
             };
             values.push(v);
         }
@@ -739,7 +748,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
         let node = self.intern_node(build_node());
         if let Some(closure) = self.closure.as_ref() {
             DedupStats::record_push(
-                nt_idx, size, node, &values[0], &self.grammar, &self.nodes, &closure.name,
+                nt_idx, size, node, &values[0], &self.grammar, &self.nodes, closure.name(0),
             );
         }
         let vi_key: Vec<u64> = values.iter().map(|v| v.first_u64_word()).collect();
@@ -776,7 +785,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
         if let Some(closure) = self.closure.as_ref() {
             DedupStats::record_push(
                 nt_idx, size, candidate.node,
-                &candidate.values[0], &self.grammar, &self.nodes, &closure.name,
+                &candidate.values[0], &self.grammar, &self.nodes, closure.name(0),
             );
         }
         let node = candidate.node;
@@ -792,8 +801,8 @@ impl<'a, 'g> Searcher<'a, 'g> {
             .closure
             .as_ref()
             .expect("start_nt_kleene called outside fixpoint mode")
-            .name
-            .clone();
+            .name(0)
+            .to_string();
         let (expr, lfp) = self.kleene_lfp(node, &closure_name)?;
         if self.spec.matches(std::slice::from_ref(&lfp)) {
             return Some(expr);
@@ -825,7 +834,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
         for _ in 0..=bits {
             let next = self
                 .grammar
-                .eval_node_at(node, &self.nodes, &aux, closure_name)?;
+                .eval_node_at(node, &self.nodes, &[(closure_name, &aux)])?;
             if neg_indices.iter().any(|&i| next.bit(i)) {
                 return None;
             }

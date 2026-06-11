@@ -107,9 +107,8 @@ impl<'a> Expr<'a> {
         }
         if let Expr::Func(id, args_expr) = self {
             let values = args_expr.iter().map(|a| a.eval(args)).collect::<Result<Vec<_>, _>>()?;
-            return deffun::ENV.eval_defined(*id, &values);
-        }
-        if let Expr::Const(a) = self {
+            return deffun::ENV.eval_defined(*id, &values, &[]);
+        }        if let Expr::Const(a) = self {
             return Ok(a.clone());
         }
         if let Expr::Ite(a, b, c) = self {
@@ -779,21 +778,6 @@ impl OwnedExpr {
         format!("{prefix}... <{} chars total>", total)
     }
 
-    fn eval_let_chain(&self, args: &[BitVec]) -> Result<BitVec, DivideByZero> {
-        let mut scoped = args.to_vec();
-        let mut current = self;
-        loop {
-            match current {
-                OwnedExpr::Let(_, value, body) => {
-                    let bound = value.eval(&scoped)?;
-                    scoped.push(bound);
-                    current = body;
-                }
-                other => return other.eval(&scoped),
-            }
-        }
-    }
-
     fn eval_bv_let_chain<const N: usize>(&self, args: &[Bv<N>]) -> Bv<N> {
         let mut scoped = args.to_vec();
         let mut current = self;
@@ -810,20 +794,39 @@ impl OwnedExpr {
     }
 
     pub fn eval(&self, args: &[BitVec]) -> Result<BitVec, DivideByZero> {
+        self.eval_with_bindings(args, &[])
+    }
+
+    /// Like `eval`, but threads `bindings` into nested `Func` calls so a
+    /// define-fun body that references a synth-fun (via `closure_args`)
+    /// resolves the right value for it. `args` populates `Var(N)` slots
+    /// (formal parameters of the candidate). `bindings` is a name→value
+    /// lookup for synth-fun substitution. Pass `&[]` for direct mode.
+    pub fn eval_with_bindings(
+        &self,
+        args: &[BitVec],
+        bindings: &[(&str, &BitVec)],
+    ) -> Result<BitVec, DivideByZero> {
         macro_rules! foreach_op {
             (1, false, $op: ident) => {
                 if let OwnedExpr::$op(e1) = self {
-                    return Ok(crate::op_of![$op](e1.eval(args)?));
+                    return Ok(crate::op_of![$op](e1.eval_with_bindings(args, bindings)?));
                 }
             };
             (2, false, $op: ident) => {
                 if let OwnedExpr::$op(e1, e2) = self {
-                    return Ok(crate::op_of![$op](e1.eval(args)?, e2.eval(args)?));
+                    return Ok(crate::op_of![$op](
+                        e1.eval_with_bindings(args, bindings)?,
+                        e2.eval_with_bindings(args, bindings)?,
+                    ));
                 }
             };
             (2, true, $op: ident) => {
                 if let OwnedExpr::$op(e1, e2) = self {
-                    return crate::op_of![$op](e1.eval(args)?, e2.eval(args)?);
+                    return crate::op_of![$op](
+                        e1.eval_with_bindings(args, bindings)?,
+                        e2.eval_with_bindings(args, bindings)?,
+                    );
                 }
             };
         }
@@ -831,37 +834,69 @@ impl OwnedExpr {
             return Ok(args[*a].clone());
         }
         if let OwnedExpr::Concat(a, b) = self {
-            let lhs = a.eval(args)?;
-            let rhs = b.eval(args)?;
+            let lhs = a.eval_with_bindings(args, bindings)?;
+            let rhs = b.eval_with_bindings(args, bindings)?;
             return Ok(lhs.concat(&rhs));
         }
         if let OwnedExpr::Extract(a, hi, lo) = self {
-            let value = a.eval(args)?;
+            let value = a.eval_with_bindings(args, bindings)?;
             return Ok(value.extract(*hi, *lo));
         }
         if let OwnedExpr::Func(id, exprs) = self {
             let values = exprs
                 .iter()
-                .map(|expr| expr.eval(args))
+                .map(|expr| expr.eval_with_bindings(args, bindings))
                 .collect::<Result<Vec<_>, _>>()?;
-            return deffun::ENV.eval_defined(*id, &values);
+            return deffun::ENV.eval_defined(*id, &values, bindings);
         }
         if let OwnedExpr::Const(a) = self {
             return Ok(a.clone());
         }
         if let OwnedExpr::Let(_, _, _) = self {
-            return self.eval_let_chain(args);
+            return self.eval_let_chain_with_bindings(args, bindings);
         }
         if let OwnedExpr::Ite(e1, e2, e3) = self {
-            return Ok(op::ite(e1.eval(args)?, e2.eval(args)?, e3.eval(args)?));
+            return Ok(op::ite(
+                e1.eval_with_bindings(args, bindings)?,
+                e2.eval_with_bindings(args, bindings)?,
+                e3.eval_with_bindings(args, bindings)?,
+            ));
         }
-        if let OwnedExpr::BVule(a, b) = self { return Ok(op::ule(a.eval(args)?, b.eval(args)?)); }
-        if let OwnedExpr::BVult(a, b) = self { return Ok(op::ult(a.eval(args)?, b.eval(args)?)); }
-        if let OwnedExpr::BVsle(a, b) = self { return Ok(op::sle(a.eval(args)?, b.eval(args)?)); }
-        if let OwnedExpr::BVslt(a, b) = self { return Ok(op::slt(a.eval(args)?, b.eval(args)?)); }
+        if let OwnedExpr::BVule(a, b) = self {
+            return Ok(op::ule(a.eval_with_bindings(args, bindings)?, b.eval_with_bindings(args, bindings)?));
+        }
+        if let OwnedExpr::BVult(a, b) = self {
+            return Ok(op::ult(a.eval_with_bindings(args, bindings)?, b.eval_with_bindings(args, bindings)?));
+        }
+        if let OwnedExpr::BVsle(a, b) = self {
+            return Ok(op::sle(a.eval_with_bindings(args, bindings)?, b.eval_with_bindings(args, bindings)?));
+        }
+        if let OwnedExpr::BVslt(a, b) = self {
+            return Ok(op::slt(a.eval_with_bindings(args, bindings)?, b.eval_with_bindings(args, bindings)?));
+        }
         all_ops!(arity nonzero);
         panic!("should not reach here.");
     }
+
+    fn eval_let_chain_with_bindings(
+        &self,
+        args: &[BitVec],
+        bindings: &[(&str, &BitVec)],
+    ) -> Result<BitVec, DivideByZero> {
+        let mut scoped = args.to_vec();
+        let mut current = self;
+        loop {
+            match current {
+                OwnedExpr::Let(_, value, body) => {
+                    let bound = value.eval_with_bindings(&scoped, bindings)?;
+                    scoped.push(bound);
+                    current = body;
+                }
+                other => return other.eval_with_bindings(&scoped, bindings),
+            }
+        }
+    }
+
     pub fn eval_bv<const N: usize>(&self, args: &[Bv<N>]) -> Bv<N> {
         macro_rules! foreach_op {
             (1, $op: ident) => {

@@ -171,7 +171,7 @@ fn eval_op_on_values(op: &str, values: &[BitVec]) -> Result<BitVec, ()> {
         ("ite", 3) => Ok(op::ite(values[0].clone(), values[1].clone(), values[2].clone())),
         _ => {
             if let Some(fid) = deffun::ENV.lookup(op, values.len()) {
-                deffun::ENV.eval_defined(fid, values).map_err(|_| ())
+                deffun::ENV.eval_defined(fid, values, &[]).map_err(|_| ())
             } else {
                 Err(())
             }

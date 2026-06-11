@@ -146,7 +146,7 @@ impl DedupStats {
             return;
         }
         let aux_top = BitVec::zero(bits).bitnot();
-        let Some(value_at_top) = grammar.eval_node_at(node, nodes, &aux_top, closure_name) else {
+        let Some(value_at_top) = grammar.eval_node_at(node, nodes, &[(closure_name, &aux_top)]) else {
             return;
         };
         STATE.with(|c| {
