@@ -9,7 +9,6 @@ use super::SortAliases;
 #[derive(Clone, Debug)]
 pub struct FeatureSet {
     pub grammars: bool,
-    pub fwd_decls: bool,
     pub recursion: bool,
     pub oracles: bool,
     pub weights: bool,
@@ -19,7 +18,6 @@ impl Default for FeatureSet {
     fn default() -> Self {
         Self {
             grammars: true,
-            fwd_decls: false,
             recursion: false,
             oracles: false,
             weights: false,
@@ -31,7 +29,7 @@ impl FeatureSet {
     fn set(&mut self, feature: &SyGuSFeature, value: bool) {
         match feature {
             SyGuSFeature::Grammars => self.grammars = value,
-            SyGuSFeature::FwdDecls => self.fwd_decls = value,
+            SyGuSFeature::FwdDecls => {} // experimental path removed; flag still parses but is a no-op
             SyGuSFeature::Recursion => self.recursion = value,
             SyGuSFeature::Oracles => self.oracles = value,
             SyGuSFeature::Weights => self.weights = value,
@@ -64,10 +62,6 @@ pub struct GrammarDeps {
 }
 
 impl GrammarDeps {
-    pub fn requires_fwd_decls(&self) -> bool {
-        !self.forward_synth_calls.is_empty()
-    }
-
     pub fn requires_recursion(&self) -> bool {
         self.uses_self
     }
@@ -388,31 +382,6 @@ fn push_unique(values: &mut Vec<usize>, value: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn program_env_tracks_forward_deps_through_macros() {
-        let file = SyGuSFile::from_str(
-            r#"
-            (set-feature :fwd-decls true)
-            (synth-fun f () (_ BitVec 1)
-              ((B (_ BitVec 1))
-               ((B (_ BitVec 1) (#b0)))))
-            (define-fun wrap ((x (_ BitVec 1))) (_ BitVec 1) f)
-            (synth-fun g () (_ BitVec 1)
-              ((B (_ BitVec 1))
-               ((B (_ BitVec 1) ((wrap B))))))
-            (check-synth)
-            "#,
-        )
-        .unwrap();
-        let env = ProgramEnv::from_file(&file);
-
-        assert!(env.features.fwd_decls);
-        assert_eq!(env.synth_funs.len(), 2);
-        assert_eq!(env.grammar_deps[1].define_calls, vec![0]);
-        assert_eq!(env.grammar_deps[1].forward_synth_calls, vec![0]);
-        assert!(env.grammar_deps[1].requires_fwd_decls());
-    }
 
     #[test]
     fn program_env_tracks_recursive_synth_grammar_use() {
