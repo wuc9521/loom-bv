@@ -113,7 +113,6 @@ impl SampleConfig {
             args: sol.pbecstr.args,
             examples,
             structural: Vec::new(),
-            closure: None,
         };
 
         let output: Vec<_> = spec.examples.iter().map(|ex| ex.output.clone()).collect();

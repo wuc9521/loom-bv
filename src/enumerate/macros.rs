@@ -96,6 +96,15 @@ macro_rules! enum_ownedexpr {
             #[debug(fmt = "(func{} {:?})", _0, _1)]
             #[display(fmt = "{}", "crate::enumerate::expr::format_owned_func_app(*_0, _1)")]
             Func(usize, Vec<OwnedExpr>),
+            /// Application of a synth-fun symbol to args. The `synth_idx`
+            /// is the index into the program's synth-fun list (set at
+            /// `from_term` time). At eval, the search loop substitutes
+            /// the current candidate's body for this slot with `args`
+            /// bound to its formal parameters; relevance walks both the
+            /// args here and the synth-fun's grammar for demanded bits.
+            #[debug(fmt = "(synth{} {:?})", _0, _1)]
+            #[display(fmt = "{}", "crate::enumerate::expr::format_owned_synth_app(*_0, _1)")]
+            SynthApp(usize, Vec<OwnedExpr>),
             #[debug(fmt = "!{:?}", _0)]
             #[display(fmt = "(bvnot {})", _0)]
             Not(Box<OwnedExpr>),

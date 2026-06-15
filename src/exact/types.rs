@@ -185,11 +185,8 @@ fn eval_op_on_values(op: &str, values: &[BitVec]) -> Result<BitVec, ()> {
 /// K=1, this degenerates to a single value. In fixpoint mode, `values_top`
 /// holds evaluations at `aux=top` — together with `values` (at `aux=0`) they
 /// form the two-sample fingerprint for sound sub-NT dedup. Start-NT candidates
-/// in fixpoint mode store the converged LFP in `values` and `None` in
-/// `values_top`.
 #[derive(Clone)]
 pub struct Candidate {
     pub node: NodeId,
     pub values: Vec<BitVec>,
-    pub values_top: Option<Vec<BitVec>>,
 }

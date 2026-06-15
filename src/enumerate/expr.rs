@@ -74,6 +74,23 @@ pub fn format_owned_func_app(fid: usize, args: &[OwnedExpr]) -> String {
     format!("({} {})", name, rendered_args)
 }
 
+/// Display helper for `OwnedExpr::SynthApp`. The synth-fun name is looked
+/// up from the program's synth-fun registry by index; if the registry is
+/// not present (e.g. a freshly-built expression outside a search context)
+/// falls back to `synth<idx>`.
+pub fn format_owned_synth_app(idx: usize, args: &[OwnedExpr]) -> String {
+    let name = deffun::synth_name(idx).unwrap_or_else(|| format!("synth{idx}"));
+    if args.is_empty() {
+        return name;
+    }
+    let rendered = args
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("({} {})", name, rendered)
+}
+
 impl<'a> Expr<'a> {
     pub fn eval(&self, args: &[BitVec]) -> Result<BitVec, DivideByZero> {
         macro_rules! foreach_op {
@@ -377,9 +394,13 @@ impl OwnedExpr {
                     Ok(Self::Const(value?))
                 } else if let Some(fid) = deffun::ENV.lookup(v, 0) {
                     Ok(Self::Func(fid, vec![]))
+                } else if let Some(synth_idx) = deffun::lookup_synth(v, 0) {
+                    // Bare reference to a nullary synth-fun (fwd-decls
+                    // auxiliary, or a nullary entry-point synth-fun).
+                    Ok(Self::SynthApp(synth_idx, vec![]))
                 } else {
                     Err(new_custom_error_span(
-                        "Unrecongnized Variable".into(),
+                        format!("Unrecognized identifier `{v}`"),
                         empty_span(),
                     ))
                 }
@@ -487,6 +508,14 @@ impl OwnedExpr {
                 if let Some(fid) = deffun::ENV.lookup(opname, args.len()) {
                     return Ok(Self::Func(
                         fid,
+                        args.iter()
+                            .map(|arg| Self::from_term(arg, env))
+                            .collect::<parse::Result<Vec<_>>>()?,
+                    ));
+                }
+                if let Some(synth_idx) = deffun::lookup_synth(opname, args.len()) {
+                    return Ok(Self::SynthApp(
+                        synth_idx,
                         args.iter()
                             .map(|arg| Self::from_term(arg, env))
                             .collect::<parse::Result<Vec<_>>>()?,
@@ -762,6 +791,7 @@ impl OwnedExpr {
             | OwnedExpr::SRem(a, _) => a.width(),
             OwnedExpr::Ite(_, a, _) => a.width(),
             OwnedExpr::BVule(_, _) | OwnedExpr::BVult(_, _) | OwnedExpr::BVsle(_, _) | OwnedExpr::BVslt(_, _) => 1,
+            OwnedExpr::SynthApp(idx, _) => deffun::synth_ret_bits(*idx),
         }
     }
 
@@ -873,6 +903,28 @@ impl OwnedExpr {
         }
         if let OwnedExpr::BVslt(a, b) = self {
             return Ok(op::slt(a.eval_with_bindings(args, bindings)?, b.eval_with_bindings(args, bindings)?));
+        }
+        if let OwnedExpr::SynthApp(synth_idx, call_args) = self {
+            let evaled_args = call_args
+                .iter()
+                .map(|a| a.eval_with_bindings(args, bindings))
+                .collect::<Result<Vec<_>, _>>()?;
+            // Cache `(synth_idx, args) → body_value` across the lifetime of
+            // the current candidate. Multiple structural constraints invoke
+            // `SynthApp` with identical evaled args; without this cache we
+            // re-walk the (possibly large) candidate body once per
+            // constraint. `set_candidate` clears the cache.
+            if let Some(v) = deffun::synth_app_lookup(*synth_idx, &evaled_args) {
+                return Ok(v);
+            }
+            let body = deffun::get_candidate(*synth_idx).unwrap_or_else(|| {
+                panic!(
+                    "OwnedExpr::SynthApp eval: no current candidate set for synth_idx={synth_idx}"
+                )
+            });
+            let v = body.eval_with_bindings(&evaled_args, bindings)?;
+            deffun::synth_app_insert(*synth_idx, &evaled_args, v.clone());
+            return Ok(v);
         }
         all_ops!(arity nonzero);
         panic!("should not reach here.");

@@ -12,6 +12,7 @@ pub struct FeatureSet {
     pub recursion: bool,
     pub oracles: bool,
     pub weights: bool,
+    pub fwd_decls: bool,
 }
 
 impl Default for FeatureSet {
@@ -21,6 +22,7 @@ impl Default for FeatureSet {
             recursion: false,
             oracles: false,
             weights: false,
+            fwd_decls: false,
         }
     }
 }
@@ -29,7 +31,7 @@ impl FeatureSet {
     fn set(&mut self, feature: &SyGuSFeature, value: bool) {
         match feature {
             SyGuSFeature::Grammars => self.grammars = value,
-            SyGuSFeature::FwdDecls => {} // experimental path removed; flag still parses but is a no-op
+            SyGuSFeature::FwdDecls => self.fwd_decls = value,
             SyGuSFeature::Recursion => self.recursion = value,
             SyGuSFeature::Oracles => self.oracles = value,
             SyGuSFeature::Weights => self.weights = value,
@@ -135,28 +137,6 @@ impl<'a> ProgramEnv<'a> {
             .copied()
             .find(|sf| sf.grammar.is_some_and(|g| !is_constant_grammar(g)))
             .or_else(|| self.synth_funs.first().copied())
-    }
-
-    /// The fixpoint synth-fun name, if any define-fun references a synth-fun.
-    /// Returns the name of the synth-fun that define-funs substitute into.
-    pub fn fixpoint_name(&self) -> Option<&'a str> {
-        for sf in &self.synth_funs {
-            if sf.grammar.is_some_and(|g| is_constant_grammar(g)) {
-                return Some(sf.name);
-            }
-        }
-        // Single synth-fun referenced by its own define-funs
-        if self.synth_funs.len() == 1 {
-            let name = self.synth_funs[0].name;
-            let referenced = self
-                .define_funs
-                .iter()
-                .any(|df| term_mentions_symbol(df.body, name));
-            if referenced {
-                return Some(name);
-            }
-        }
-        None
     }
 
     pub fn define_fun(&self, name: &str, arity: usize) -> Option<DefineFunView<'a>> {

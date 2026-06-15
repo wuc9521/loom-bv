@@ -213,7 +213,8 @@ impl<'a> LfpSpec<'a> {
         );
         crate::exact::enable_eval_cache();
         crate::exact::enable_dedup_stats_if_env(self.bits());
-        let expr = spec.search(&problem, true, Some(closure_name))?;
+        let _ = closure_name;
+        let expr = spec.search(&problem, true)?;
         crate::exact::dump_and_disable_eval_cache(self.variant_tag());
         crate::exact::dump_and_disable_dedup_stats(self.variant_tag());
         Ok(Some(self.finalize(env, expr)?))

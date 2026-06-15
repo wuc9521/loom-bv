@@ -21,7 +21,6 @@
 //! via [`stats::DedupStats`] (gated by `DELIS_DEDUP_STATS=1`).
 
 pub mod bitspec;
-pub mod closure;
 pub mod dedup;
 pub mod eval;
 pub mod grammar;
@@ -31,6 +30,7 @@ pub mod search;
 pub mod stats;
 pub mod types;
 pub mod util;
+pub mod verifier;
 
 pub use bitspec::Constraint;
 pub use stats::DedupStats;

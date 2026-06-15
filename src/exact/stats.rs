@@ -13,7 +13,6 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::enumerate::value::BitVec;
-use crate::exact::types::{Grammar, Node, NodeId};
 use crate::info;
 
 #[derive(Default)]
@@ -126,35 +125,4 @@ impl DedupStats {
         });
     }
 
-    /// Record a sub-NT candidate push. Called at the push site in fixpoint
-    /// mode. No-op when the env var is unset. Computes `value@top` from
-    /// scratch via a Node DAG walk — fine because this is diagnostic.
-    pub fn record_push(
-        nt_idx: usize,
-        size: usize,
-        node: NodeId,
-        value_at_zero: &BitVec,
-        grammar: &Grammar<'_>,
-        nodes: &[Node],
-        closure_name: &str,
-    ) {
-        let (enabled, bits) = STATE.with(|c| {
-            let c = c.borrow();
-            (c.enabled, c.bits)
-        });
-        if !enabled {
-            return;
-        }
-        let aux_top = BitVec::zero(bits).bitnot();
-        let Some(value_at_top) = grammar.eval_node_at(node, nodes, &[(closure_name, &aux_top)]) else {
-            return;
-        };
-        STATE.with(|c| {
-            let mut c = c.borrow_mut();
-            let entry = c.per_nt_size.entry((nt_idx, size)).or_default();
-            entry.pushed += 1;
-            entry.at_zero.insert(value_at_zero.clone());
-            entry.at_pair.insert((value_at_zero.clone(), value_at_top));
-        });
-    }
 }

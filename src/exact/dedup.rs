@@ -19,12 +19,6 @@ pub enum SeenMode {
         num_examples: usize,
         maps: Vec<FxHashMap<ProjectionKey, usize>>,
     },
-    /// Fixpoint-mode dedup: sub-NTs use `(values@0, values@top)` pairs;
-    /// the start-NT pool uses a single `BitVec` (the converged LFP).
-    Pair {
-        sub_maps: Vec<FxHashMap<(BitVec, BitVec), usize>>,
-        start_lfp: FxHashMap<BitVec, usize>,
-    },
 }
 
 impl SeenMode {
@@ -40,13 +34,6 @@ impl SeenMode {
             relevant_bits,
             num_examples,
             maps: (0..nt_count).map(|_| FxHashMap::default()).collect(),
-        }
-    }
-
-    pub fn pair(nt_count: usize) -> Self {
-        SeenMode::Pair {
-            sub_maps: (0..nt_count).map(|_| FxHashMap::default()).collect(),
-            start_lfp: FxHashMap::default(),
         }
     }
 
@@ -75,41 +62,6 @@ impl SeenMode {
                         false
                     }
                 }
-            }
-            SeenMode::Pair { .. } => {
-                panic!("contains_or_insert_multi should not be called in Pair mode");
-            }
-        }
-    }
-
-    /// Single-value dedup for start-NT in Pair (LFP) mode.
-    pub fn contains_or_insert_lfp(&mut self, value: &BitVec, size: usize) -> bool {
-        let SeenMode::Pair { start_lfp, .. } = self else {
-            panic!("contains_or_insert_lfp called outside Pair mode");
-        };
-        match start_lfp.entry(value.clone()) {
-            Entry::Occupied(_) => true,
-            Entry::Vacant(e) => {
-                e.insert(size);
-                false
-            }
-        }
-    }
-
-    /// Two-sample pair dedup for sub-NTs in LFP mode.
-    pub fn contains_or_insert_pair(
-        &mut self,
-        nt: usize,
-        value_zero: &BitVec,
-        value_top: &BitVec,
-        size: usize,
-    ) -> bool {
-        let SeenMode::Pair { sub_maps, .. } = self else { return false; };
-        match sub_maps[nt].entry((value_zero.clone(), value_top.clone())) {
-            Entry::Occupied(_) => true,
-            Entry::Vacant(e) => {
-                e.insert(size);
-                false
             }
         }
     }

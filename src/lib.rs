@@ -23,6 +23,7 @@ pub mod chatgpt;
 mod deductive;
 pub mod enumerate;
 mod exact;
+pub mod fwd_decls;
 pub mod hash;
 pub mod log;
 pub mod parse;
@@ -79,6 +80,115 @@ fn run_cegis_with_large_stack(
     }
 }
 
+/// Diagnostic: take a candidate body as an S-expression string, lift it
+/// to an `OwnedExpr` via `from_term`, install it as the current synth
+/// candidate, and report per-constraint pass/fail. Used to determine
+/// whether `dryadsynth-bv`'s eval agrees with z3 on a hand-supplied
+/// candidate that we already know the encoding admits.
+fn probe_candidate(
+    body_str: &str,
+    spec: &exact::Constraint,
+    view: &parse::ProgramEnv,
+) -> SolverResult<()> {
+    // Wrap the candidate body in a tiny SyGuS file so the parser yields
+    // a single SyGuSTerm; reuse the same Pest grammar as the real parser.
+    let wrapped = format!("(set-logic BV)(define-fun __probe () CFG {body_str})");
+    let parsed = SyGuSFile::from_str(&wrapped)
+        .map_err(|e| format!("probe: failed to parse candidate: {e}"))?;
+    let define_body = parsed
+        .cmds
+        .iter()
+        .find_map(|c| match c {
+            SyGuSCmd::DefineFun(_, _, _, body) => Some(body),
+            _ => None,
+        })
+        .ok_or("probe: parsed file has no define-fun")?;
+    let synth_env: Vec<(&str, u64)> = view
+        .synth_funs
+        .first()
+        .map(|sf| {
+            sf.args
+                .iter()
+                .filter_map(|a| {
+                    view.sort_aliases
+                        .parse_sort_width(&a.sort)
+                        .map(|w| (a.name.as_str(), w as u64))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let candidate = OwnedExpr::from_term(define_body, &synth_env)
+        .map_err(|e| format!("probe: failed to lift candidate: {e}"))?;
+    debg!("probe candidate: {}", candidate.summarize(200));
+    deffun::set_candidate(0, Some(candidate));
+    let total = spec.structural.len();
+    let mut violated: Vec<usize> = Vec::new();
+    for (i, expr) in spec.structural.iter().enumerate() {
+        match expr.eval(&[]) {
+            Ok(v) => {
+                if !v.as_bool().holds() {
+                    violated.push(i);
+                }
+            }
+            Err(e) => {
+                debg!("probe: structural[{i}] eval errored: {e:?}");
+                violated.push(i);
+            }
+        }
+    }
+    let matches = spec.matches(&[]);
+    crate::info!(
+        "probe: structural total={total}, violated={}, matches={matches}",
+        violated.len()
+    );
+    if !violated.is_empty() && violated.len() <= 20 {
+        crate::info!("probe: violated indices: {:?}", violated);
+    }
+    let _ = view;
+    Ok(())
+}
+
+fn fwd_decls_solve(
+    view: &ProgramEnv<'_>,
+    problem: &fwd_decls::FwdDeclsProblem,
+    min: bool,
+    _config_path: Option<&str>,
+) -> SolverResult<OwnedExpr> {
+    use crate::enumerate::grammar::Config;
+    use crate::exact::{search::run_search, types::Grammar};
+
+    // The fwd-decls auxiliaries are not enumerated — their values come
+    // from the LFP iteration in the verifier. `parse_from_view` picks
+    // the synth-fun with a non-trivial grammar, which is exactly the
+    // entry point in our shape.
+    let stub = parse::SynthProblem::parse_from_view(view)?;
+    let multi = Config::from_problem(&stub)?;
+    let grammar = Grammar::from_config(&multi);
+    let result = run_search(grammar, problem, min, false)
+        .map_err(|e| format!("fwd-decls search failed: {e}"))?;
+    Ok(result)
+}
+
+fn format_fwd_decls_solution(
+    view: &ProgramEnv<'_>,
+    problem: &fwd_decls::FwdDeclsProblem,
+    result: &OwnedExpr,
+) -> String {
+    // Returns the inner `(define-fun …)` only; the caller
+    // (`solve_sygus_file`) supplies the outer `(\n…\n)` wrapping.
+    let entry_sf = view.synth_funs[problem.entry_synth_idx];
+    let arg_decls: String = entry_sf
+        .args
+        .iter()
+        .map(|a| format!("({} {})", a.name, a.sort))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "(define-fun {} ({}) {} {})",
+        entry_sf.name, arg_decls, entry_sf.ret, result
+    )
+}
+
 fn solve_file_inner(
     file: &SyGuSFile,
     config_path: Option<&str>,
@@ -87,11 +197,44 @@ fn solve_file_inner(
 ) -> SolverResult<String> {
     let view = ProgramEnv::from_file(file);
     deffun::ENV.clear();
+    // Register synth-funs so `OwnedExpr::from_term` recognises their
+    // names in Application position (producing `SynthApp`) — needed for
+    // parent-spec emissions from delis (`(g a_arg b_arg c_arg)` inside
+    // a Kleene-chain define-fun body).
+    let synth_registry: Vec<deffun::SynthEntry> = view
+        .synth_funs
+        .iter()
+        .map(|sf| -> SolverResult<_> {
+            let ret_bits = view
+                .sort_aliases
+                .parse_sort_width(sf.ret)
+                .ok_or_else(|| format!("synth-fun {} return sort: not a bit-vector", sf.name))?
+                as usize;
+            Ok(deffun::SynthEntry {
+                name: sf.name.to_string(),
+                arity: sf.args.len(),
+                ret_bits,
+            })
+        })
+        .collect::<SolverResult<Vec<_>>>()?;
+    deffun::set_synth_registry(&synth_registry);
     deffun::ENV.parse_from_view(&view)?;
 
-    let fixpoint_name = view.fixpoint_name().map(|s| {
-        Box::leak(s.to_string().into_boxed_str()) as &'static str
-    });
+    // SyGuS 2.1 :fwd-decls — when the file declares multiple synth-funs
+    // and the entry point's grammar references the others as terminals,
+    // route through the fwd-decls solver (LFP iteration per candidate).
+    if view.features.fwd_decls && view.synth_funs.len() > 1 {
+        let problem = fwd_decls::FwdDeclsProblem::from_view(&view)?;
+        debg!(
+            "fwd-decls search: entry={} entry_bits={} recipes={} bit_asserts={}",
+            view.synth_funs[problem.entry_synth_idx].name,
+            problem.entry_bits,
+            problem.recipes.len(),
+            problem.bit_asserts.len()
+        );
+        let result = fwd_decls_solve(&view, &problem, min, config_path)?;
+        return Ok(format_fwd_decls_solution(&view, &problem, &result));
+    }
 
     // LFP pattern: route through the specialized LfpSpec path when the
     // problem has the two-synth-fun closure shape that SynthProblem can't
@@ -118,6 +261,10 @@ fn solve_file_inner(
             "exact search: {} (bits={}, examples={}, cmds={})",
             problem.name, problem.bits, spec.num_examples(), file.cmds.len()
         );
+        if let Ok(probe) = env::var("DRYAD_PROBE_G") {
+            probe_candidate(&probe, &spec, &view)?;
+            return Ok(String::from("(probe-only run)"));
+        }
         let fig = Figment::new().merge(Serialized::defaults(SearchConfig::default_exact()));
         let fig = if let Some(path) = config_path {
             fig.merge(Toml::file(path))
@@ -126,7 +273,6 @@ fn solve_file_inner(
         };
         let mut config: SearchConfig = fig.extract()?;
         config.min = min;
-        config.fixpoint = fixpoint_name;
         if env::var("DRYADSYNTH_COMPOSITION").is_ok() {
             config.enable_composition = true;
         }

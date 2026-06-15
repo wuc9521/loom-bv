@@ -14,7 +14,7 @@ use crate::{
         Bv,
     },
     exact::{
-        relevance::{bits, Relevance},
+        relevance::Relevance,
         search::search_problem,
         types::Grammar,
     },
@@ -53,9 +53,6 @@ impl Example {
     }
 }
 
-#[derive(Clone)]
-pub struct ClosureInfo;
-
 #[derive(DebugCustom, Clone)]
 #[debug(fmt = "{} examples, bits={}", "examples.len()", bits)]
 pub struct Constraint {
@@ -63,7 +60,6 @@ pub struct Constraint {
     pub args: usize,
     pub examples: Vec<Example>,
     pub structural: Vec<OwnedExpr>,
-    pub closure: Option<ClosureInfo>,
 }
 
 fn all_ones(bits: usize) -> BitVec {
@@ -97,7 +93,6 @@ impl Constraint {
             args,
             examples: Vec::new(),
             structural: Vec::new(),
-            closure: None,
         }
     }
 
@@ -126,7 +121,6 @@ impl Constraint {
             args,
             examples,
             structural: Vec::new(),
-            closure: None,
         }
     }
 
@@ -145,8 +139,7 @@ impl Constraint {
                     mask: all_ones(bits),
                 }],
                 structural: vec![],
-                closure: None,
-            }));
+                }));
         }
         if let Some((parsed, structural)) =
             parse_bit_constraints_grouped(file, problem.name, problem.bits, &problem.args)?
@@ -163,8 +156,7 @@ impl Constraint {
                 args: problem.args.len(),
                 examples,
                 structural,
-                closure: None,
-            }));
+                }));
         }
         Ok(None)
     }
@@ -225,7 +217,6 @@ impl Constraint {
             args: 0,
             examples: vec![example],
             structural: vec![],
-            closure: Some(ClosureInfo),
         }
     }
 
@@ -438,9 +429,8 @@ impl Constraint {
         &self,
         problem: &SynthProblem<'static>,
         min: bool,
-        fixpoint: Option<&str>,
     ) -> parse::Result<OwnedExpr> {
-        search_problem(problem, self, min, fixpoint, false)
+        search_problem(problem, self, min, false)
     }
 
     pub fn compute_relevant_bits(
@@ -455,10 +445,6 @@ impl Constraint {
             return None;
         }
         let mut lazy = Relevance::new(grammar, self.bits, &demanded)?;
-        if self.closure.is_some() {
-            lazy.closure_param = Some(0);
-            lazy.closure_relevant = Some(bits::BitSet::new(self.bits));
-        }
         while !lazy.advance(1024) {}
         lazy.finish()
     }

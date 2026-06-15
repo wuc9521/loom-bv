@@ -27,9 +27,7 @@ pub fn get_deffun_dep_bit(
     if let Some(dep) = cache.get(&(fid, bit)) {
         return dep.clone();
     }
-    // See `get_deffun_dep_bits` — same extended-arg_bits reason.
-    let mut arg_bits = deffun::ENV.arg_bits(fid).to_vec();
-    arg_bits.extend_from_slice(deffun::ENV.closure_arg_bits(fid));
+    let arg_bits = deffun::ENV.arg_bits(fid).to_vec();
     let dep = match deffun::ENV.plan(fid) {
         DefineFunPlan::BitCircuit(plan) => compute_bit_circuit_dep_bit(plan, &arg_bits, bit),
         DefineFunPlan::Generic {
@@ -48,13 +46,7 @@ pub fn get_deffun_dep_bits(
     demanded: &BitSet,
     cache: &mut DepCache,
 ) -> Option<BitDep> {
-    // Use EXTENDED arg_bits = user args + closure-synth-fun args. Define-fun
-    // bodies may reference closure synth-funs (SyGuS 2.1 §3.7); their
-    // identifiers were resolved to Var slots beyond the real arity at parse
-    // time. Without this extension, dependency walks treat synth-arg slots
-    // as instructions and quietly mis-attribute demand.
-    let mut arg_bits = deffun::ENV.arg_bits(fid).to_vec();
-    arg_bits.extend_from_slice(deffun::ENV.closure_arg_bits(fid));
+    let arg_bits = deffun::ENV.arg_bits(fid).to_vec();
     match deffun::ENV.plan(fid) {
         DefineFunPlan::BitCircuit(plan) => Some(compute_bit_circuit_dep_bits(plan, &arg_bits, demanded)),
         DefineFunPlan::Generic {
@@ -278,7 +270,8 @@ fn compute_generic_dep_bit(
                 | PlanInstr::BVule { .. }
                 | PlanInstr::BVult { .. }
                 | PlanInstr::BVsle { .. }
-                | PlanInstr::BVslt { .. } => Some(BitDep::full(arg_bits)),
+                | PlanInstr::BVslt { .. }
+                | PlanInstr::SynthCall { .. } => Some(BitDep::full(arg_bits)),
             }
         };
         memo.insert((slot, bit), dep.clone());
@@ -408,6 +401,16 @@ fn compute_generic_dep_bits(
                     &mut demanded_by_slot,
                     &mut stack,
                 );
+            }
+            PlanInstr::SynthCall { args, .. } => {
+                for &slot in args {
+                    enqueue_slot(
+                        slot,
+                        &BitSet::full(slot_bits[slot]),
+                        &mut demanded_by_slot,
+                        &mut stack,
+                    );
+                }
             }
         }
     }

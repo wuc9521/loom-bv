@@ -202,6 +202,13 @@ fn term_to_rule(
                 &SyGuSTerm::Identifier(id.clone()),
                 env,
             )?))
+        } else if deffun::lookup_synth(name, 0).is_some() {
+            // Nullary synth-fun referenced as a grammar terminal (the
+            // fwd-decls auxiliaries appear this way).
+            Ok(Some(OwnedExpr::from_term(
+                &SyGuSTerm::Identifier(id.clone()),
+                env,
+            )?))
         } else {
             Ok(None)
         }

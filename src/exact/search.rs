@@ -1,23 +1,13 @@
 //! Bottom-up enumeration over the compiled `Grammar`, with value-based
-//! dedup. Two modes (selected by `Searcher::closure`):
+//! dedup. Each candidate's value is composed from its children's values
+//! via `eval_defined`, deduped on that single value (or skipped when the
+//! spec has no PBE examples — see `try_push_new`), and checked against
+//! the spec immediately on reaching the start NT.
 //!
-//! - **Direct** (`closure = None`): each candidate's value is composed from
-//!   its children's values via `eval_defined`, deduped on that single
-//!   value, and checked against the spec immediately on reaching the
-//!   start NT.
-//!
-//! - **Fixpoint** (`closure = Some(_)`): each sub-NT candidate carries two
-//!   evaluations — at `aux=0` and at `aux=top` — and dedups on the pair.
-//!   Start-NT candidates run a Kleene LFP iteration via
-//!   `Searcher::kleene_lfp`, with the converged value used for both the
-//!   spec match and dedup. The Kleene loop also performs a per-iter
-//!   negative-label early reject (sound by monotonicity).
-//!
-//! All fixpoint-vs-direct branching is confined to `Searcher::eval_*`
-//! (which return `(value, value_top: Option<BitVec>)`) and `Searcher::try_push`
-//! (which dispatches on `self.closure.is_some()` and `nt_idx == start`).
-//! Each rule arm in `Searcher::run` reduces to "build children-eval +
-//! call try_push".
+//! For structural specs containing `SynthApp(synth_idx, _)`, the start-NT
+//! candidate is installed via `deffun::set_candidate` before `matches`
+//! evaluates the structural exprs — the per-candidate `EVAL_CACHE_STATE`
+//! makes repeated nullary-define-fun evaluation cheap.
 
 use std::time::Instant;
 
@@ -27,40 +17,38 @@ use crate::enumerate::{
     grammar::{for_each_candidate_tuple, for_each_size_split, Config},
     value::BitVec,
 };
-use crate::exact::bitspec::Constraint;
-use crate::exact::closure::Bindings;
 use crate::exact::dedup::SeenMode;
 use crate::exact::stats::DedupStats;
 use crate::exact::types::{Candidate, ExactEvalCache, Grammar, ExactRule, Node, NodeId};
+use crate::exact::verifier::Verifier;
 use crate::parse::{self, deffun, SynthProblem};
 use crate::parse::deffun::BitCircuitPlan;
 
 pub fn run_search<'a>(
     grammar: Grammar<'a>,
-    spec: &Constraint,
+    verifier: &dyn Verifier,
     min: bool,
-    fixpoint: Option<&str>,
     enable_decomp: bool,
 ) -> parse::Result<OwnedExpr> {
-    Searcher::new(grammar, spec, min, fixpoint, enable_decomp).run()
+    Searcher::new(grammar, verifier, min, enable_decomp).run()
 }
 
 pub fn enumerate_start<'a>(
     grammar: Grammar<'a>,
-    spec: &Constraint,
+    verifier: &dyn Verifier,
     min: bool,
     max_size: usize,
     mut callback: impl FnMut(&OwnedExpr, &[BitVec]) -> Result<(), ()>,
 ) -> parse::Result<()> {
-    let mut searcher = Searcher::new(grammar, spec, min, None, false);
+    let mut searcher = Searcher::new(grammar, verifier, min, false);
     searcher.run_with_callback(max_size, &mut callback)
 }
 
 struct Searcher<'a, 'g> {
     grammar: Grammar<'a>,
-    spec: &'g Constraint,
+    verifier: &'g dyn Verifier,
+    output_bits: usize,
     num_examples: usize,
-    closure: Option<Bindings>,
     nodes: Vec<Node>,
     by_size: Vec<Vec<Vec<Candidate>>>,
     seen: SeenMode,
@@ -68,34 +56,32 @@ struct Searcher<'a, 'g> {
     pruned_plans: rustc_hash::FxHashMap<(usize, usize), std::rc::Rc<BitCircuitPlan>>,
     value_index: Vec<rustc_hash::FxHashMap<Vec<u64>, Vec<NodeId>>>,
     enable_compose: bool,
+    matches_total: std::time::Duration,
+    matches_count: usize,
 }
 
 impl<'a, 'g> Searcher<'a, 'g> {
     fn new(
         grammar: Grammar<'a>,
-        spec: &'g Constraint,
+        verifier: &'g dyn Verifier,
         min: bool,
-        fixpoint: Option<&str>,
         enable_decomp: bool,
     ) -> Self {
-        let num_examples = spec.num_examples();
-        let closure = match fixpoint {
-            Some(name) => Some(Bindings::single(name, spec.bits)),
-            None => None,
-        };
+        let num_examples = verifier.num_examples();
+        let output_bits = verifier.output_bits();
         let relevance_disabled = !min;
         let eager_relevant_bits = if relevance_disabled {
             debg!("exact relevance skipped (--min=false)");
             None
         } else {
             let relevance_start = Instant::now();
-            let bits = spec.compute_relevant_bits(&grammar);
+            let bits = verifier.compute_relevant_bits(&grammar);
             debg!(
                 "exact relevance computed in {:?}",
                 relevance_start.elapsed()
             );
             if let Some(b) = &bits {
-                grammar.log_relevance_summary(b, num_examples, spec.bits);
+                grammar.log_relevance_summary(b, num_examples, output_bits);
             }
             bits
         };
@@ -127,19 +113,19 @@ impl<'a, 'g> Searcher<'a, 'g> {
             }
         }
         let nt_count = grammar.nts.len();
-        let seen = if closure.is_some() {
-            SeenMode::pair(nt_count)
-        } else if let Some(relevant_bits) = eager_relevant_bits {
+        let seen = if let Some(relevant_bits) = eager_relevant_bits {
             SeenMode::multi_projected(relevant_bits, num_examples)
         } else {
             SeenMode::multi_exact(nt_count, num_examples)
         };
-        let enable_compose = enable_decomp && closure.is_none();
+        // try_compose requires PBE-shaped examples; non-PBE verifiers
+        // (e.g. fwd-decls) opt out via `pbe_examples() == None`.
+        let enable_compose = enable_decomp && verifier.pbe_examples().is_some();
         Self {
             grammar,
-            spec,
+            verifier,
+            output_bits,
             num_examples,
-            closure,
             nodes: Vec::new(),
             by_size: vec![vec![Vec::<Candidate>::new()]; nt_count],
             seen,
@@ -147,6 +133,8 @@ impl<'a, 'g> Searcher<'a, 'g> {
             pruned_plans,
             value_index: vec![rustc_hash::FxHashMap::default(); nt_count],
             enable_compose,
+            matches_total: std::time::Duration::ZERO,
+            matches_count: 0,
         }
     }
 
@@ -206,12 +194,22 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 .iter()
                 .map(|buckets| buckets.iter().map(|b| b.len()).sum::<usize>())
                 .sum();
+            let per_match = if self.matches_count > 0 {
+                self.matches_total / self.matches_count as u32
+            } else {
+                std::time::Duration::ZERO
+            };
+            let (sah, sam) = crate::parse::deffun::synth_app_stats();
             debg!(
-                "size={}: per-nt={:?} total={} Δ={:?}",
+                "size={}: per-nt={:?} total={} Δ={:?} matches={} avg={:?} synth_app_hit/miss={}/{}",
                 size,
                 per_nt,
                 total,
-                run_start.elapsed()
+                run_start.elapsed(),
+                self.matches_count,
+                per_match,
+                sah,
+                sam,
             );
             DedupStats::snapshot_line(&format!("dedup@size={}", size));
         }
@@ -280,14 +278,13 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 if size != 1 {
                     return Ok(None);
                 }
-                let Some((values, values_top)) = self.eval_leaf(&expr) else {
+                let Some(values) = self.eval_leaf(&expr) else {
                     return Ok(None);
                 };
                 Ok(self.try_push_new(
                     nt_idx,
                     size,
                     values,
-                    values_top,
                     || Node { nt_idx, rule_idx, children: Vec::new() },
                 ))
             }
@@ -296,21 +293,16 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     return Ok(None);
                 }
                 let child_total = size - 1;
-                let mut staged: Vec<(Vec<BitVec>, Option<Vec<BitVec>>, Vec<NodeId>)> = Vec::new();
+                let mut staged: Vec<(Vec<BitVec>, Vec<NodeId>)> = Vec::new();
                 let by_size = &self.by_size;
-                let closure = self.closure.as_ref();
                 let num_examples = self.num_examples;
                 let nodes = &self.nodes;
                 let assoc_skip_lhs = class.associative
                     && child_nts.len() == 2
                     && child_nts[0] == child_nts[1];
                 let nary_pruned = self.pruned_plans.get(&(nt_idx, fid)).cloned();
-                let nary_batch_plan: Option<&BitCircuitPlan> = if closure.is_none() {
-                    nary_pruned.as_deref()
-                        .or_else(|| deffun::ENV.deffun(fid).bit_circuit_plan())
-                } else {
-                    None
-                };
+                let nary_batch_plan: Option<&BitCircuitPlan> = nary_pruned.as_deref()
+                    .or_else(|| deffun::ENV.deffun(fid).bit_circuit_plan());
                 let use_batch = nary_batch_plan.is_some_and(|p| p.bindings.len() > 256);
                 let mut splits = Vec::with_capacity(child_nts.len());
                 if use_batch {
@@ -322,7 +314,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
 
                     let flush_batch = |batch_nodes: &mut Vec<Vec<NodeId>>,
                                        batch_args: &mut Vec<Vec<BitVec>>,
-                                       staged: &mut Vec<(Vec<BitVec>, Option<Vec<BitVec>>, Vec<NodeId>)>,
+                                       staged: &mut Vec<(Vec<BitVec>, Vec<NodeId>)>,
                                        plan: &BitCircuitPlan,
                                        k: usize| {
                         let count = batch_nodes.len();
@@ -330,7 +322,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
 
                         let staged_base = staged.len();
                         for j in 0..count {
-                            staged.push((Vec::with_capacity(k), None, batch_nodes[j].clone()));
+                            staged.push((Vec::with_capacity(k), batch_nodes[j].clone()));
                         }
                         let refs: Vec<&[BitVec]> = batch_args.iter().map(|a| a.as_slice()).collect();
                         for i in 0..k {
@@ -350,7 +342,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     let enqueue_tuple = |tuple: &[&Candidate],
                                               batch_nodes: &mut Vec<Vec<NodeId>>,
                                               batch_args: &mut Vec<Vec<BitVec>>,
-                                              staged: &mut Vec<(Vec<BitVec>, Option<Vec<BitVec>>, Vec<NodeId>)>,
+                                              staged: &mut Vec<(Vec<BitVec>, Vec<NodeId>)>,
                                               plan: &BitCircuitPlan,
                                               k: usize| {
                         if assoc_skip_lhs && nodes[tuple[0].node].rule_idx == rule_idx {
@@ -446,11 +438,11 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                     for rhs in rhs_pool {
 
                                         let tuple: &[&Candidate] = &[lhs, rhs];
-                                        let Some((values, values_top)) =
-                                            Self::eval_nary_with_plan(fid, tuple, closure, num_examples, nary_pruned.as_deref())
+                                        let Some(values) =
+                                            Self::eval_nary_with_plan(fid, tuple, num_examples, nary_pruned.as_deref())
                                         else { continue };
                                         let children = vec![lhs.node, rhs.node];
-                                        staged.push((values, values_top, children));
+                                        staged.push((values, children));
                                     }
                                 }
                             }
@@ -472,11 +464,11 @@ impl<'a, 'g> Searcher<'a, 'g> {
 
                                         if class.nonzero_rhs && rhs.values.iter().all(|v| v.is_zero()) { continue; }
                                         let tuple: &[&Candidate] = &[lhs, rhs];
-                                        let Some((values, values_top)) =
-                                            Self::eval_nary_with_plan(fid, tuple, closure, num_examples, nary_pruned.as_deref())
+                                        let Some(values) =
+                                            Self::eval_nary_with_plan(fid, tuple, num_examples, nary_pruned.as_deref())
                                         else { continue };
                                         let children = vec![lhs.node, rhs.node];
-                                        staged.push((values, values_top, children));
+                                        staged.push((values, children));
                                     }
                                 }
                             } else {
@@ -486,11 +478,11 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                     for rhs in rhs_pool {
                                         if class.nonzero_rhs && rhs.values.iter().all(|v| v.is_zero()) { continue; }
                                         let tuple: &[&Candidate] = &[lhs, rhs];
-                                        let Some((values, values_top)) =
-                                            Self::eval_nary_with_plan(fid, tuple, closure, num_examples, nary_pruned.as_deref())
+                                        let Some(values) =
+                                            Self::eval_nary_with_plan(fid, tuple, num_examples, nary_pruned.as_deref())
                                         else { continue };
                                         let children = vec![lhs.node, rhs.node];
-                                        staged.push((values, values_top, children));
+                                        staged.push((values, children));
                                     }
                                 }
                             }
@@ -523,25 +515,24 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                     if class.nonzero_rhs && child_nts.len() == 2 {
                                         if tuple[1].values.iter().all(|v| v.is_zero()) { return; }
                                     }
-                                    let Some((values, values_top)) =
-                                        Self::eval_nary_with_plan(fid, tuple, closure, num_examples, nary_pruned.as_deref())
+                                    let Some(values) =
+                                        Self::eval_nary_with_plan(fid, tuple, num_examples, nary_pruned.as_deref())
                                     else {
                                         return;
                                     };
                                     let children = tuple.iter().map(|c| c.node).collect();
-                                    staged.push((values, values_top, children));
+                                    staged.push((values, children));
                                 });
                             },
                         );
                     }
                 }
 
-                for (values, values_top, children) in staged {
+                for (values, children) in staged {
                     if let Some(found) = self.try_push_new(
                         nt_idx,
                         size,
                         values,
-                        values_top,
                         || Node { nt_idx, rule_idx, children },
                     ) {
                         return Ok(Some(found));
@@ -560,7 +551,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                         let mut values = Vec::with_capacity(k);
                         let mut ok = true;
                         for i in 0..k {
-                            let args = &self.spec.examples[i].args;
+                            let args = self.verifier.example_args(i);
                             match template.evaluate_with_args(args, &mut self.leaf_cache) {
                                 Ok(v) => values.push(v),
                                 Err(_) => { ok = false; break; }
@@ -571,7 +562,6 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                 nt_idx,
                                 size,
                                 values,
-                                None,
                                 || Node { nt_idx, rule_idx, children: Vec::new() },
                             ));
                         }
@@ -585,7 +575,11 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 let by_size = &self.by_size;
                 let leaf_cache = &mut self.leaf_cache;
                 let num_examples = self.num_examples;
-                let spec_examples = &self.spec.examples;
+                // Snapshot per-example args once so the inner closures
+                // don't borrow `self` (which is needed mutably elsewhere).
+                let example_arg_snapshot: Vec<Vec<BitVec>> = (0..num_examples)
+                    .map(|i| self.verifier.example_args(i).to_vec())
+                    .collect();
                 let mut splits = Vec::with_capacity(child_nts.len());
                 for_each_size_split(
                     child_total,
@@ -613,7 +607,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                 let child_values: Vec<BitVec> =
                                     tuple.iter().map(|c| c.values[i].clone()).collect();
                                 match template.evaluate_with_args_and_children(
-                                    &spec_examples[i].args,
+                                    &example_arg_snapshot[i],
                                     &child_values,
                                     leaf_cache,
                                 ) {
@@ -633,7 +627,6 @@ impl<'a, 'g> Searcher<'a, 'g> {
                         nt_idx,
                         size,
                         values,
-                        None,
                         || Node { nt_idx, rule_idx, children },
                     ) {
                         return Ok(Some(found));
@@ -644,66 +637,25 @@ impl<'a, 'g> Searcher<'a, 'g> {
         }
     }
 
-    // ----- Per-rule eval helpers: return (values@0, values_top? in fixpoint mode)
-    //       For multi-example: values has K entries (one per example).
-    //       For LFP mode (always K=1): values_top has K entries at aux=top.
+    // ----- Per-rule eval helpers: values has K entries (one per example).
 
-    fn eval_leaf(&mut self, expr: &OwnedExpr) -> Option<(Vec<BitVec>, Option<Vec<BitVec>>)> {
-        if self.closure.is_some() {
-            let closure = self.closure.as_ref().unwrap();
-            let zero_bindings = closure.bindings_zero();
-            let top_bindings = closure.bindings_top();
-            // Legacy LFP path uses Var(0) for self-reference; thread the
-            // primary aux's value through `args` for that, while passing
-            // the full bindings for any closure_args inside Func calls.
-            let v = closure.zero(0).clone();
-            let value = self
-                .leaf_cache
-                .leaves
-                .entry(expr.clone())
-                .or_insert_with(|| {
-                    expr.eval_with_bindings(&[v.clone()], &zero_bindings).ok()
-                })
-                .clone()?;
-            let top = closure.top(0).clone();
-            let value_top = expr
-                .eval_with_bindings(&[top], &top_bindings)
-                .ok()?;
-            return Some((vec![value], Some(vec![value_top])));
-        }
+    fn eval_leaf(&mut self, expr: &OwnedExpr) -> Option<Vec<BitVec>> {
         let k = self.num_examples;
         let mut values = Vec::with_capacity(k);
         for i in 0..k {
-            let args = &self.spec.examples[i].args;
+            let args = self.verifier.example_args(i);
             let v = expr.eval(args).ok()?;
             values.push(v);
         }
-        Some((values, None))
+        Some(values)
     }
 
     fn eval_nary_with_plan(
         fid: usize,
         tuple: &[&Candidate],
-        closure: Option<&Bindings>,
         num_examples: usize,
         pruned_plan: Option<&BitCircuitPlan>,
-    ) -> Option<(Vec<BitVec>, Option<Vec<BitVec>>)> {
-        if let Some(closure) = closure {
-            let args_zero: Vec<BitVec> = tuple.iter().map(|c| c.values[0].clone()).collect();
-            let zero_bindings = closure.bindings_zero();
-            let value = deffun::ENV
-                .eval_defined(fid, &args_zero, &zero_bindings)
-                .ok()?;
-            let args_top: Option<Vec<BitVec>> = tuple.iter().map(|c| {
-                c.values_top.as_ref().map(|vt| vt[0].clone())
-            }).collect();
-            let args_top = args_top?;
-            let top_bindings = closure.bindings_top();
-            let value_top = deffun::ENV
-                .eval_defined(fid, &args_top, &top_bindings)
-                .ok()?;
-            return Some((vec![value], Some(vec![value_top])));
-        }
+    ) -> Option<Vec<BitVec>> {
         let k = num_examples;
         let mut values = Vec::with_capacity(k);
         for i in 0..k {
@@ -715,7 +667,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
             };
             values.push(v);
         }
-        Some((values, None))
+        Some(values)
     }
 
     // ----- Push helpers
@@ -725,35 +677,23 @@ impl<'a, 'g> Searcher<'a, 'g> {
         nt_idx: usize,
         size: usize,
         values: Vec<BitVec>,
-        values_top: Option<Vec<BitVec>>,
         build_node: impl FnOnce() -> Node,
     ) -> Option<OwnedExpr> {
-        if nt_idx == self.grammar.start && self.closure.is_some() {
-            let node = self.intern_node(build_node());
-            return self.start_nt_kleene(node, size);
-        }
-        let matches_spec = nt_idx == self.grammar.start
-            && self.closure.is_none()
-            && self.spec.matches(&values);
-        if self.closure.is_none()
+        let is_start = nt_idx == self.grammar.start;
+        let node = self.intern_node(build_node());
+        let matches_spec = is_start && self.run_verify(node, &values);
+        // Values-based dedup collapses to "every candidate is a duplicate"
+        // when there are no examples (structural-only spec). Skip it then —
+        // intern_node gives per-call uniqueness, and structural matching
+        // happens via the materialize closure in `run_verify`.
+        if !values.is_empty()
             && self.seen.contains_or_insert_multi(nt_idx, &values, size)
         {
             return None;
         }
-        if let Some(vt) = values_top.as_ref() {
-            if self.seen.contains_or_insert_pair(nt_idx, &vt[0], &vt[0], size) {
-                return None;
-            }
-        }
-        let node = self.intern_node(build_node());
-        if let Some(closure) = self.closure.as_ref() {
-            DedupStats::record_push(
-                nt_idx, size, node, &values[0], &self.grammar, &self.nodes, closure.name(0),
-            );
-        }
         let vi_key: Vec<u64> = values.iter().map(|v| v.first_u64_word()).collect();
         self.value_index[nt_idx].entry(vi_key).or_default().push(node);
-        self.by_size[nt_idx][size].push(Candidate { node, values, values_top });
+        self.by_size[nt_idx][size].push(Candidate { node, values });
         if matches_spec {
             return self.grammar.materialize_node(node, &self.nodes);
         }
@@ -766,27 +706,12 @@ impl<'a, 'g> Searcher<'a, 'g> {
         candidate: Candidate,
         size: usize,
     ) -> Option<OwnedExpr> {
-        if nt_idx == self.grammar.start && self.closure.is_some() {
-            return self.start_nt_kleene(candidate.node, size);
-        }
-        let matches_spec = nt_idx == self.grammar.start
-            && self.closure.is_none()
-            && self.spec.matches(&candidate.values);
-        if self.closure.is_none()
+        let is_start = nt_idx == self.grammar.start;
+        let matches_spec = is_start && self.run_verify(candidate.node, &candidate.values);
+        if !candidate.values.is_empty()
             && self.seen.contains_or_insert_multi(nt_idx, &candidate.values, size)
         {
             return None;
-        }
-        if let Some(vt) = candidate.values_top.as_ref() {
-            if self.seen.contains_or_insert_pair(nt_idx, &vt[0], &vt[0], size) {
-                return None;
-            }
-        }
-        if let Some(closure) = self.closure.as_ref() {
-            DedupStats::record_push(
-                nt_idx, size, candidate.node,
-                &candidate.values[0], &self.grammar, &self.nodes, closure.name(0),
-            );
         }
         let node = candidate.node;
         self.by_size[nt_idx][size].push(candidate);
@@ -796,25 +721,19 @@ impl<'a, 'g> Searcher<'a, 'g> {
         None
     }
 
-    fn start_nt_kleene(&mut self, node: NodeId, size: usize) -> Option<OwnedExpr> {
-        let closure_name = self
-            .closure
-            .as_ref()
-            .expect("start_nt_kleene called outside fixpoint mode")
-            .name(0)
-            .to_string();
-        let (expr, lfp) = self.kleene_lfp(node, &closure_name)?;
-        if self.spec.matches(std::slice::from_ref(&lfp)) {
-            return Some(expr);
-        }
-        if !self.seen.contains_or_insert_lfp(&lfp, size) {
-            self.by_size[self.grammar.start][size].push(Candidate {
-                node,
-                values: vec![lfp],
-                values_top: None,
-            });
-        }
-        None
+    /// Invoke the verifier with a lazy materialiser. PBE verifiers never
+    /// call the closure, so the DAG walk + clone are skipped entirely.
+    /// Structural verifiers call it once to get the candidate `OwnedExpr`,
+    /// installing it via `set_candidate` themselves.
+    fn run_verify(&mut self, node: NodeId, values: &[BitVec]) -> bool {
+        let grammar = &self.grammar;
+        let nodes = &self.nodes;
+        let t0 = std::time::Instant::now();
+        let mut materialize = || grammar.materialize_node(node, nodes);
+        let m = self.verifier.verify(values, &mut materialize);
+        self.matches_total += t0.elapsed();
+        self.matches_count += 1;
+        m
     }
 
     fn intern_node(&mut self, node: Node) -> NodeId {
@@ -823,41 +742,17 @@ impl<'a, 'g> Searcher<'a, 'g> {
         id
     }
 
-    fn kleene_lfp(
-        &self,
-        node: NodeId,
-        closure_name: &str,
-    ) -> Option<(OwnedExpr, BitVec)> {
-        let bits = self.spec.bits;
-        let (_pos, neg_indices) = self.spec.label_indices()?;
-        let mut aux = BitVec::zero(bits);
-        for _ in 0..=bits {
-            let next = self
-                .grammar
-                .eval_node_at(node, &self.nodes, &[(closure_name, &aux)])?;
-            if neg_indices.iter().any(|&i| next.bit(i)) {
-                return None;
-            }
-            if next == aux {
-                let expr = self.grammar.materialize_node(node, &self.nodes)?;
-                return Some((expr, next));
-            }
-            aux = next;
-        }
-        None
-    }
-
     // ── Composition via partial evaluation ────────────────────────────
 
     fn try_compose(&mut self) -> Option<OwnedExpr> {
         use crate::parse::deffun::PartialBit;
         let start = self.grammar.start;
-        let targets: Vec<BitVec> = self.spec.examples.iter()
-            .map(|e| e.output.clone())
-            .collect();
-        let masks: Vec<BitVec> = self.spec.examples.iter()
-            .map(|e| e.mask.clone())
-            .collect();
+        // Compose is gated by `enable_compose` which already requires
+        // pbe_examples() to be Some(_); the unwrap is therefore safe.
+        let pbe = self.verifier.pbe_examples()?;
+        let targets: Vec<BitVec> = pbe.iter().map(|e| e.output.clone()).collect();
+        let masks: Vec<BitVec> = pbe.iter().map(|e| e.mask.clone()).collect();
+        let bits = self.output_bits;
         // One-time diagnostic: check invertibility of first candidate on first rule
         if self.by_size[start].iter().map(|b| b.len()).sum::<usize>() == 5 {
             for rule in &self.grammar.nts[start].1 {
@@ -872,7 +767,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     let mut n_const = 0;
                     let mut n_input = 0;
                     let mut n_complex = 0;
-                    for b in 0..self.spec.bits {
+                    for b in 0..bits {
                         match pe[b] {
                             PartialBit::Const(_) => n_const += 1,
                             PartialBit::Input { .. } => n_input += 1,
@@ -882,7 +777,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     info!(
                         "compose diag: fid={} ({}) bindings={} pe: {} const, {} input, {} complex / {} total",
                         fid, deffun::ENV.name(*fid), plan.bindings.len(),
-                        n_const, n_input, n_complex, self.spec.bits
+                        n_const, n_input, n_complex, bits
                     );
                 }
             }
@@ -1058,9 +953,8 @@ fn log_grammar_summary(grammar: &Grammar<'_>) {
 /// old free-function `search_nullary_multi_nt`.
 pub fn search_problem<'a>(
     problem: &'a SynthProblem<'static>,
-    spec: &Constraint,
+    verifier: &dyn Verifier,
     min: bool,
-    fixpoint: Option<&'a str>,
     enable_decomp: bool,
 ) -> parse::Result<OwnedExpr> {
     let cfg_start = Instant::now();
@@ -1075,5 +969,5 @@ pub fn search_problem<'a>(
         "exact grammar built in {:?}",
         grammar_start.elapsed()
     );
-    run_search(grammar, spec, min, fixpoint, enable_decomp)
+    run_search(grammar, verifier, min, enable_decomp)
 }

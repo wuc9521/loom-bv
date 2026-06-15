@@ -247,6 +247,16 @@ pub fn parse_bit_constraints_grouped(
                 known_bits.insert(bit, val);
                 example_map.push((arg_values, known_bits));
             }
+        } else if constraint_mentions_target(constraint_term, target_name) {
+            // Generalised path: arity>0 synth-fun call whose args are not
+            // literals (e.g. delis Kleene-chain emissions use
+            // `(g a b cfg.rhs.S0)` where the args are nullary defines).
+            // Lift the whole constraint via OwnedExpr::from_term; the
+            // resulting expr contains `SynthApp(synth_idx, args)` and is
+            // evaluated by the search loop after `set_candidate`.
+            let synth_env: Vec<(&str, u64)> = Vec::new();
+            structural.push(OwnedExpr::from_term(constraint_term, &synth_env)?);
+            found_any = true;
         }
     }
 
@@ -318,9 +328,12 @@ fn constraint_mentions_target(term: &SyGuSTerm, target_name: &str) -> bool {
     match term {
         SyGuSTerm::Identifier(id) => id.get_name() == target_name,
         SyGuSTerm::Annotated(inner, _) => constraint_mentions_target(inner, target_name),
-        SyGuSTerm::Application(_, args) => args
-            .iter()
-            .any(|a| constraint_mentions_target(a, target_name)),
+        SyGuSTerm::Application(op, args) => {
+            op.get_name() == target_name
+                || args
+                    .iter()
+                    .any(|a| constraint_mentions_target(a, target_name))
+        }
         SyGuSTerm::Let(bindings, body) => {
             bindings
                 .iter()

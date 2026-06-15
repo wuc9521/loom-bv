@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 
 use derive_more::DebugCustom;
 use rustc_hash::{FxHashMap, FxHasher};
-use sygus_parser::ast::{SyGuSFile, SyGuSTerm};
+use sygus_parser::ast::SyGuSFile;
 
 use crate::{
     enumerate::{
@@ -33,29 +33,139 @@ struct EvalCacheState {
 thread_local! {
     static EVAL_CACHE_STATE: std::cell::RefCell<EvalCacheState> =
         std::cell::RefCell::new(EvalCacheState::default());
+
+    /// Per-thread synth-fun registry: (name, arity, ret_bits) → synth_idx.
+    /// Populated in `solve_file_inner` from `ProgramEnv.synth_funs` before
+    /// constraint parsing, then consulted by `OwnedExpr::from_term` to
+    /// recognise synth-fun symbols in Application position (producing
+    /// `SynthApp`). `ret_bits` lets `width()` / `bit_width()` answer
+    /// without needing the candidate.
+    static SYNTH_REGISTRY: std::cell::RefCell<Vec<SynthEntry>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+
+    /// Per-thread "current candidate body" — one slot per synth-fun, in
+    /// the same order as `SYNTH_REGISTRY`. The search loop writes the
+    /// active candidate's body here before invoking constraint check;
+    /// `OwnedExpr::SynthApp` eval reads it and substitutes.
+    static CURRENT_CANDIDATES: std::cell::RefCell<Vec<Option<OwnedExpr>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn collect_term_symbols(term: &SyGuSTerm, out: &mut Vec<String>) {
-    match term {
-        SyGuSTerm::Identifier(id) => out.push(id.get_name().to_string()),
-        SyGuSTerm::Application(id, args) => {
-            out.push(id.get_name().to_string());
-            for arg in args {
-                collect_term_symbols(arg, out);
-            }
-        }
-        SyGuSTerm::Annotated(inner, _) => collect_term_symbols(inner, out),
-        SyGuSTerm::Let(bindings, body) => {
-            for binding in bindings {
-                collect_term_symbols(&binding.term, out);
-            }
-            collect_term_symbols(body, out);
-        }
-        SyGuSTerm::Forall(_, body) | SyGuSTerm::Exists(_, body) => collect_term_symbols(body, out),
-        SyGuSTerm::Literal(_) => {}
+#[derive(Clone)]
+pub struct SynthEntry {
+    pub name: String,
+    pub arity: usize,
+    pub ret_bits: usize,
+}
+
+/// Set the synth-fun registry for this thread. Pass an empty slice to
+/// clear. Called by the dispatcher once per problem. Also resets the
+/// `CURRENT_CANDIDATES` slot vector to match.
+pub fn set_synth_registry(entries: &[SynthEntry]) {
+    SYNTH_REGISTRY.with(|r| *r.borrow_mut() = entries.to_vec());
+    CURRENT_CANDIDATES.with(|c| {
+        let mut slots = c.borrow_mut();
+        slots.clear();
+        slots.resize(entries.len(), None);
+    });
+}
+
+/// Look up a synth-fun by (name, arity). Returns the index in the
+/// registry — used as `OwnedExpr::SynthApp`'s `synth_idx`.
+pub fn lookup_synth(name: &str, arity: usize) -> Option<usize> {
+    SYNTH_REGISTRY.with(|r| {
+        r.borrow()
+            .iter()
+            .position(|e| e.name == name && e.arity == arity)
+    })
+}
+
+/// Declared return-sort width of synth-fun `idx`.
+pub fn synth_ret_bits(idx: usize) -> usize {
+    SYNTH_REGISTRY.with(|r| r.borrow()[idx].ret_bits)
+}
+
+/// Declared name of synth-fun `idx` (used when rendering `SynthApp` for
+/// user-facing output so the auxiliary appears as e.g. `cfg.rhs.S0`
+/// rather than `synth2`).
+pub fn synth_name(idx: usize) -> Option<String> {
+    SYNTH_REGISTRY.with(|r| r.borrow().get(idx).map(|e| e.name.clone()))
+}
+
+/// Declared arity of synth-fun `idx`.
+pub fn synth_arity(idx: usize) -> usize {
+    SYNTH_REGISTRY.with(|r| r.borrow()[idx].arity)
+}
+
+/// Set the current candidate body for synth-fun `idx`. The search loop
+/// calls this before evaluating a structural constraint that contains
+/// `SynthApp(idx, _)`.
+///
+/// Clears `EVAL_CACHE_STATE` and enables it: cached `eval_defined` values
+/// are only correct for one candidate. After the cache is populated by
+/// the first structural eval, subsequent constraints reuse the cached
+/// `(fid, args)` results — critical for the Kleene-chain nullaries
+/// (`a_K`, `b_K`, `cfg_rhs_S0_K`) whose bodies recursively invoke the
+/// candidate and would otherwise be re-walked for every constraint and
+/// every recursion level.
+pub fn set_candidate(idx: usize, body: Option<OwnedExpr>) {
+    CURRENT_CANDIDATES.with(|c| c.borrow_mut()[idx] = body);
+    EVAL_CACHE_STATE.with(|c| {
+        let mut c = c.borrow_mut();
+        c.map.clear();
+        c.hits = 0;
+        c.misses = 0;
+        c.enabled = true;
+    });
+    SYNTH_APP_CACHE.with(|c| c.borrow_mut().clear());
+}
+
+/// Fetch the current candidate body for synth-fun `idx`, if any.
+pub fn get_candidate(idx: usize) -> Option<OwnedExpr> {
+    CURRENT_CANDIDATES.with(|c| c.borrow()[idx].clone())
+}
+
+thread_local! {
+    /// Per-candidate cache `(synth_idx, args) → body_value`. Cleared
+    /// whenever `set_candidate` swaps the active candidate.
+    static SYNTH_APP_CACHE: std::cell::RefCell<FxHashMap<u64, BitVec>> =
+        std::cell::RefCell::new(FxHashMap::default());
+    pub static SYNTH_APP_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub static SYNTH_APP_MISSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn synth_app_key(synth_idx: usize, args: &[BitVec]) -> u64 {
+    let mut h = FxHasher::default();
+    h.write_usize(synth_idx);
+    h.write_usize(args.len());
+    for a in args {
+        a.hash(&mut h);
     }
+    h.finish()
 }
 
+pub fn synth_app_lookup(synth_idx: usize, args: &[BitVec]) -> Option<BitVec> {
+    let v = SYNTH_APP_CACHE.with(|c| c.borrow().get(&synth_app_key(synth_idx, args)).cloned());
+    if v.is_some() {
+        SYNTH_APP_HITS.with(|c| c.set(c.get() + 1));
+    } else {
+        SYNTH_APP_MISSES.with(|c| c.set(c.get() + 1));
+    }
+    v
+}
+
+pub fn synth_app_insert(synth_idx: usize, args: &[BitVec], value: BitVec) {
+    SYNTH_APP_CACHE.with(|c| {
+        c.borrow_mut().insert(synth_app_key(synth_idx, args), value);
+    });
+}
+
+pub fn synth_app_stats() -> (u64, u64) {
+    (
+        SYNTH_APP_HITS.with(|c| c.get()),
+        SYNTH_APP_MISSES.with(|c| c.get()),
+    )
+}
 
 #[derive(Clone, DebugCustom)]
 #[debug(fmt = "define-fun {} {:?}", name, args)]
@@ -66,74 +176,39 @@ pub struct DefineFun {
     pub ret_bits: usize,
     pub expr: OwnedExpr,
     plan: DefineFunPlan,
-    /// Names of synth-funs (in SyGuS file order) that the body may reference.
-    /// SyGuS 2.1 §3.7 allows define-fun bodies to reference any signature
-    /// symbol except themselves; these synth-funs are appended to the Var
-    /// index space after `args`. Callers of `eval_defined` must pass
-    /// `args.len() + closure_args.len()` values: real args first, then the
-    /// current value of each closure synth-fun in this list's order.
-    pub closure_args: Vec<&'static str>,
-    pub closure_arg_bits: Vec<usize>,
 }
 
 impl DefineFun {
-    /// Evaluate this define-fun's plan on `args`, with closure bindings for
-    /// any synth-funs referenced by the body. Each declared `closure_args`
-    /// slot is filled by name lookup in `closure`; missing names default to
-    /// zero. Pass `&[]` for direct (non-closure) evaluation; the empty case
-    /// is the fast pass-through used by PBE search. Plan eval needs `&env`
-    /// because plan instructions can call other define-funs recursively.
+    /// Evaluate this define-fun's plan on `args`. The `_bindings` parameter
+    /// is retained for signature compatibility with `OwnedExpr::eval_with_bindings`
+    /// but is no longer used: synth-fun references in the body lower to
+    /// `OwnedExpr::SynthApp`, which reads the candidate from the
+    /// thread-local `CURRENT_CANDIDATES` rather than from a per-call slice.
     pub fn eval(
         &self,
         env: &Environ,
         args: &[BitVec],
-        closure: &[(&str, &BitVec)],
+        _bindings: &[(&str, &BitVec)],
     ) -> Result<BitVec, DivideByZero> {
-        if self.closure_args.is_empty() {
-            return self.plan.eval(env, args, closure);
-        }
-        // Matches the layout established at parse time: real args
-        // followed by one value per closure_args slot (see
-        // `extended_env` in `parse_from_view`).
-        let mut extended = Vec::with_capacity(args.len() + self.closure_args.len());
-        extended.extend_from_slice(args);
-        for (name, bits) in self.closure_args.iter().zip(self.closure_arg_bits.iter()) {
-            let bound = closure
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, v)| (*v).clone());
-            extended.push(bound.unwrap_or_else(|| BitVec::from_u64(0, *bits)));
-        }
-        self.plan.eval(env, &extended, closure)
+        self.plan.eval(env, args, _bindings)
     }
 
-    /// Hash for a `(self, args, closure)` call — used by the exact-nullary
-    /// search's eval cache. Mirrors the arg layout `eval` would build, so
-    /// two calls with the same observable inputs hash to the same key.
-    ///
+    /// Hash for a `(self, args)` call — used by the exact search's eval cache.
     /// Identity uses `self as *const _`: within one Environ the
-    /// `DefineFun` slots never move, so the pointer is a stable per-fun
-    /// id for the lifetime of a search.
-    pub fn hash_call(&self, args: &[BitVec], closure: &[(&str, &BitVec)]) -> u64 {
+    /// `DefineFun` slots never move, so the pointer is a stable per-fun id.
+    pub fn hash_call(&self, args: &[BitVec], _bindings: &[(&str, &BitVec)]) -> u64 {
         let mut h = FxHasher::default();
         h.write_usize(self as *const _ as usize);
         h.write_usize(args.len());
         for v in args {
             v.hash(&mut h);
         }
-        for (name, bits) in self.closure_args.iter().zip(self.closure_arg_bits.iter()) {
-            if let Some((_, value)) = closure.iter().find(|(n, _)| n == name) {
-                value.hash(&mut h);
-            } else {
-                BitVec::from_u64(0, *bits).hash(&mut h);
-            }
-        }
         h.finish()
     }
 
     pub fn bit_circuit_plan(&self) -> Option<&BitCircuitPlan> {
         match &self.plan {
-            DefineFunPlan::BitCircuit(plan) if self.closure_args.is_empty() => Some(plan),
+            DefineFunPlan::BitCircuit(plan) => Some(plan),
             _ => None,
         }
     }
@@ -297,6 +372,10 @@ pub enum PlanInstr {
     BVslt { lhs: usize, rhs: usize },
     Ite { cond: usize, then_slot: usize, else_slot: usize },
     Func { fid: usize, args: Vec<usize> },
+    /// Call into the currently-set candidate body for synth-fun
+    /// `synth_idx`. `args` are slot indices providing the call arguments;
+    /// the candidate body is evaluated with those as `Var(0..n)`.
+    SynthCall { synth_idx: usize, args: Vec<usize> },
 }
 
 impl DefineFunPlan {
@@ -382,6 +461,19 @@ impl DefineFunPlan {
                             let func_args =
                                 args.iter().map(|slot| slots[*slot].clone()).collect::<Vec<_>>();
                             env.eval_defined(*fid, &func_args, bindings)?
+                        }
+                        PlanInstr::SynthCall { synth_idx, args } => {
+                            let call_args = args
+                                .iter()
+                                .map(|slot| slots[*slot].clone())
+                                .collect::<Vec<_>>();
+                            let body = get_candidate(*synth_idx).unwrap_or_else(|| {
+                                panic!(
+                                    "PlanInstr::SynthCall: no current candidate set for \
+                                     synth_idx={synth_idx}"
+                                )
+                            });
+                            body.eval_with_bindings(&call_args, bindings)?
                         }
                     };
                     slots.push(value);
@@ -950,11 +1042,21 @@ impl DefineFunPlan {
     /// boolean-circuit fast-path when possible, otherwise falls back to a
     /// generic stack-machine plan.
     pub fn compile(expr: &OwnedExpr, arg_bits: &[usize]) -> Self {
+        Self::compile_named(expr, arg_bits, "<anon>")
+    }
+    pub fn compile_named(expr: &OwnedExpr, arg_bits: &[usize], name: &str) -> Self {
         let nargs = arg_bits.len();
         let ret_bits = expr.width();
         if let Some(plan) = BitCircuitPlan::try_compile(expr, nargs, ret_bits) {
+            crate::debg!(
+                "plan[{name}]: BitCircuit bindings={} outputs={} inputs={}",
+                plan.bindings.len(),
+                plan.output_bits.len(),
+                plan.input_slots.len()
+            );
             return DefineFunPlan::BitCircuit(plan);
         }
+        crate::debg!("plan[{name}]: Generic (no BitCircuit)");
         compile_generic(expr, arg_bits, ret_bits)
     }
 }
@@ -1136,6 +1238,19 @@ fn compile_generic(expr: &OwnedExpr, arg_bits: &[usize], _ret_bits: usize) -> De
                     instrs,
                 )
             }
+            OwnedExpr::SynthApp(synth_idx, args) => {
+                let compiled_args: Vec<usize> = args
+                    .iter()
+                    .map(|arg| compile_expr(arg, env_slots, next_slot, slot_bits, instrs))
+                    .collect();
+                push(
+                    PlanInstr::SynthCall { synth_idx: *synth_idx, args: compiled_args },
+                    synth_ret_bits(*synth_idx),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
+            }
         }
     }
 
@@ -1174,20 +1289,10 @@ impl Environ {
 
     pub fn parse_from_view(&self, view: &ProblemView<'_>) -> Result<(), Error> {
         // SyGuS 2.1 §3.7: define-fun bodies may reference synth-funs.
-        // We append referenced nullary synth-funs to the parsing env as
-        // closure slots after the real args; callers of `eval_defined` must
-        // supply the current value of each referenced synth-fun in this order.
-        let synth_candidates: Vec<(&'static str, u64)> = view
-            .synth_funs
-            .iter()
-            .filter(|sf| sf.args.is_empty())
-            .filter_map(|sf| {
-                let bits = view.sort_aliases.parse_sort_width(sf.ret)? as u64;
-                let name: &'static str = Box::leak(sf.name.to_string().into_boxed_str());
-                Some((name, bits))
-            })
-            .collect();
-
+        // Those references are recognised by `OwnedExpr::from_term` via the
+        // thread-local `SYNTH_REGISTRY` (populated in `solve_file_inner`)
+        // and lowered to `OwnedExpr::SynthApp`. The candidate body is
+        // supplied at search time via `set_candidate`.
         for def in &view.define_funs {
             if def.name == "if0" || def.name == "im" {
                 continue;
@@ -1211,22 +1316,9 @@ impl Environ {
                     (),
                 )
             })?;
-            let mut symbols = Vec::new();
-            collect_term_symbols(def.body, &mut symbols);
-            let closure_args = synth_candidates
-                .iter()
-                .copied()
-                .filter(|(candidate, _)| *candidate != name && symbols.iter().any(|sym| sym == candidate))
-                .collect::<Vec<_>>();
-            let mut extended_env = args.clone();
-            extended_env.extend(closure_args.iter().copied());
-            let expr = OwnedExpr::from_term(def.body, extended_env.as_slice())?;
+            let expr = OwnedExpr::from_term(def.body, args.as_slice())?;
             let arg_bits = args.iter().map(|(_, bits)| *bits as usize).collect::<Vec<_>>();
-            let extended_arg_bits = extended_env
-                .iter()
-                .map(|(_, bits)| *bits as usize)
-                .collect::<Vec<_>>();
-            let plan = DefineFunPlan::compile(&expr, &extended_arg_bits);
+            let plan = DefineFunPlan::compile_named(&expr, &arg_bits, name);
             debg!(
                 "DefineFun: {} {} -> {}",
                 name,
@@ -1240,11 +1332,6 @@ impl Environ {
                 ret_bits,
                 plan,
                 expr,
-                closure_args: closure_args.iter().map(|(n, _)| *n).collect(),
-                closure_arg_bits: closure_args
-                    .iter()
-                    .map(|(_, bits)| *bits as usize)
-                    .collect(),
             });
         }
         Ok(())
@@ -1277,12 +1364,6 @@ impl Environ {
     pub fn name(&self, id: usize) -> &'static str {
         &self.inner()[id].name
     }
-    pub fn closure_args(&self, id: usize) -> &[&'static str] {
-        &self.inner()[id].closure_args
-    }
-    pub fn closure_arg_bits(&self, id: usize) -> &[usize] {
-        &self.inner()[id].closure_arg_bits
-    }
     pub fn eval_defined(
         &self,
         id: usize,
@@ -1290,21 +1371,24 @@ impl Environ {
         bindings: &[(&str, &BitVec)],
     ) -> Result<BitVec, DivideByZero> {
         let f = &self.inner()[id];
-        EVAL_CACHE_STATE.with(|c| {
-            let mut c = c.borrow_mut();
-            if !c.enabled {
-                return f.eval(self, args, bindings);
-            }
-            let key = f.hash_call(args, bindings);
-            if let Some(v) = c.map.get(&key).cloned() {
-                c.hits += 1;
-                return Ok(v);
-            }
-            c.misses += 1;
-            let v = f.eval(self, args, bindings)?;
-            c.map.insert(key, v.clone());
-            Ok(v)
-        })
+        // Read enabled / cached value WITHOUT holding the borrow across
+        // `f.eval` — that recurses into `eval_defined` (via Func plan
+        // instructions and SynthApp candidate bodies) and would otherwise
+        // hit `BorrowMutError`.
+        let enabled = EVAL_CACHE_STATE.with(|c| c.borrow().enabled);
+        if !enabled {
+            return f.eval(self, args, bindings);
+        }
+        let key = f.hash_call(args, bindings);
+        let cached = EVAL_CACHE_STATE.with(|c| c.borrow().map.get(&key).cloned());
+        if let Some(v) = cached {
+            EVAL_CACHE_STATE.with(|c| c.borrow_mut().hits += 1);
+            return Ok(v);
+        }
+        EVAL_CACHE_STATE.with(|c| c.borrow_mut().misses += 1);
+        let v = f.eval(self, args, bindings)?;
+        EVAL_CACHE_STATE.with(|c| c.borrow_mut().map.insert(key, v.clone()));
+        Ok(v)
     }
 
     /// Enable the thread-local eval-defined memo cache. Used by the
@@ -1348,9 +1432,6 @@ impl Environ {
     pub fn probe_properties(&self, fid: usize, same_nt_pair: bool) -> crate::enumerate::grammar::RuleClass {
         use crate::enumerate::grammar::RuleClass;
         if !same_nt_pair {
-            return RuleClass::default();
-        }
-        if !self.inner()[fid].closure_args.is_empty() {
             return RuleClass::default();
         }
         let arg_bits = &self.inner()[fid].arg_bits;

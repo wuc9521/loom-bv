@@ -59,8 +59,6 @@ pub struct SearchConfig {
     pub min: bool,
     #[serde(default)]
     pub enable_composition: bool,
-    #[serde(skip)]
-    pub fixpoint: Option<&'static str>,
 }
 
 fn default_true() -> bool { true }
@@ -83,7 +81,6 @@ impl SearchConfig {
             seed: usize::MAX,
             enable_sampling: true, min: true,
             enable_composition: false,
-            fixpoint: None,
         }
     }
     pub fn default_refimpl() -> Self {
@@ -103,7 +100,6 @@ impl SearchConfig {
             seed: usize::MAX,
             enable_sampling: true, min: true,
             enable_composition: false,
-            fixpoint: None,
         }
     }
     pub fn default_refimpl_classic() -> Self {
@@ -123,7 +119,6 @@ impl SearchConfig {
             seed: usize::MAX,
             enable_sampling: true, min: true,
             enable_composition: false,
-            fixpoint: None,
         }
     }
     pub fn default_exact() -> Self {
@@ -143,7 +138,6 @@ impl SearchConfig {
             seed: usize::MAX,
             enable_sampling: false, min: true,
             enable_composition: false,
-            fixpoint: None,
         }
     }
     pub fn rng(&self) -> rand::rngs::StdRng {
@@ -161,7 +155,7 @@ impl SearchConfig {
     ) -> parse::Result<OwnedExpr> {
         if !self.enable_sampling {
             return crate::exact::search::search_problem(
-                problem, pbecstr, self.min, self.fixpoint, self.enable_composition,
+                problem, pbecstr, self.min, self.enable_composition,
             );
         }
         let mut limited_ite = self.limited_ite;

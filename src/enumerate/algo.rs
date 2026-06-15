@@ -642,6 +642,7 @@ impl OwnedExpr {
         | OwnedExpr::SRem(a, _) => a.bit_width(),
         OwnedExpr::Ite(_, a, _) => a.bit_width(),
         OwnedExpr::BVule(_, _) | OwnedExpr::BVult(_, _) | OwnedExpr::BVsle(_, _) | OwnedExpr::BVslt(_, _) => 1,
+        OwnedExpr::SynthApp(idx, _) => crate::parse::deffun::synth_ret_bits(*idx),
     }
     }
 }

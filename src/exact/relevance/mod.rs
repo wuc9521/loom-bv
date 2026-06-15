@@ -13,7 +13,7 @@ pub mod deps;
 
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::{enumerate::expr::OwnedExpr, info, parse::deffun};
+use crate::{info, parse::deffun};
 
 use super::{Grammar, ExactRule};
 
@@ -32,8 +32,6 @@ pub struct Relevance<'a> {
     queued: Vec<Vec<bool>>,
     worklist: VecDeque<WorkItem>,
     complete: bool,
-    pub closure_param: Option<usize>,
-    pub closure_relevant: Option<BitSet>,
 }
 
 impl<'a> Relevance<'a> {
@@ -97,8 +95,6 @@ impl<'a> Relevance<'a> {
             queued,
             worklist,
             complete: false,
-            closure_param: None,
-            closure_relevant: None,
         })
     }
 
@@ -129,10 +125,6 @@ impl<'a> Relevance<'a> {
     }
 
     pub fn finish(self) -> Option<Vec<Vec<usize>>> {
-        self.finish_with_closure().0
-    }
-
-    pub fn finish_with_closure(self) -> (Option<Vec<Vec<usize>>>, Option<Vec<usize>>) {
         let relevant_bits = self
             .relevant
             .into_iter()
@@ -145,11 +137,7 @@ impl<'a> Relevance<'a> {
         if !reduced_any {
             info!("relevance: all bits relevant, no reduction");
         }
-        let closure_bits = self
-            .closure_relevant
-            .map(|bits| bits.iter_ones().collect::<Vec<_>>())
-            .filter(|bits| !bits.is_empty());
-        (reduced_any.then_some(relevant_bits), closure_bits)
+        reduced_any.then_some(relevant_bits)
     }
 
     fn process_rule_item(&mut self, _item: WorkItem, demanded: &BitSet, rule: &ExactRule) -> bool {
@@ -158,22 +146,7 @@ impl<'a> Relevance<'a> {
                 self.propagate_bits(*child_nt, demanded);
                 true
             }
-            ExactRule::Leaf(expr) => {
-                if let Some(closure_idx) = self.closure_param {
-                    if let OwnedExpr::Var(i, _) = expr {
-                        if *i == closure_idx {
-                            // Closure feedback: bits demanded from the closure
-                            // parameter become bits demanded from g (the start NT).
-                            if let Some(closure_relevant) = &mut self.closure_relevant {
-                                closure_relevant.union_inplace(demanded);
-                            }
-                            let start = self.grammar.start;
-                            self.propagate_bits(start, demanded);
-                        }
-                    }
-                }
-                true
-            }
+            ExactRule::Leaf(_) => true,
             ExactRule::Op { fid, child_nts, .. } => {
                 let Some(dep) = get_deffun_dep_bits(*fid, demanded, &mut self.dep_cache) else {
                     return false;
@@ -181,7 +154,6 @@ impl<'a> Relevance<'a> {
                 for (arg_idx, child_nt) in child_nts.iter().enumerate() {
                     self.propagate_dep(&dep, arg_idx, *child_nt);
                 }
-                self.propagate_closure_deps(*fid, &dep);
                 true
             }
             ExactRule::GenericTemplate {
@@ -233,38 +205,6 @@ impl<'a> Relevance<'a> {
             return;
         };
         self.propagate_bits(child_nt, bits);
-    }
-
-    /// `dep.per_arg` was computed with extended arg_bits (user args followed
-    /// by closure-synth-fun arg slots). The user-arg slots are already
-    /// consumed by `propagate_dep`; the trailing closure-arg slots feed the
-    /// `closure_relevant` set and, by the closure constraint `g = aux`,
-    /// re-trigger demand on the start NT.
-    fn propagate_closure_deps(&mut self, fid: usize, dep: &BitDep) {
-        if self.closure_param.is_none() {
-            return;
-        }
-        let closure_arg_bits = deffun::ENV.closure_arg_bits(fid);
-        if closure_arg_bits.is_empty() {
-            return;
-        }
-        let nargs = deffun::ENV.deffun(fid).args.len();
-        let start = self.grammar.start;
-        for offset in 0..closure_arg_bits.len() {
-            let Some(bits) = dep.per_arg.get(nargs + offset) else {
-                continue;
-            };
-            if bits.is_empty() {
-                continue;
-            }
-            // Clone the BitSet so we can mutate self.closure_relevant and
-            // self.relevant independently.
-            let bits = bits.clone();
-            if let Some(cr) = self.closure_relevant.as_mut() {
-                cr.union_inplace(&bits);
-            }
-            self.propagate_bits(start, &bits);
-        }
     }
 }
 
