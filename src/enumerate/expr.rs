@@ -7,6 +7,7 @@ use thiserror::Error;
 use crate::{
     all_ops, bv_op_of, enum_expr, enum_ownedexpr,
     enumerate::op,
+    enumerate::typing,
     enumerate::value::BitVec,
     parse::{self, deffun, empty_span, new_custom_error_span},
     smt_name_of,
@@ -355,7 +356,22 @@ impl<'a> Expr<'a> {
 enum_ownedexpr!();
 
 impl OwnedExpr {
+    /// Parse a SyGuS term into an `OwnedExpr`, first validating that it is
+    /// well-sorted (rejecting genuine Bool ↔ bit-vector mismatches). The sort
+    /// check runs on the `SyGuSTerm` because lowering is lossy: e.g. `bvand`
+    /// and the boolean `or` both become `OwnedExpr::And`, so sort cannot be
+    /// recovered afterwards. `env` maps in-scope names to bit-vector widths
+    /// (formal parameters are always bit-vectors here).
     pub fn from_term(term: &SyGuSTerm, env: &[(&str, u64)]) -> parse::Result<Self> {
+        let sort_env: Vec<(&str, typing::Sort)> = env
+            .iter()
+            .map(|&(name, width)| (name, typing::Sort::BitVec(width as usize)))
+            .collect();
+        typing::check_sort(term, &sort_env)?;
+        Self::from_term_lower(term, env)
+    }
+
+    fn from_term_lower(term: &SyGuSTerm, env: &[(&str, u64)]) -> parse::Result<Self> {
         fn symbol_name(id: &Identifier) -> &str {
             id.get_name()
         }
@@ -368,10 +384,13 @@ impl OwnedExpr {
 
         fn identifier_to_value(id: &Identifier) -> Option<parse::Result<BitVec>> {
             let name = symbol_name(id);
+            // Booleans use the internal negative-logic convention (0 = true),
+            // matching `op::ite` (then-branch when the condition `is_zero()`)
+            // and `BoolValue::holds`. SMT `true` → 0, `false` → 1.
             if name.eq_ignore_ascii_case("true") {
-                Some(Ok(BitVec::from_u64(1, 1)))
-            } else if name.eq_ignore_ascii_case("false") {
                 Some(Ok(BitVec::from_u64(0, 1)))
+            } else if name.eq_ignore_ascii_case("false") {
+                Some(Ok(BitVec::from_u64(1, 1)))
             } else if let Some(digits) = name.strip_prefix("#x") {
                 let bits = digits.len() * 4;
                 Some(crate::parse::constraint::parse_bv_digits(digits, 16, bits.max(1)))
@@ -406,13 +425,13 @@ impl OwnedExpr {
                 }
             }
             SyGuSTerm::Literal(lit) => Ok(Self::Const(crate::parse::literal_to_value(lit)?)),
-            SyGuSTerm::Annotated(inner, _) => Self::from_term(inner, env),
+            SyGuSTerm::Annotated(inner, _) => Self::from_term_lower(inner, env),
             SyGuSTerm::Application(id, args) => {
                 let opname = symbol_name(id);
                 if args.len() == 1 {
                     if let Some((hi, lo)) = extract_indices(id) {
                         return Ok(Self::Extract(
-                            Self::from_term(&args[0], env)?.into(),
+                            Self::from_term_lower(&args[0], env)?.into(),
                             hi,
                             lo,
                         ));
@@ -420,16 +439,16 @@ impl OwnedExpr {
                 }
                 if opname == "concat" && args.len() >= 2 {
                     let last = args.last().unwrap();
-                    let mut acc = Self::from_term(last, env)?;
+                    let mut acc = Self::from_term_lower(last, env)?;
                     for arg in args[..args.len() - 1].iter().rev() {
-                        acc = Self::Concat(Self::from_term(arg, env)?.into(), acc.into());
+                        acc = Self::Concat(Self::from_term_lower(arg, env)?.into(), acc.into());
                     }
                     return Ok(acc);
                 }
                 macro_rules! operator1 {
                     ($opn:expr, $n:ident) => {
                         if opname == $opn && args.len() == 1 {
-                            return Ok(Self::$n(Self::from_term(&args[0], env)?.into()));
+                            return Ok(Self::$n(Self::from_term_lower(&args[0], env)?.into()));
                         }
                     };
                 }
@@ -437,8 +456,8 @@ impl OwnedExpr {
                     ($opn:expr, $n:ident) => {
                         if opname == $opn && args.len() == 2 {
                             return Ok(Self::$n(
-                                Self::from_term(&args[0], env)?.into(),
-                                Self::from_term(&args[1], env)?.into(),
+                                Self::from_term_lower(&args[0], env)?.into(),
+                                Self::from_term_lower(&args[1], env)?.into(),
                             ));
                         }
                     };
@@ -457,59 +476,59 @@ impl OwnedExpr {
                 operator2!("bvsle", BVsle);
                 operator2!("bvslt", BVslt);
                 if opname == "bvugt" && args.len() == 2 {
-                    return Ok(Self::BVult(Box::new(Self::from_term(&args[1], env)?), Box::new(Self::from_term(&args[0], env)?)));
+                    return Ok(Self::BVult(Box::new(Self::from_term_lower(&args[1], env)?), Box::new(Self::from_term_lower(&args[0], env)?)));
                 }
                 if opname == "bvuge" && args.len() == 2 {
-                    return Ok(Self::BVule(Box::new(Self::from_term(&args[1], env)?), Box::new(Self::from_term(&args[0], env)?)));
+                    return Ok(Self::BVule(Box::new(Self::from_term_lower(&args[1], env)?), Box::new(Self::from_term_lower(&args[0], env)?)));
                 }
                 if opname == "bvsgt" && args.len() == 2 {
-                    return Ok(Self::BVslt(Box::new(Self::from_term(&args[1], env)?), Box::new(Self::from_term(&args[0], env)?)));
+                    return Ok(Self::BVslt(Box::new(Self::from_term_lower(&args[1], env)?), Box::new(Self::from_term_lower(&args[0], env)?)));
                 }
                 if opname == "bvsge" && args.len() == 2 {
-                    return Ok(Self::BVsle(Box::new(Self::from_term(&args[1], env)?), Box::new(Self::from_term(&args[0], env)?)));
+                    return Ok(Self::BVsle(Box::new(Self::from_term_lower(&args[1], env)?), Box::new(Self::from_term_lower(&args[0], env)?)));
                 }
                 // SyGuS boolean connectives may appear in define-fun bodies; booleans
                 // are represented as 1-bit bitvectors in this codebase.
                 operator1!("not", Not);
                 if opname == "and" && args.len() >= 2 {
                     let mut it = args.iter();
-                    let mut acc = Self::from_term(it.next().unwrap(), env)?;
+                    let mut acc = Self::from_term_lower(it.next().unwrap(), env)?;
                     for a in it {
                         // Internal boolean encoding uses 0 for true and 1 for false.
-                        acc = Self::Or(acc.into(), Self::from_term(a, env)?.into());
+                        acc = Self::Or(acc.into(), Self::from_term_lower(a, env)?.into());
                     }
                     return Ok(acc);
                 }
                 if opname == "or" && args.len() >= 2 {
                     let mut it = args.iter();
-                    let mut acc = Self::from_term(it.next().unwrap(), env)?;
+                    let mut acc = Self::from_term_lower(it.next().unwrap(), env)?;
                     for a in it {
                         // Internal boolean encoding uses 0 for true and 1 for false.
-                        acc = Self::And(acc.into(), Self::from_term(a, env)?.into());
+                        acc = Self::And(acc.into(), Self::from_term_lower(a, env)?.into());
                     }
                     return Ok(acc);
                 }
                 if opname == "xor" && args.len() >= 2 {
                     let mut it = args.iter();
-                    let mut acc = Self::from_term(it.next().unwrap(), env)?;
+                    let mut acc = Self::from_term_lower(it.next().unwrap(), env)?;
                     for a in it {
-                        acc = Self::Xor(acc.into(), Self::from_term(a, env)?.into());
+                        acc = Self::Xor(acc.into(), Self::from_term_lower(a, env)?.into());
                     }
                     return Ok(acc);
                 }
                 operator2!("=", Xor);
                 if opname == "ite" && args.len() == 3 {
                     return Ok(Self::Ite(
-                        Self::from_term(&args[0], env)?.into(),
-                        Self::from_term(&args[1], env)?.into(),
-                        Self::from_term(&args[2], env)?.into(),
+                        Self::from_term_lower(&args[0], env)?.into(),
+                        Self::from_term_lower(&args[1], env)?.into(),
+                        Self::from_term_lower(&args[2], env)?.into(),
                     ));
                 }
                 if let Some(fid) = deffun::ENV.lookup(opname, args.len()) {
                     return Ok(Self::Func(
                         fid,
                         args.iter()
-                            .map(|arg| Self::from_term(arg, env))
+                            .map(|arg| Self::from_term_lower(arg, env))
                             .collect::<parse::Result<Vec<_>>>()?,
                     ));
                 }
@@ -517,7 +536,7 @@ impl OwnedExpr {
                     return Ok(Self::SynthApp(
                         synth_idx,
                         args.iter()
-                            .map(|arg| Self::from_term(arg, env))
+                            .map(|arg| Self::from_term_lower(arg, env))
                             .collect::<parse::Result<Vec<_>>>()?,
                     ));
                 }
@@ -530,13 +549,13 @@ impl OwnedExpr {
                 let mut extended_env = env.to_vec();
                 let mut lowered = Vec::with_capacity(bindings.len());
                 for binding in bindings {
-                    let value = Self::from_term(&binding.term, &extended_env)?;
+                    let value = Self::from_term_lower(&binding.term, &extended_env)?;
                     let width = value.width() as u64;
                     let leaked = Box::leak(binding.name.clone().into_boxed_str()) as &'static str;
                     extended_env.push((leaked, width));
                     lowered.push((binding.name.clone(), value));
                 }
-                let mut expr = Self::from_term(body, &extended_env)?;
+                let mut expr = Self::from_term_lower(body, &extended_env)?;
                 for (name, value) in lowered.into_iter().rev() {
                     expr = Self::Let(name, Box::new(value), Box::new(expr));
                 }

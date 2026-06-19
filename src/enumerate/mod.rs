@@ -13,6 +13,7 @@ pub mod grammar;
 pub mod macros;
 pub mod op;
 pub mod store;
+pub mod typing;
 pub mod utils;
 pub mod value;
 

@@ -152,25 +152,26 @@ fn classify_op(op: &str, child_nts: &[usize]) -> RuleClass {
         },
         _ => {}
     }
-    // For all other operators (including define-funs), probe properties.
-    if let Some(fid) = deffun::ENV.lookup(op, child_nts.len()) {
-        deffun::ENV.probe_properties(fid, same_nt_pair)
-    } else {
-        // Native BV ops without define-fun entries: probe by name.
-        match op {
-            "bvadd" | "bvmul" | "bvxor" => RuleClass {
-                commutative: same_nt_pair,
-                associative: same_nt_pair,
-                ..Default::default()
-            },
-            "bvand" | "bvor" => RuleClass {
-                commutative: same_nt_pair,
-                idempotent: same_nt_pair,
-                associative: same_nt_pair,
-                ..Default::default()
-            },
-            _ => RuleClass::default(),
-        }
+    // Define-fun algebra cannot be soundly probed: random bitvectors are not
+    // valid aspect encodings, so a property that holds on them need not hold on
+    // the encoded values the search actually feeds. Only native BV ops with
+    // known SMT-LIB algebra get symmetry classes.
+    if deffun::ENV.lookup(op, child_nts.len()).is_some() {
+        return RuleClass::default();
+    }
+    match op {
+        "bvadd" | "bvmul" | "bvxor" => RuleClass {
+            commutative: same_nt_pair,
+            associative: same_nt_pair,
+            ..Default::default()
+        },
+        "bvand" | "bvor" => RuleClass {
+            commutative: same_nt_pair,
+            idempotent: same_nt_pair,
+            associative: same_nt_pair,
+            ..Default::default()
+        },
+        _ => RuleClass::default(),
     }
 }
 
