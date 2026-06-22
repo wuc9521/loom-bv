@@ -26,6 +26,7 @@ mod exact;
 mod holes;
 pub mod fwd_decls;
 pub mod hash;
+mod laws;
 pub mod log;
 pub mod parse;
 pub mod search;

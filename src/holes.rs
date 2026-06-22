@@ -13,7 +13,7 @@
 //! Constraints are passed to the solver verbatim (no shape-matching), and
 //! detection is purely structural ("a grammar has a `Constant` production").
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rsmt2::{
     print::{IdentParser, ModelParser},
@@ -65,6 +65,8 @@ pub struct HoleSpec {
     defines: Vec<DefFun>,
     /// The constraint expressions, asserted (verbatim) per skeleton.
     constraints: Vec<String>,
+    /// Operator laws for canonical dedup (from `(assume …)`).
+    laws: crate::laws::OpLaws,
 }
 
 impl HoleSpec {
@@ -124,6 +126,7 @@ impl HoleSpec {
             })
             .collect();
         let constraints = view.constraints.iter().map(|c| c.to_string()).collect();
+        let laws = crate::laws::OpLaws::from_assumes(&view.assumes);
 
         Some(HoleSpec {
             synth_name: sf.name.to_string(),
@@ -132,6 +135,7 @@ impl HoleSpec {
             prods,
             defines,
             constraints,
+            laws,
         })
     }
 
@@ -180,6 +184,12 @@ impl HoleSpec {
                 .map_err(|e| format!("z3 define-fun {}: {e}", d.name))?;
         }
 
+        // Canonical-form dedup: skeletons that denote the same grammar (modulo
+        // the declared operator laws) have the same SAT result, so we check one
+        // representative per canonical key.
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut deduped = 0usize;
+
         let mut tried = 0usize;
         for size in 0..=max_size {
             let skels = self.gen(&self.start, size, &mut Vec::new());
@@ -197,6 +207,10 @@ impl HoleSpec {
             info!("const-hole: size {size}: {} skeleton(s)", skels.len());
             let size_start = std::time::Instant::now();
             for skel in &skels {
+                if !seen.insert(canon(skel, &self.laws)) {
+                    deduped += 1;
+                    continue;
+                }
                 let mut sorts = Vec::new();
                 let body = render(skel, &mut sorts, None);
                 tried += 1;
@@ -221,7 +235,9 @@ impl HoleSpec {
                     ));
                 }
             }
-            debg!("const-hole: size {size} exhausted ({tried} skeletons total)");
+            debg!(
+                "const-hole: size {size} exhausted ({tried} checked, {deduped} deduped)"
+            );
         }
         Err("const-hole: no solution within DRYAD_HOLE_MAX_SIZE".into())
     }
@@ -425,6 +441,71 @@ fn render(skel: &Skel, sorts: &mut Vec<String>, values: Option<&[String]>) -> St
             format!("({head} {rendered})")
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+//  Canonical keys (apply the recognized `OpLaws` to a skeleton).
+// ---------------------------------------------------------------------------
+
+/// Structural children (the `Constant` holes — always trailing `Ann` args —
+/// carry no grammar meaning, so they're dropped from the canonical key).
+fn structural(kids: &[Skel]) -> Vec<&Skel> {
+    kids.iter().filter(|k| !matches!(k, Skel::Hole(_))).collect()
+}
+
+/// Canonical key of a skeleton modulo the declared laws: associative ops are
+/// flattened to a sequence; set-cons families are collected along their spine
+/// and sorted/dedup'd. Equal keys ⇒ same grammar ⇒ same SAT result.
+fn canon(skel: &Skel, laws: &crate::laws::OpLaws) -> String {
+    match skel {
+        Skel::Hole(_) => "_".to_string(),
+        Skel::Leaf(s) => s.clone(),
+        Skel::App(head, kids) => {
+            if laws.set_ops.contains_key(head) {
+                let mut elems = Vec::new();
+                let mut cur = skel;
+                while let Skel::App(h, k) = cur {
+                    let Some(&(ei, si)) = laws.set_ops.get(h) else {
+                        break;
+                    };
+                    let st = structural(k);
+                    elems.push(canon(st[ei], laws));
+                    cur = st[si];
+                }
+                if laws.set_commute {
+                    elems.sort();
+                }
+                if laws.set_idemp {
+                    elems.dedup();
+                }
+                format!("{{set|{}|{}}}", canon(cur, laws), elems.join(","))
+            } else if laws.assoc.contains(head) {
+                let mut seq = Vec::new();
+                flatten_assoc(skel, head, laws, &mut seq);
+                format!("({head} {})", seq.join(" "))
+            } else {
+                let st = structural(kids);
+                if st.is_empty() {
+                    head.clone()
+                } else {
+                    let parts: Vec<String> = st.iter().map(|c| canon(c, laws)).collect();
+                    format!("({head} {})", parts.join(" "))
+                }
+            }
+        }
+    }
+}
+
+fn flatten_assoc(skel: &Skel, op: &str, laws: &crate::laws::OpLaws, out: &mut Vec<String>) {
+    if let Skel::App(h, kids) = skel {
+        if h == op {
+            for k in structural(kids) {
+                flatten_assoc(k, op, laws, out);
+            }
+            return;
+        }
+    }
+    out.push(canon(skel, laws));
 }
 
 /// Truncate a rendered skeleton for log lines.

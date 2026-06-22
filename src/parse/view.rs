@@ -76,6 +76,9 @@ pub struct ProgramEnv<'a> {
     pub synth_funs: Vec<SynthFunView<'a>>,
     pub define_funs: Vec<DefineFunView<'a>>,
     pub constraints: Vec<&'a SyGuSTerm>,
+    /// `(assume …)` terms — operator laws the backend may use for canonical
+    /// dedup. Not asserted into the solver (they carry free variables).
+    pub assumes: Vec<&'a SyGuSTerm>,
     pub grammar_deps: Vec<GrammarDeps>,
 }
 
@@ -88,9 +91,11 @@ impl<'a> ProgramEnv<'a> {
         let mut synth_funs = Vec::new();
         let mut define_funs = Vec::new();
         let mut constraints = Vec::new();
+        let mut assumes = Vec::new();
 
         for cmd in &file.cmds {
             match cmd {
+                SyGuSCmd::Assume(term) => assumes.push(term),
                 SyGuSCmd::SetFeature(feature, value) => features.set(feature, *value),
                 SyGuSCmd::SynthFun(name, args, ret, grammar) => {
                     synth_funs.push(SynthFunView {
@@ -121,6 +126,7 @@ impl<'a> ProgramEnv<'a> {
             synth_funs,
             define_funs,
             constraints,
+            assumes,
             grammar_deps,
         }
     }
