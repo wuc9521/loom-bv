@@ -23,6 +23,7 @@ pub mod chatgpt;
 mod deductive;
 pub mod enumerate;
 mod exact;
+mod holes;
 pub mod fwd_decls;
 pub mod hash;
 pub mod log;
@@ -196,6 +197,15 @@ fn solve_file_inner(
     min: bool,
 ) -> SolverResult<String> {
     let view = ProgramEnv::from_file(file);
+
+    // Constant-hole pattern: a single nullary synth-fun whose grammar uses the
+    // SyGuS `(Constant T)` construct (which the value enumerator drops).
+    // Self-contained — passes define-funs verbatim to an SMT backend, so it
+    // runs before the internal define-fun lowering (which rejects some shapes).
+    if let Some(spec) = holes::HoleSpec::detect(&view) {
+        return spec.solve();
+    }
+
     deffun::ENV.clear();
     // Register synth-funs so `OwnedExpr::from_term` recognises their
     // names in Application position (producing `SynthApp`) — needed for
