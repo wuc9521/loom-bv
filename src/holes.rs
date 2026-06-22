@@ -14,9 +14,11 @@
 //! detection is purely structural ("a grammar has a `Constant` production").
 
 use std::collections::HashMap;
-use std::io::Write as _;
-use std::process::{Command, Stdio};
 
+use rsmt2::{
+    print::{IdentParser, ModelParser},
+    SmtConf, SmtRes, Solver,
+};
 use sygus_parser::ast::{SyGuSGTerm, SyGuSTerm};
 
 use crate::parse::ProgramEnv;
@@ -45,15 +47,24 @@ enum Skel {
     App(String, Vec<Skel>),
 }
 
+/// An input define-fun, kept structured so it can be replayed to the solver
+/// once via `rsmt2`'s `define_fun`.
+struct DefFun {
+    name: String,
+    args: Vec<(String, String)>,
+    ret: String,
+    body: String,
+}
+
 pub struct HoleSpec {
     synth_name: String,
     ret_sort: String,
     start: String,
     prods: HashMap<String, Vec<Tmpl>>,
-    /// SMT-LIB preamble: the input's define-funs verbatim.
-    defines: String,
-    /// The constraints, rendered verbatim as `(assert …)`.
-    asserts: String,
+    /// The input's define-funs, sent to the solver once as the base scope.
+    defines: Vec<DefFun>,
+    /// The constraint expressions, asserted (verbatim) per skeleton.
+    constraints: Vec<String>,
 }
 
 impl HoleSpec {
@@ -101,23 +112,18 @@ impl HoleSpec {
         let defines = view
             .define_funs
             .iter()
-            .map(|d| {
-                let args = d
+            .map(|d| DefFun {
+                name: d.name.to_string(),
+                args: d
                     .args
                     .iter()
-                    .map(|a| format!("({} {})", a.name, a.sort))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                format!("(define-fun {} ({}) {} {})", d.name, args, d.ret, d.body)
+                    .map(|a| (a.name.clone(), a.sort.to_string()))
+                    .collect(),
+                ret: d.ret.to_string(),
+                body: d.body.to_string(),
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let asserts = view
-            .constraints
-            .iter()
-            .map(|c| format!("(assert {})", c))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
+        let constraints = view.constraints.iter().map(|c| c.to_string()).collect();
 
         Some(HoleSpec {
             synth_name: sf.name.to_string(),
@@ -125,7 +131,7 @@ impl HoleSpec {
             start: grammar.grouped_rule_lists[0].symbol.to_string(),
             prods,
             defines,
-            asserts,
+            constraints,
         })
     }
 
@@ -153,6 +159,27 @@ impl HoleSpec {
         let mut seen_any = false;
         let mut empty_streak = 0usize;
 
+        // One persistent z3 session: the (heavy) define-funs are sent once as
+        // the base scope, then each skeleton is solved in a push/pop frame.
+        // This amortizes process startup + define-fun setup across all
+        // skeletons (~2.5-3x vs. one process per skeleton).
+        let mut solver = SmtConf::default_z3()
+            .spawn(Parser)
+            .map_err(|e| format!("failed to spawn z3 (is it on PATH?): {e}"))?;
+        solver
+            .set_logic(rsmt2::Logic::QF_BV)
+            .map_err(|e| format!("z3 set-logic: {e}"))?;
+        for d in &self.defines {
+            solver
+                .define_fun(
+                    d.name.as_str(),
+                    d.args.iter().map(|(n, s)| (n.as_str(), s.as_str())),
+                    d.ret.as_str(),
+                    d.body.as_str(),
+                )
+                .map_err(|e| format!("z3 define-fun {}: {e}", d.name))?;
+        }
+
         let mut tried = 0usize;
         for size in 0..=max_size {
             let skels = self.gen(&self.start, size, &mut Vec::new());
@@ -174,7 +201,7 @@ impl HoleSpec {
                 let body = render(skel, &mut sorts, None);
                 tried += 1;
                 let t = std::time::Instant::now();
-                let res = self.check(&body, &sorts)?;
+                let res = self.check(&mut solver, &body, &sorts)?;
                 debg!(
                     "skeleton #{tried} (size {size}, {} holes): {} in {:?} — {}",
                     sorts.len(),
@@ -304,47 +331,51 @@ impl HoleSpec {
         }
     }
 
-    /// Build the QF_BV query for one skeleton and run z3.
-    /// `Some(values)` on SAT (one per hole, in DFS order); `None` on UNSAT.
-    fn check(&self, body: &str, hole_sorts: &[String]) -> crate::SolverResult<Option<Vec<String>>> {
-        let mut smt = String::new();
-        smt.push_str("(set-logic QF_BV)\n(set-option :produce-models true)\n");
-        smt.push_str(&self.defines);
-        smt.push('\n');
+    /// Solve one skeleton's holes in a fresh push/pop frame on the shared
+    /// session. `Some(values)` on SAT (one per hole, in DFS order); `None` on
+    /// UNSAT. A solver error propagates (it is NOT treated as unsat, which
+    /// would silently skip a satisfiable skeleton).
+    fn check(
+        &self,
+        solver: &mut Solver<Parser>,
+        body: &str,
+        hole_sorts: &[String],
+    ) -> crate::SolverResult<Option<Vec<String>>> {
+        solver.push(1).map_err(|e| format!("z3 push: {e}"))?;
         for (i, sort) in hole_sorts.iter().enumerate() {
-            smt.push_str(&format!("(declare-const h{i} {sort})\n"));
+            solver
+                .declare_const(format!("h{i}"), sort.as_str())
+                .map_err(|e| format!("z3 declare h{i}: {e}"))?;
         }
-        smt.push_str(&format!(
-            "(define-fun {} () {} {})\n",
-            self.synth_name, self.ret_sort, body
-        ));
-        smt.push_str(&self.asserts);
-        smt.push_str("\n(check-sat)\n");
-        if !hole_sorts.is_empty() {
-            let names = (0..hole_sorts.len())
-                .map(|i| format!("h{i}"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            smt.push_str(&format!("(get-value ({names}))\n"));
+        solver
+            .define_fun(
+                self.synth_name.as_str(),
+                std::iter::empty::<(&str, &str)>(),
+                self.ret_sort.as_str(),
+                body,
+            )
+            .map_err(|e| format!("z3 define {}: {e}", self.synth_name))?;
+        for c in &self.constraints {
+            solver.assert(c.as_str()).map_err(|e| format!("z3 assert: {e}"))?;
         }
-        let out = run_z3(&smt)?;
-        // Distinguish genuine unsat from a solver that errored/couldn't decide:
-        // treating an error as unsat would silently skip a satisfiable skeleton.
-        match out.split_whitespace().next() {
-            Some("unsat") => return Ok(None),
-            Some("sat") => {}
-            _ => return Err(format!("z3 gave no decision: {}", out.trim()).into()),
-        }
-        let model = parse_model(&out);
-        let values = (0..hole_sorts.len())
-            .map(|i| {
-                model
-                    .get(&format!("h{i}"))
-                    .cloned()
-                    .ok_or_else(|| format!("solver model missing h{i}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Some(values))
+        let sat = solver.check_sat().map_err(|e| format!("z3 check-sat: {e}"))?;
+        let result = if sat {
+            let model = solver.get_model().map_err(|e| format!("z3 get-model: {e}"))?;
+            let vals: HashMap<String, String> =
+                model.into_iter().map(|(name, _, _, value)| (name, value)).collect();
+            let values = (0..hole_sorts.len())
+                .map(|i| {
+                    vals.get(&format!("h{i}"))
+                        .cloned()
+                        .ok_or_else(|| format!("z3 model missing h{i}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Some(values)
+        } else {
+            None
+        };
+        solver.pop(1).map_err(|e| format!("z3 pop: {e}"))?;
+        Ok(result)
     }
 }
 
@@ -444,103 +475,32 @@ fn product(pools: &[Vec<Skel>]) -> Vec<Vec<Skel>> {
 }
 
 // ---------------------------------------------------------------------------
-//  SMT backend — z3 subprocess over stdin. z3 measured fastest on these
+//  SMT backend — z3 via rsmt2 (mirrors cegis.rs). z3 measured fastest on these
 //  founded-annotation QF_BV queries (UNSAT-dominated, wide bit-vectors):
-//  ~1.4× over cvc5 and ~2× over bitwuzla.
+//  ~1.4× over cvc5 and ~2× over bitwuzla. Solver values are read back as raw
+//  source strings and substituted verbatim into the skeleton.
 // ---------------------------------------------------------------------------
 
-fn run_z3(smt: &str) -> crate::SolverResult<String> {
-    let mut child = Command::new("z3")
-        .args(["-smt2", "-in"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("failed to spawn z3 (is it on PATH?): {e}"))?;
-    // Ignore a write error: z3 may reject the input and exit before consuming
-    // all of stdin (BrokenPipe). We still read its output.
-    {
-        let mut stdin = child.stdin.take().unwrap();
-        let _ = stdin.write_all(smt.as_bytes());
+#[derive(Clone, Copy)]
+struct Parser;
+
+impl<'a> IdentParser<String, String, &'a str> for Parser {
+    fn parse_ident(self, input: &'a str) -> SmtRes<String> {
+        Ok(input.into())
     }
-    let out = child.wait_with_output()?;
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    fn parse_type(self, input: &'a str) -> SmtRes<String> {
+        Ok(input.into())
+    }
 }
 
-/// Parse a `(get-value …)` reply into name → value-source, e.g.
-/// `((h0 #b…) (h1 (_ bv0 8)))`.
-fn parse_model(out: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    // Parse from the first '(' after the sat line.
-    let Some(start) = out.find('(') else {
-        return map;
-    };
-    let sx = match Sx::parse(&out[start..]) {
-        Some((sx, _)) => sx,
-        None => return map,
-    };
-    if let Sx::List(pairs) = sx {
-        for pair in pairs {
-            if let Sx::List(kv) = pair {
-                if kv.len() == 2 {
-                    map.insert(kv[0].to_src(), kv[1].to_src());
-                }
-            }
-        }
-    }
-    map
-}
-
-/// Minimal S-expression reader for solver replies.
-enum Sx {
-    Atom(String),
-    List(Vec<Sx>),
-}
-
-impl Sx {
-    fn parse(s: &str) -> Option<(Sx, usize)> {
-        let bytes = s.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= bytes.len() {
-            return None;
-        }
-        if bytes[i] == b'(' {
-            i += 1;
-            let mut items = Vec::new();
-            loop {
-                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-                if i >= bytes.len() {
-                    return None;
-                }
-                if bytes[i] == b')' {
-                    i += 1;
-                    return Some((Sx::List(items), i));
-                }
-                let (child, used) = Sx::parse(&s[i..])?;
-                items.push(child);
-                i += used;
-            }
-        } else {
-            let start = i;
-            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'(' && bytes[i] != b')' {
-                i += 1;
-            }
-            Some((Sx::Atom(s[start..i].to_string()), i))
-        }
-    }
-
-    fn to_src(&self) -> String {
-        match self {
-            Sx::Atom(a) => a.clone(),
-            Sx::List(items) => format!(
-                "({})",
-                items.iter().map(Sx::to_src).collect::<Vec<_>>().join(" ")
-            ),
-        }
+impl<'a> ModelParser<String, String, String, &'a str> for Parser {
+    fn parse_value(
+        self,
+        input: &'a str,
+        _ident: &String,
+        _params: &[(String, String)],
+        _typ: &String,
+    ) -> SmtRes<String> {
+        Ok(input.into())
     }
 }
