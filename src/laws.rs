@@ -49,11 +49,6 @@ impl OpLaws {
         }
         laws
     }
-
-    /// Whether any law was recognized (otherwise canonicalization is a no-op).
-    pub fn is_empty(&self) -> bool {
-        self.assoc.is_empty() && self.set_ops.is_empty()
-    }
 }
 
 /// A binary application `(F a b)` → `(F, a, b)`.
