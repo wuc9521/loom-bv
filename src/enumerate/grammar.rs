@@ -152,12 +152,8 @@ fn classify_op(op: &str, child_nts: &[usize]) -> RuleClass {
         },
         _ => {}
     }
-    // Define-fun algebra cannot be soundly probed: random bitvectors are not
-    // valid aspect encodings, so a property that holds on them need not hold on
-    // the encoded values the search actually feeds. Only native BV ops with
-    // known SMT-LIB algebra get symmetry classes.
-    if deffun::ENV.lookup(op, child_nts.len()).is_some() {
-        return RuleClass::default();
+    if let Some(fid) = deffun::ENV.lookup(op, child_nts.len()) {
+        return deffun::ENV.prove_properties(fid, same_nt_pair);
     }
     match op {
         "bvadd" | "bvmul" | "bvxor" => RuleClass {
