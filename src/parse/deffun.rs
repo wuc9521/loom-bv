@@ -2,12 +2,14 @@ use std::cell::UnsafeCell;
 use std::hash::{Hash, Hasher};
 
 use derive_more::DebugCustom;
+use rsmt2::{SmtConf, Solver};
 use rustc_hash::{FxHashMap, FxHasher};
 use sygus_parser::ast::SyGuSFile;
 
 use crate::{
     enumerate::{
         expr::{DivideByZero, OwnedExpr},
+        grammar::RuleClass,
         op,
         value::BitVec,
     },
@@ -33,6 +35,8 @@ struct EvalCacheState {
 thread_local! {
     static EVAL_CACHE_STATE: std::cell::RefCell<EvalCacheState> =
         std::cell::RefCell::new(EvalCacheState::default());
+    static PROPERTY_CACHE: std::cell::RefCell<FxHashMap<usize, RuleClass>> =
+        std::cell::RefCell::new(FxHashMap::default());
 
     /// Per-thread synth-fun registry: (name, arity, ret_bits) → synth_idx.
     /// Populated in `solve_file_inner` from `ProgramEnv.synth_funs` before
@@ -1280,6 +1284,7 @@ impl Environ {
 
     pub fn clear(&self) {
         self.inner().clear();
+        PROPERTY_CACHE.with(|cache| cache.borrow_mut().clear());
     }
 
     pub fn parse_from_file(&self, file: &SyGuSFile) -> Result<(), Error> {
@@ -1391,6 +1396,102 @@ impl Environ {
         Ok(v)
     }
 
+    pub fn prove_properties(&self, fid: usize, same_nt_pair: bool) -> RuleClass {
+        if !same_nt_pair {
+            return RuleClass::default();
+        }
+        if let Some(class) = PROPERTY_CACHE.with(|cache| cache.borrow().get(&fid).copied()) {
+            return class;
+        }
+
+        let fun = self.deffun(fid);
+        let proof_start = std::time::Instant::now();
+        let class = if fun.arg_bits.len() == 2
+            && fun.arg_bits[0] == fun.arg_bits[1]
+            && fun.ret_bits == fun.arg_bits[0]
+        {
+            match self.prove_binary_properties(fid) {
+                Ok(class) => class,
+                Err(err) => {
+                    debg!("property proof failed for {}: {}", fun.name, err);
+                    RuleClass::default()
+                }
+            }
+        } else {
+            RuleClass::default()
+        };
+        debg!(
+            "properties {}: commutative={} idempotent={} associative={} proof_ms={}",
+            fun.name,
+            class.commutative,
+            class.idempotent,
+            class.associative,
+            proof_start.elapsed().as_millis()
+        );
+        PROPERTY_CACHE.with(|cache| {
+            cache.borrow_mut().insert(fid, class);
+        });
+        class
+    }
+
+    fn prove_binary_properties(&self, fid: usize) -> Result<RuleClass, rsmt2::errors::Error> {
+        let mut solver = Solver::new(SmtConf::default_z3(), ())?;
+        solver.set_logic(rsmt2::Logic::QF_BV)?;
+        solver.set_option(":timeout", 5_000)?;
+
+        let fun = self.deffun(fid);
+        let args = fun
+            .args
+            .iter()
+            .zip(&fun.arg_bits)
+            .map(|(name, bits)| ((*name).to_string(), format!("(_ BitVec {bits})")))
+            .collect::<Vec<_>>();
+        solver.define_fun(
+            fun.name,
+            args.iter().map(|(name, sort)| (name.as_str(), sort.as_str())),
+            format!("(_ BitVec {})", fun.ret_bits),
+            fun.expr.to_sygus(&fun.args),
+        )?;
+
+        let sort = format!("(_ BitVec {})", fun.arg_bits[0]);
+        solver.declare_const("prop_x", &sort)?;
+        solver.declare_const("prop_y", &sort)?;
+        solver.declare_const("prop_z", &sort)?;
+
+        let app = |lhs: &str, rhs: &str| format!("({} {lhs} {rhs})", fun.name);
+        let commutative = prove_unsat(
+            &mut solver,
+            "commutative",
+            format!(
+                "(not (= {} {}))",
+                app("prop_x", "prop_y"),
+                app("prop_y", "prop_x")
+            ),
+        );
+        let idempotent = prove_unsat(
+            &mut solver,
+            "idempotent",
+            format!("(not (= {} prop_x))", app("prop_x", "prop_x")),
+        );
+        let associative = prove_unsat(
+            &mut solver,
+            "associative",
+            format!(
+                "(not (= {} {}))",
+                app(&app("prop_x", "prop_y"), "prop_z"),
+                app("prop_x", &app("prop_y", "prop_z"))
+            ),
+        );
+
+        Ok(RuleClass {
+            commutative,
+            idempotent: idempotent && commutative,
+            associative,
+            nonzero_rhs: false,
+            shift_rhs_literal: false,
+        })
+    }
+
     /// Enable the thread-local eval-defined memo cache. Used by the
     /// fwd-decls/closure search where the same `(fid, args, bindings)`
     /// tuple recurs many times across candidates and Kleene iterations.
@@ -1429,6 +1530,28 @@ impl Environ {
         });
     }
 
+}
+
+fn prove_unsat(solver: &mut Solver<()>, property: &str, assertion: String) -> bool {
+    let start = std::time::Instant::now();
+    if solver.push(1).is_err() {
+        return false;
+    }
+    let result = match solver.assert(assertion).and_then(|_| solver.check_sat()) {
+        Ok(sat) => !sat,
+        Err(err) => {
+            debg!("{} property check failed: {}", property, err);
+            false
+        }
+    };
+    let _ = solver.pop(1);
+    debg!(
+        "{} property result={} proof_ms={}",
+        property,
+        result,
+        start.elapsed().as_millis()
+    );
+    result
 }
 
 /// True iff the grammar is just `((<NT> <Sort> ((Constant <Sort>))))` — the
