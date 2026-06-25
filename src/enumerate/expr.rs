@@ -399,6 +399,11 @@ impl OwnedExpr {
                 Some(crate::parse::constraint::parse_bv_digits(digits, 2, bits.max(1)))
             } else if let Some(digits) = name.strip_prefix("#d") {
                 Some(crate::parse::constraint::parse_bv_digits(digits, 10, 64))
+            } else if let Some((digits, width)) =
+                crate::parse::constraint::indexed_bv_literal(id)
+            {
+                // SMT-LIB indexed bit-vector literal `(_ bvDECIMAL WIDTH)`.
+                Some(crate::parse::constraint::parse_bv_digits(digits, 10, width))
             } else {
                 None
             }
@@ -782,6 +787,60 @@ mod tests {
     fn test1() {
         use super::OwnedExpr;
         println!("{:?}", oexpr! {+ [1] [2]});
+    }
+
+    /// SMT-LIB indexed bit-vector literals `(_ bvDECIMAL WIDTH)` lift to a
+    /// `Const` of the right width/value (the gap that blocked lowering the
+    /// founded-encoding define-funs into plans).
+    #[test]
+    fn indexed_bv_literal_lifts_to_const() {
+        use super::OwnedExpr;
+        use crate::enumerate::value::BitVec;
+        use sygus_parser::ast::{SyGuSCmd, SyGuSFile};
+
+        for (src, val, width) in [("(_ bv5 8)", 5u64, 8usize), ("(_ bv0 977)", 0, 977)] {
+            let wrapped = format!("(define-fun f () (_ BitVec {width}) {src})");
+            let file = SyGuSFile::from_str(&wrapped).unwrap();
+            let body = file
+                .cmds
+                .iter()
+                .find_map(|c| match c {
+                    SyGuSCmd::DefineFun(_, _, _, b) => Some(b),
+                    _ => None,
+                })
+                .unwrap();
+            match OwnedExpr::from_term(body, &[]).unwrap() {
+                OwnedExpr::Const(v) => assert_eq!(v, BitVec::from_u64(val, width)),
+                _ => panic!("`{src}` did not lift to a Const"),
+            }
+        }
+    }
+
+    /// A `bvult` over bit-slices now lowers to a `BitCircuit` plan (the founded
+    /// rank comparison), instead of falling back to `Generic` — and evaluates to
+    /// the same truth value as the arithmetic comparison.
+    #[test]
+    fn bvult_on_slices_lowers_to_bitcircuit() {
+        use super::OwnedExpr;
+        use crate::enumerate::value::BitVec;
+        use crate::parse::deffun::DefineFunPlan;
+
+        // f(x: 4 bits) = bvult(x[1:0], x[3:2])
+        let slice = |hi, lo| {
+            OwnedExpr::Extract(Box::new(OwnedExpr::Var(0, 4)), hi, lo)
+        };
+        let body = OwnedExpr::BVult(Box::new(slice(1, 0)), Box::new(slice(3, 2)));
+        let plan = DefineFunPlan::compile(&body, &[4]);
+        let DefineFunPlan::BitCircuit(bc) = &plan else {
+            panic!("bvult-on-slices should lower to BitCircuit, got Generic");
+        };
+        // Spot-check semantics against the real comparator for all 16 inputs.
+        for x in 0u64..16 {
+            let lo = x & 0b11;
+            let hi = (x >> 2) & 0b11;
+            let got = bc.eval(&[BitVec::from_u64(x, 4)]).unwrap();
+            assert_eq!(got, BitVec::from_u64((lo < hi) as u64, 1), "x={x}");
+        }
     }
 }
 

@@ -819,24 +819,90 @@ impl BoolAtom {
         Some(BoolAtom::Temp(idx))
     }
 
-    fn compile_dedup(
+    /// Intern a boolean node into a shared `Temp` binding (dedup'd).
+    fn intern(
+        node: BoolNode,
+        bindings: &mut Vec<BoolNode>,
+        dedup: &mut rustc_hash::FxHashMap<BoolNode, usize>,
+    ) -> Self {
+        if let Some(&idx) = dedup.get(&node) {
+            return BoolAtom::Temp(idx);
+        }
+        let idx = bindings.len();
+        dedup.insert(node.clone(), idx);
+        bindings.push(node);
+        BoolAtom::Temp(idx)
+    }
+
+    /// Bit `bit` (LSB = 0) of an arbitrary expression in the bit-blastable
+    /// fragment `{Const, Var, Extract, Concat, Not, And, Or, Xor, Ite, BVult,
+    /// BVule}`. This is what lets the founded encoding — which moves multi-bit
+    /// rank fields through `concat`/`extract`/`ite` and compares them with
+    /// `bvult` — lower to a `BitCircuit` instead of falling back to `Generic`.
+    /// `None` for anything outside the fragment (arithmetic), bailing to Generic.
+    fn bit_of(
         expr: &OwnedExpr,
+        bit: usize,
         nargs: usize,
         bindings: &mut Vec<BoolNode>,
         let_offsets: &[usize],
         dedup: &mut rustc_hash::FxHashMap<BoolNode, usize>,
     ) -> Option<Self> {
-        if let Some(atom) = Self::try_leaf(expr, nargs, let_offsets) {
-            return Some(atom);
+        macro_rules! rec {
+            ($e:expr, $b:expr) => {
+                Self::bit_of($e, $b, nargs, bindings, let_offsets, dedup)?
+            };
         }
-        let node = BoolNode::compile_dedup(expr, nargs, bindings, let_offsets, dedup)?;
-        if let Some(&idx) = dedup.get(&node) {
-            return Some(BoolAtom::Temp(idx));
+        match expr {
+            OwnedExpr::Const(value) if bit < value.bits() => Some(Self::Const(value.bit(bit))),
+            OwnedExpr::Var(idx, w) if *idx < nargs => {
+                (bit < *w).then_some(Self::InputBit { arg: *idx, bit })
+            }
+            // A let-bound variable holds a 1-bit value at its recorded slot.
+            OwnedExpr::Var(idx, _) if bit == 0 => {
+                let li = idx.checked_sub(nargs)?;
+                let_offsets.get(li).copied().map(Self::Temp)
+            }
+            // Bit `bit` of slice `[lo..=hi]` is bit `lo+bit` of the source.
+            OwnedExpr::Extract(src, _hi, lo) => {
+                Self::bit_of(src, *lo as usize + bit, nargs, bindings, let_offsets, dedup)
+            }
+            // SMT `(concat high low)`: low occupies the low `width(low)` bits.
+            OwnedExpr::Concat(high, low) => {
+                let lw = low.width();
+                if bit < lw {
+                    Self::bit_of(low, bit, nargs, bindings, let_offsets, dedup)
+                } else {
+                    Self::bit_of(high, bit - lw, nargs, bindings, let_offsets, dedup)
+                }
+            }
+            OwnedExpr::Not(a) => Some(Self::intern(BoolNode::Not(rec!(a, bit)), bindings, dedup)),
+            OwnedExpr::And(a, b) => {
+                Some(Self::intern(BoolNode::And(rec!(a, bit), rec!(b, bit)), bindings, dedup))
+            }
+            OwnedExpr::Or(a, b) => {
+                Some(Self::intern(BoolNode::Or(rec!(a, bit), rec!(b, bit)), bindings, dedup))
+            }
+            OwnedExpr::Xor(a, b) => {
+                Some(Self::intern(BoolNode::Xor(rec!(a, bit), rec!(b, bit)), bindings, dedup))
+            }
+            // `ite` condition is 1-bit; each result bit selects per-bit.
+            OwnedExpr::Ite(c, t, e) => Some(Self::intern(
+                BoolNode::Ite(rec!(c, 0), rec!(t, bit), rec!(e, bit)),
+                bindings,
+                dedup,
+            )),
+            // Comparators are a 1-bit boolean function of the operand bits.
+            OwnedExpr::BVult(a, b) if bit == 0 => {
+                let cmp = ult_owned(a, b, a.width())?;
+                Self::bit_of(&cmp, 0, nargs, bindings, let_offsets, dedup)
+            }
+            OwnedExpr::BVule(a, b) if bit == 0 => {
+                let cmp = OwnedExpr::Not(Box::new(ult_owned(b, a, a.width())?));
+                Self::bit_of(&cmp, 0, nargs, bindings, let_offsets, dedup)
+            }
+            _ => None,
         }
-        let idx = bindings.len();
-        dedup.insert(node.clone(), idx);
-        bindings.push(node);
-        Some(BoolAtom::Temp(idx))
     }
 }
 
@@ -877,51 +943,66 @@ impl BoolNode {
                 BoolAtom::compile(then_expr, nargs, bindings, let_offsets)?,
                 BoolAtom::compile(else_expr, nargs, bindings, let_offsets)?,
             )),
+            // Fixed-width comparators are boolean functions of the operand bits
+            // (a ripple comparator), so lower them into the circuit rather than
+            // bailing to the Generic plan. This is what lets founded-rank
+            // `(bvult …)` checks compile to BitCircuit.
+            OwnedExpr::BVult(a, b) => {
+                BoolNode::compile(&ult_owned(a, b, a.width())?, nargs, bindings, let_offsets)
+            }
+            OwnedExpr::BVule(a, b) => {
+                // a ≤ b ≡ ¬(b < a)
+                let cmp = OwnedExpr::Not(Box::new(ult_owned(b, a, a.width())?));
+                BoolNode::compile(&cmp, nargs, bindings, let_offsets)
+            }
             _ => None,
         }
     }
 
-    fn compile_dedup(
-        expr: &OwnedExpr,
-        nargs: usize,
-        bindings: &mut Vec<BoolNode>,
-        let_offsets: &[usize],
-        dedup: &mut rustc_hash::FxHashMap<BoolNode, usize>,
-    ) -> Option<Self> {
-        match expr {
-            OwnedExpr::Const(value) if value.bits() == 1 => {
-                Some(Self::Atom(BoolAtom::Const(!value.is_zero())))
-            }
-            OwnedExpr::Var(_, _) | OwnedExpr::Extract(_, _, _) => {
-                Some(Self::Atom(BoolAtom::try_leaf(expr, nargs, let_offsets)?))
-            }
-            OwnedExpr::Not(inner) => Some(Self::Not(BoolAtom::compile_dedup(
-                inner,
-                nargs,
-                bindings,
-                let_offsets,
-                dedup,
-            )?)),
-            OwnedExpr::And(lhs, rhs) => Some(Self::And(
-                BoolAtom::compile_dedup(lhs, nargs, bindings, let_offsets, dedup)?,
-                BoolAtom::compile_dedup(rhs, nargs, bindings, let_offsets, dedup)?,
-            )),
-            OwnedExpr::Or(lhs, rhs) => Some(Self::Or(
-                BoolAtom::compile_dedup(lhs, nargs, bindings, let_offsets, dedup)?,
-                BoolAtom::compile_dedup(rhs, nargs, bindings, let_offsets, dedup)?,
-            )),
-            OwnedExpr::Xor(lhs, rhs) => Some(Self::Xor(
-                BoolAtom::compile_dedup(lhs, nargs, bindings, let_offsets, dedup)?,
-                BoolAtom::compile_dedup(rhs, nargs, bindings, let_offsets, dedup)?,
-            )),
-            OwnedExpr::Ite(cond, then_expr, else_expr) => Some(Self::Ite(
-                BoolAtom::compile_dedup(cond, nargs, bindings, let_offsets, dedup)?,
-                BoolAtom::compile_dedup(then_expr, nargs, bindings, let_offsets, dedup)?,
-                BoolAtom::compile_dedup(else_expr, nargs, bindings, let_offsets, dedup)?,
-            )),
-            _ => None,
+}
+
+/// Bit `i` (LSB = 0) of `expr` as a 1-bit `OwnedExpr`, when it is addressable as
+/// a single-bit leaf (`Var` bit / `Extract`-of-leaf bit / `Const` bit). Used to
+/// lower fixed-width comparators into boolean circuits.
+fn nth_bit(expr: &OwnedExpr, i: usize) -> Option<OwnedExpr> {
+    match expr {
+        OwnedExpr::Var(idx, w) if i < *w => Some(OwnedExpr::Extract(
+            Box::new(OwnedExpr::Var(*idx, *w)),
+            i as u64,
+            i as u64,
+        )),
+        // Bit i of a slice [lo..=hi] is bit lo+i of the inner value.
+        OwnedExpr::Extract(inner, _hi, lo) => nth_bit(inner, *lo as usize + i),
+        OwnedExpr::Const(v) if i < v.bits() => {
+            Some(OwnedExpr::Const(BitVec::from_u64(v.bit(i) as u64, 1)))
         }
+        _ => None,
     }
+}
+
+/// Unsigned `a < b` over `width` bits as a boolean `OwnedExpr` — a ripple
+/// comparator `ltᵢ = (¬aᵢ ∧ bᵢ) ∨ ((aᵢ = bᵢ) ∧ ltᵢ₋₁)` built only from
+/// `And`/`Or`/`Not`/`Xor` over the operands' single bits, so the circuit
+/// compiler accepts it. `None` if a bit isn't addressable as a leaf.
+fn ult_owned(a: &OwnedExpr, b: &OwnedExpr, width: usize) -> Option<OwnedExpr> {
+    let bit = |v: bool| OwnedExpr::Const(BitVec::from_u64(v as u64, 1));
+    let mut lt = bit(false);
+    for i in 0..width {
+        let ai = nth_bit(a, i)?;
+        let bi = nth_bit(b, i)?;
+        // aᵢ < bᵢ  ≡  ¬aᵢ ∧ bᵢ
+        let ai_lt = OwnedExpr::And(
+            Box::new(OwnedExpr::Not(Box::new(ai.clone()))),
+            Box::new(bi.clone()),
+        );
+        // aᵢ = bᵢ  ≡  ¬(aᵢ ⊕ bᵢ)
+        let ai_eq = OwnedExpr::Not(Box::new(OwnedExpr::Xor(Box::new(ai), Box::new(bi))));
+        lt = OwnedExpr::Or(
+            Box::new(ai_lt),
+            Box::new(OwnedExpr::And(Box::new(ai_eq), Box::new(lt))),
+        );
+    }
+    Some(lt)
 }
 
 fn value_from_words(words: Vec<u64>, bits: usize) -> BitVec {
@@ -934,46 +1015,6 @@ fn value_from_words(words: Vec<u64>, bits: usize) -> BitVec {
             raw |= num_bigint::BigUint::from(word.1.to_owned());
         }
         BitVec::from_biguint(raw, bits)
-    }
-}
-
-fn flatten_concat_bits<'a>(expr: &'a OwnedExpr, out: &mut Vec<&'a OwnedExpr>) -> bool {
-    match expr {
-        OwnedExpr::Concat(high, low) => {
-            if !flatten_concat_bits(low, out) {
-                return false;
-            }
-            flatten_concat_bits(high, out)
-        }
-        OwnedExpr::Const(value) if value.bits() == 1 => {
-            out.push(expr);
-            true
-        }
-        _ if expr.width() == 1 => {
-            out.push(expr);
-            true
-        }
-        _ => false,
-    }
-}
-
-fn flatten_concat_bits_or_consts<'a>(expr: &'a OwnedExpr, out: &mut Vec<&'a OwnedExpr>) -> bool {
-    match expr {
-        OwnedExpr::Concat(high, low) => {
-            if !flatten_concat_bits_or_consts(low, out) {
-                return false;
-            }
-            flatten_concat_bits_or_consts(high, out)
-        }
-        OwnedExpr::Const(_) => {
-            out.push(expr);
-            true
-        }
-        _ if expr.width() == 1 => {
-            out.push(expr);
-            true
-        }
-        _ => false,
     }
 }
 
@@ -1000,29 +1041,21 @@ impl BitCircuitPlan {
         if let OwnedExpr::Const(_) = current {
             return None;
         }
-        let mut raw_bits = Vec::new();
-        if !flatten_concat_bits(current, &mut raw_bits) {
-            raw_bits.clear();
-            if !flatten_concat_bits_or_consts(current, &mut raw_bits) {
-                return None;
-            }
-        }
-        let mut output_bits = Vec::new();
+        // Lower each output bit through the bit-blastable fragment. `bit_of`
+        // handles multi-bit data movement (concat/extract/ite) and comparators
+        // (bvult), so bodies that aren't a flat concat of 1-bit leaves — like
+        // the founded encoding, which routes 15-bit rank fields — still compile.
+        let mut output_bits = Vec::with_capacity(ret_bits);
         let mut dedup = rustc_hash::FxHashMap::default();
-        for leaf in &raw_bits {
-            match leaf {
-                OwnedExpr::Const(value) if value.bits() > 1 => {
-                    for i in 0..value.bits() {
-                        output_bits.push(BoolAtom::Const(value.bit(i)));
-                    }
-                }
-                _ => {
-                    output_bits.push(BoolAtom::compile_dedup(leaf, nargs, &mut bindings, &let_offsets, &mut dedup)?);
-                }
-            }
-        }
-        if output_bits.len() != ret_bits {
-            return None;
+        for j in 0..ret_bits {
+            output_bits.push(BoolAtom::bit_of(
+                current,
+                j,
+                nargs,
+                &mut bindings,
+                &let_offsets,
+                &mut dedup,
+            )?);
         }
         let mut seen_inputs = rustc_hash::FxHashSet::default();
         for node in &bindings {

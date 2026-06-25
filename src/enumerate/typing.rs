@@ -75,6 +75,9 @@ pub fn check_sort<'s>(term: &'s SyGuSTerm, env: &[(&'s str, Sort)]) -> parse::Re
                 Ok(Sort::BitVec(digits.len().max(1)))
             } else if name.strip_prefix("#d").is_some() {
                 Ok(Sort::BitVec(64))
+            } else if let Some((_, width)) = crate::parse::constraint::indexed_bv_literal(id) {
+                // SMT-LIB indexed bit-vector literal `(_ bvDECIMAL WIDTH)`.
+                Ok(Sort::BitVec(width))
             } else if let Some(fid) = deffun::ENV.lookup(name, 0) {
                 Ok(Sort::BitVec(deffun::ENV.ret_bits(fid)))
             } else if let Some(idx) = deffun::lookup_synth(name, 0) {

@@ -65,6 +65,24 @@ pub fn parse_bv_digits(digits: &str, radix: u32, bits: usize) -> Result<BitVec> 
     }
 }
 
+/// Recognize the SMT-LIB indexed bit-vector literal `(_ bvDECIMAL WIDTH)`,
+/// returning `(decimal-digits, width)`. Shared by the term lowering
+/// (`OwnedExpr::from_term`) and the sort checker (`typing::check_sort`) so the
+/// two stay in lock-step on what counts as a constant.
+pub fn indexed_bv_literal(id: &Identifier) -> Option<(&str, usize)> {
+    let Identifier::Indexed(sym, idxs) = id else {
+        return None;
+    };
+    let digits = sym.strip_prefix("bv")?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    match idxs.first()? {
+        Index::Numeral(width) => Some((digits, (*width).max(1) as usize)),
+        Index::Symbol(_) => None,
+    }
+}
+
 fn term_app(term: &SyGuSTerm) -> Option<(&str, &[SyGuSTerm])> {
     let SyGuSTerm::Application(id, args) = term else {
         return None;

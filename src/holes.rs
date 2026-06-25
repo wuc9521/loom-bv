@@ -142,8 +142,18 @@ impl HoleSpec {
     /// Enumerate skeletons in increasing size; for each, SMT-solve the holes.
     /// Returns the inner `(define-fun …)` for the first satisfiable skeleton.
     pub fn solve(&self) -> crate::SolverResult<String> {
+        // Solver backend. z3 is the default and wins the *common* case: most
+        // skeletons are refuted in z3's preprocessing (no bit-blast), ~ms each
+        // incrementally. bitwuzla solves the expensive blast-bound skeletons
+        // ~2x faster, but — measured — it does not reuse the blasted base across
+        // push/pop, so each cheap skeleton costs it ~0.5s (≈ a fresh solve),
+        // making it ~10x slower overall here. Kept opt-in via
+        // `DRYAD_HOLE_SOLVER=bitwuzla` (useful for the blast-bound tail / a
+        // future per-skeleton portfolio), not the default.
+        let use_bitwuzla = std::env::var("DRYAD_HOLE_SOLVER").is_ok_and(|s| s == "bitwuzla");
+        let solver_name = if use_bitwuzla { "bitwuzla" } else { "z3" };
         info!(
-            "const-hole search: synth={} start={} nonterminals={} recursive={} solver=z3",
+            "const-hole search: synth={} start={} nonterminals={} recursive={} solver={solver_name}",
             self.synth_name,
             self.start,
             self.prods.len(),
@@ -163,16 +173,45 @@ impl HoleSpec {
         let mut seen_any = false;
         let mut empty_streak = 0usize;
 
-        // One persistent z3 session: the (heavy) define-funs are sent once as
-        // the base scope, then each skeleton is solved in a push/pop frame.
-        // This amortizes process startup + define-fun setup across all
-        // skeletons (~2.5-3x vs. one process per skeleton).
-        let mut solver = SmtConf::default_z3()
+        // One persistent solver session: the (heavy) define-funs are sent once
+        // as the base scope, then each skeleton is solved in a push/pop frame.
+        // This amortizes process startup + define-fun setup across all skeletons.
+        let conf = if use_bitwuzla {
+            // bitwuzla speaks interactive SMT-LIB2 like yices-2; point the
+            // binary at it and ask for models (`-m`).
+            let mut conf = SmtConf::yices_2("bitwuzla");
+            conf.option("--lang");
+            conf.option("smt2");
+            conf.option("-m");
+            conf
+        } else {
+            SmtConf::default_z3()
+        };
+        let mut solver = conf
             .spawn(Parser)
-            .map_err(|e| format!("failed to spawn z3 (is it on PATH?): {e}"))?;
+            .map_err(|e| format!("failed to spawn {solver_name} (is it on PATH?): {e}"))?;
         solver
             .set_logic(rsmt2::Logic::QF_BV)
-            .map_err(|e| format!("z3 set-logic: {e}"))?;
+            .map_err(|e| format!("{solver_name} set-logic: {e}"))?;
+        // NB on solver strategy: a scenario-tuned tactic — `(then simplify
+        // ackermannize_bv aig smt)` — is ~4x faster than the default *per
+        // expensive query* (it abstracts the founded encoding's many `bvult`s
+        // over packed rank fields instead of eagerly bit-blasting them). But
+        // setting it as `:tactic.default_tactic` routes every check-sat through
+        // the *non-incremental* tactic, which costs the cheap majority their
+        // incremental fast path (measured: size<=7 8.4s -> 25s end-to-end). So
+        // it must be applied selectively (a per-skeleton portfolio: incremental
+        // z3 for the cheap path, ackermannized re-solve only for the slow tail),
+        // not as a global default. Left for that future change.
+        //
+        // Incremental-kernel set-options *were* swept here (they don't leave the
+        // incremental solver, so they can't regress the cheap path like the
+        // tactic does) — none helped end-to-end on the founded encoding:
+        // smt.bv.size_reduce / smt.bv.delay / smt.bv.watch_diseq / polysat
+        // (smt.bv.solver=1) / intblast (=2) were all ≥ baseline;
+        // rewriter.bv_extract_prop was ~10% (within noise). The accelerators
+        // that do help (ackermannize_bv, aig, bv-size-reduction, max-bv-sharing)
+        // live only in the non-incremental `qfbv` tactic, hence the portfolio.
         for d in &self.defines {
             solver
                 .define_fun(
