@@ -7,13 +7,13 @@ use rustc_hash::{FxHashMap, FxHasher};
 use sygus_parser::ast::SyGuSFile;
 
 use crate::{
+    debg,
     enumerate::{
         expr::{DivideByZero, OwnedExpr},
         grammar::RuleClass,
         op,
         value::BitVec,
     },
-    debg,
 };
 
 use super::{new_custom_error_span, Error, ProblemView};
@@ -179,6 +179,7 @@ pub struct DefineFun {
     pub arg_bits: Vec<usize>,
     pub ret_bits: usize,
     pub expr: OwnedExpr,
+    declared_class: RuleClass,
     plan: DefineFunPlan,
 }
 
@@ -257,7 +258,11 @@ pub enum BoolAtom {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PartialBit {
     Const(bool),
-    Input { arg: usize, bit: usize, negated: bool },
+    Input {
+        arg: usize,
+        bit: usize,
+        negated: bool,
+    },
     Complex,
 }
 
@@ -265,7 +270,11 @@ impl PartialBit {
     fn negate(self) -> Self {
         match self {
             Self::Const(v) => Self::Const(!v),
-            Self::Input { arg, bit, negated } => Self::Input { arg, bit, negated: !negated },
+            Self::Input { arg, bit, negated } => Self::Input {
+                arg,
+                bit,
+                negated: !negated,
+            },
             Self::Complex => Self::Complex,
         }
     }
@@ -300,21 +309,34 @@ impl PartialBit {
             Self::Const(true) => else_val,
             Self::Const(false) => then_val,
             _ => {
-                if then_val == else_val { then_val } else { Self::Complex }
+                if then_val == else_val {
+                    then_val
+                } else {
+                    Self::Complex
+                }
             }
         }
     }
 }
 
 impl BoolAtom {
-    fn partial_resolve(&self, fixed_arg: usize, fixed_value: &BitVec, temps: &[PartialBit]) -> PartialBit {
+    fn partial_resolve(
+        &self,
+        fixed_arg: usize,
+        fixed_value: &BitVec,
+        temps: &[PartialBit],
+    ) -> PartialBit {
         match self {
             BoolAtom::Const(v) => PartialBit::Const(*v),
             BoolAtom::InputBit { arg, bit } => {
                 if *arg == fixed_arg {
                     PartialBit::Const(fixed_value.bit(*bit))
                 } else {
-                    PartialBit::Input { arg: *arg, bit: *bit, negated: false }
+                    PartialBit::Input {
+                        arg: *arg,
+                        bit: *bit,
+                        negated: false,
+                    }
                 }
             }
             BoolAtom::Temp(idx) => temps[*idx],
@@ -323,7 +345,12 @@ impl BoolAtom {
 }
 
 impl BoolNode {
-    fn partial_resolve(&self, fixed_arg: usize, fixed_value: &BitVec, temps: &[PartialBit]) -> PartialBit {
+    fn partial_resolve(
+        &self,
+        fixed_arg: usize,
+        fixed_value: &BitVec,
+        temps: &[PartialBit],
+    ) -> PartialBit {
         let resolve = |atom: &BoolAtom| atom.partial_resolve(fixed_arg, fixed_value, temps);
         match self {
             BoolNode::Atom(a) => resolve(a),
@@ -344,7 +371,8 @@ impl BitCircuitPlan {
         for binding in &self.bindings {
             temps.push(binding.partial_resolve(fixed_arg, fixed_value, &temps));
         }
-        self.output_bits.iter()
+        self.output_bits
+            .iter()
             .map(|atom| atom.partial_resolve(fixed_arg, fixed_value, &temps))
             .collect()
     }
@@ -353,33 +381,105 @@ impl BitCircuitPlan {
 #[derive(Clone, Debug)]
 pub enum PlanInstr {
     Const(BitVec),
-    Concat { lhs: usize, rhs: usize },
-    Extract { src: usize, hi: u64, lo: u64 },
-    Not { src: usize },
-    Neg { src: usize },
-    Add { lhs: usize, rhs: usize },
-    Xor { lhs: usize, rhs: usize },
-    And { lhs: usize, rhs: usize },
-    Or { lhs: usize, rhs: usize },
-    Mul { lhs: usize, rhs: usize },
-    Sub { lhs: usize, rhs: usize },
-    LShr { lhs: usize, rhs: usize },
-    AShr { lhs: usize, rhs: usize },
-    Shl { lhs: usize, rhs: usize },
-    UDiv { lhs: usize, rhs: usize },
-    URem { lhs: usize, rhs: usize },
-    SDiv { lhs: usize, rhs: usize },
-    SRem { lhs: usize, rhs: usize },
-    BVule { lhs: usize, rhs: usize },
-    BVult { lhs: usize, rhs: usize },
-    BVsle { lhs: usize, rhs: usize },
-    BVslt { lhs: usize, rhs: usize },
-    Ite { cond: usize, then_slot: usize, else_slot: usize },
-    Func { fid: usize, args: Vec<usize> },
+    Concat {
+        lhs: usize,
+        rhs: usize,
+    },
+    Extract {
+        src: usize,
+        hi: u64,
+        lo: u64,
+    },
+    Not {
+        src: usize,
+    },
+    Neg {
+        src: usize,
+    },
+    Add {
+        lhs: usize,
+        rhs: usize,
+    },
+    Xor {
+        lhs: usize,
+        rhs: usize,
+    },
+    And {
+        lhs: usize,
+        rhs: usize,
+    },
+    Or {
+        lhs: usize,
+        rhs: usize,
+    },
+    Mul {
+        lhs: usize,
+        rhs: usize,
+    },
+    Sub {
+        lhs: usize,
+        rhs: usize,
+    },
+    LShr {
+        lhs: usize,
+        rhs: usize,
+    },
+    AShr {
+        lhs: usize,
+        rhs: usize,
+    },
+    Shl {
+        lhs: usize,
+        rhs: usize,
+    },
+    UDiv {
+        lhs: usize,
+        rhs: usize,
+    },
+    URem {
+        lhs: usize,
+        rhs: usize,
+    },
+    SDiv {
+        lhs: usize,
+        rhs: usize,
+    },
+    SRem {
+        lhs: usize,
+        rhs: usize,
+    },
+    BVule {
+        lhs: usize,
+        rhs: usize,
+    },
+    BVult {
+        lhs: usize,
+        rhs: usize,
+    },
+    BVsle {
+        lhs: usize,
+        rhs: usize,
+    },
+    BVslt {
+        lhs: usize,
+        rhs: usize,
+    },
+    Ite {
+        cond: usize,
+        then_slot: usize,
+        else_slot: usize,
+    },
+    Func {
+        fid: usize,
+        args: Vec<usize>,
+    },
     /// Call into the currently-set candidate body for synth-fun
     /// `synth_idx`. `args` are slot indices providing the call arguments;
     /// the candidate body is evaluated with those as `Var(0..n)`.
-    SynthCall { synth_idx: usize, args: Vec<usize> },
+    SynthCall {
+        synth_idx: usize,
+        args: Vec<usize>,
+    },
 }
 
 impl DefineFunPlan {
@@ -401,12 +501,8 @@ impl DefineFunPlan {
                 for instr in instrs {
                     let value = match instr {
                         PlanInstr::Const(value) => value.clone(),
-                        PlanInstr::Concat { lhs, rhs } => {
-                            slots[*lhs].concat(&slots[*rhs])
-                        }
-                        PlanInstr::Extract { src, hi, lo } => {
-                            slots[*src].extract(*hi, *lo)
-                        }
+                        PlanInstr::Concat { lhs, rhs } => slots[*lhs].concat(&slots[*rhs]),
+                        PlanInstr::Extract { src, hi, lo } => slots[*src].extract(*hi, *lo),
                         PlanInstr::Not { src } => op::not(slots[*src].clone()),
                         PlanInstr::Neg { src } => op::neg(slots[*src].clone()),
                         PlanInstr::Add { lhs, rhs } => {
@@ -448,10 +544,18 @@ impl DefineFunPlan {
                         PlanInstr::SRem { lhs, rhs } => {
                             op::srem(slots[*lhs].clone(), slots[*rhs].clone())?
                         }
-                        PlanInstr::BVule { lhs, rhs } => crate::enumerate::op::ule(slots[*lhs].clone(), slots[*rhs].clone()),
-                        PlanInstr::BVult { lhs, rhs } => crate::enumerate::op::ult(slots[*lhs].clone(), slots[*rhs].clone()),
-                        PlanInstr::BVsle { lhs, rhs } => crate::enumerate::op::sle(slots[*lhs].clone(), slots[*rhs].clone()),
-                        PlanInstr::BVslt { lhs, rhs } => crate::enumerate::op::slt(slots[*lhs].clone(), slots[*rhs].clone()),
+                        PlanInstr::BVule { lhs, rhs } => {
+                            crate::enumerate::op::ule(slots[*lhs].clone(), slots[*rhs].clone())
+                        }
+                        PlanInstr::BVult { lhs, rhs } => {
+                            crate::enumerate::op::ult(slots[*lhs].clone(), slots[*rhs].clone())
+                        }
+                        PlanInstr::BVsle { lhs, rhs } => {
+                            crate::enumerate::op::sle(slots[*lhs].clone(), slots[*rhs].clone())
+                        }
+                        PlanInstr::BVslt { lhs, rhs } => {
+                            crate::enumerate::op::slt(slots[*lhs].clone(), slots[*rhs].clone())
+                        }
                         PlanInstr::Ite {
                             cond,
                             then_slot,
@@ -462,8 +566,10 @@ impl DefineFunPlan {
                             slots[*else_slot].clone(),
                         ),
                         PlanInstr::Func { fid, args } => {
-                            let func_args =
-                                args.iter().map(|slot| slots[*slot].clone()).collect::<Vec<_>>();
+                            let func_args = args
+                                .iter()
+                                .map(|slot| slots[*slot].clone())
+                                .collect::<Vec<_>>();
                             env.eval_defined(*fid, &func_args, bindings)?
                         }
                         PlanInstr::SynthCall { synth_idx, args } => {
@@ -573,7 +679,8 @@ impl BitCircuitPlan {
             .map(|node| remap_node(&node, &remap))
             .collect();
 
-        let new_output_bits: Vec<BoolAtom> = self.output_bits
+        let new_output_bits: Vec<BoolAtom> = self
+            .output_bits
             .iter()
             .enumerate()
             .map(|(idx, atom)| {
@@ -877,15 +984,21 @@ impl BoolAtom {
                 }
             }
             OwnedExpr::Not(a) => Some(Self::intern(BoolNode::Not(rec!(a, bit)), bindings, dedup)),
-            OwnedExpr::And(a, b) => {
-                Some(Self::intern(BoolNode::And(rec!(a, bit), rec!(b, bit)), bindings, dedup))
-            }
-            OwnedExpr::Or(a, b) => {
-                Some(Self::intern(BoolNode::Or(rec!(a, bit), rec!(b, bit)), bindings, dedup))
-            }
-            OwnedExpr::Xor(a, b) => {
-                Some(Self::intern(BoolNode::Xor(rec!(a, bit), rec!(b, bit)), bindings, dedup))
-            }
+            OwnedExpr::And(a, b) => Some(Self::intern(
+                BoolNode::And(rec!(a, bit), rec!(b, bit)),
+                bindings,
+                dedup,
+            )),
+            OwnedExpr::Or(a, b) => Some(Self::intern(
+                BoolNode::Or(rec!(a, bit), rec!(b, bit)),
+                bindings,
+                dedup,
+            )),
+            OwnedExpr::Xor(a, b) => Some(Self::intern(
+                BoolNode::Xor(rec!(a, bit), rec!(b, bit)),
+                bindings,
+                dedup,
+            )),
             // `ite` condition is 1-bit; each result bit selects per-bit.
             OwnedExpr::Ite(c, t, e) => Some(Self::intern(
                 BoolNode::Ite(rec!(c, 0), rec!(t, bit), rec!(e, bit)),
@@ -958,7 +1071,6 @@ impl BoolNode {
             _ => None,
         }
     }
-
 }
 
 /// Bit `i` (LSB = 0) of `expr` as a 1-bit `OwnedExpr`, when it is addressable as
@@ -1107,13 +1219,11 @@ fn compile_generic(expr: &OwnedExpr, arg_bits: &[usize], _ret_bits: usize) -> De
         slot_bits: &mut Vec<usize>,
         instrs: &mut Vec<PlanInstr>,
     ) -> usize {
-        let push = |
-            instr: PlanInstr,
-            width: usize,
-            next_slot: &mut usize,
-            slot_bits: &mut Vec<usize>,
-            instrs: &mut Vec<PlanInstr>,
-        | {
+        let push = |instr: PlanInstr,
+                    width: usize,
+                    next_slot: &mut usize,
+                    slot_bits: &mut Vec<usize>,
+                    instrs: &mut Vec<PlanInstr>| {
             let slot = *next_slot;
             *next_slot += 1;
             slot_bits.push(width);
@@ -1143,7 +1253,11 @@ fn compile_generic(expr: &OwnedExpr, arg_bits: &[usize], _ret_bits: usize) -> De
             OwnedExpr::Extract(src, hi, lo) => {
                 let src = compile_expr(src, env_slots, next_slot, slot_bits, instrs);
                 push(
-                    PlanInstr::Extract { src, hi: *hi, lo: *lo },
+                    PlanInstr::Extract {
+                        src,
+                        hi: *hi,
+                        lo: *lo,
+                    },
                     expr.width(),
                     next_slot,
                     slot_bits,
@@ -1152,103 +1266,221 @@ fn compile_generic(expr: &OwnedExpr, arg_bits: &[usize], _ret_bits: usize) -> De
             }
             OwnedExpr::Not(src) => {
                 let src = compile_expr(src, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::Not { src }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::Not { src },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::Neg(src) => {
                 let src = compile_expr(src, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::Neg { src }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::Neg { src },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::Add(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::Add { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::Add { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::Xor(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::Xor { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::Xor { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::And(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::And { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::And { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::Or(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::Or { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::Or { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::Mul(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::Mul { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::Mul { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::Sub(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::Sub { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::Sub { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::LShr(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::LShr { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::LShr { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::AShr(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::AShr { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::AShr { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::Shl(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::Shl { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::Shl { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::UDiv(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::UDiv { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::UDiv { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::URem(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::URem { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::URem { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::SDiv(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::SDiv { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::SDiv { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::SRem(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::SRem { lhs, rhs }, expr.width(), next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::SRem { lhs, rhs },
+                    expr.width(),
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::BVule(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::BVule { lhs, rhs }, 1, next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::BVule { lhs, rhs },
+                    1,
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::BVult(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::BVult { lhs, rhs }, 1, next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::BVult { lhs, rhs },
+                    1,
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::BVsle(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::BVsle { lhs, rhs }, 1, next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::BVsle { lhs, rhs },
+                    1,
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::BVslt(lhs, rhs) => {
                 let lhs = compile_expr(lhs, env_slots, next_slot, slot_bits, instrs);
                 let rhs = compile_expr(rhs, env_slots, next_slot, slot_bits, instrs);
-                push(PlanInstr::BVslt { lhs, rhs }, 1, next_slot, slot_bits, instrs)
+                push(
+                    PlanInstr::BVslt { lhs, rhs },
+                    1,
+                    next_slot,
+                    slot_bits,
+                    instrs,
+                )
             }
             OwnedExpr::Ite(cond, then_expr, else_expr) => {
                 let cond = compile_expr(cond, env_slots, next_slot, slot_bits, instrs);
                 let then_slot = compile_expr(then_expr, env_slots, next_slot, slot_bits, instrs);
                 let else_slot = compile_expr(else_expr, env_slots, next_slot, slot_bits, instrs);
                 push(
-                    PlanInstr::Ite { cond, then_slot, else_slot },
+                    PlanInstr::Ite {
+                        cond,
+                        then_slot,
+                        else_slot,
+                    },
                     expr.width(),
                     next_slot,
                     slot_bits,
@@ -1268,7 +1500,10 @@ fn compile_generic(expr: &OwnedExpr, arg_bits: &[usize], _ret_bits: usize) -> De
                     .map(|arg| compile_expr(arg, env_slots, next_slot, slot_bits, instrs))
                     .collect();
                 push(
-                    PlanInstr::Func { fid: *fid, args: compiled_args },
+                    PlanInstr::Func {
+                        fid: *fid,
+                        args: compiled_args,
+                    },
                     expr.width(),
                     next_slot,
                     slot_bits,
@@ -1281,7 +1516,10 @@ fn compile_generic(expr: &OwnedExpr, arg_bits: &[usize], _ret_bits: usize) -> De
                     .map(|arg| compile_expr(arg, env_slots, next_slot, slot_bits, instrs))
                     .collect();
                 push(
-                    PlanInstr::SynthCall { synth_idx: *synth_idx, args: compiled_args },
+                    PlanInstr::SynthCall {
+                        synth_idx: *synth_idx,
+                        args: compiled_args,
+                    },
                     synth_ret_bits(*synth_idx),
                     next_slot,
                     slot_bits,
@@ -1295,7 +1533,13 @@ fn compile_generic(expr: &OwnedExpr, arg_bits: &[usize], _ret_bits: usize) -> De
     let mut env_slots = (0..nargs).collect::<Vec<_>>();
     let mut slot_bits = arg_bits.to_vec();
     let mut next_slot = nargs;
-    let root = compile_expr(expr, &mut env_slots, &mut next_slot, &mut slot_bits, &mut instrs);
+    let root = compile_expr(
+        expr,
+        &mut env_slots,
+        &mut next_slot,
+        &mut slot_bits,
+        &mut instrs,
+    );
     DefineFunPlan::Generic {
         root,
         slot_count: next_slot,
@@ -1326,6 +1570,7 @@ impl Environ {
     }
 
     pub fn parse_from_view(&self, view: &ProblemView<'_>) -> Result<(), Error> {
+        let laws = crate::laws::OpLaws::from_assumes(&view.assumes);
         // SyGuS 2.1 §3.7: define-fun bodies may reference synth-funs.
         // Those references are recognised by `OwnedExpr::from_term` via the
         // thread-local `SYNTH_REGISTRY` (populated in `solve_file_inner`)
@@ -1355,7 +1600,10 @@ impl Environ {
                 )
             })?;
             let expr = OwnedExpr::from_term(def.body, args.as_slice())?;
-            let arg_bits = args.iter().map(|(_, bits)| *bits as usize).collect::<Vec<_>>();
+            let arg_bits = args
+                .iter()
+                .map(|(_, bits)| *bits as usize)
+                .collect::<Vec<_>>();
             let plan = DefineFunPlan::compile_named(&expr, &arg_bits, name);
             debg!(
                 "DefineFun: {} {} -> {}",
@@ -1368,6 +1616,7 @@ impl Environ {
                 args: args.iter().map(|(name, _)| *name).collect(),
                 arg_bits,
                 ret_bits,
+                declared_class: laws.binary_class(name),
                 plan,
                 expr,
             });
@@ -1438,6 +1687,19 @@ impl Environ {
         }
 
         let fun = self.deffun(fid);
+        if rule_class_any(fun.declared_class) {
+            debg!(
+                "properties {}: commutative={} idempotent={} associative={} source=axiom",
+                fun.name,
+                fun.declared_class.commutative,
+                fun.declared_class.idempotent,
+                fun.declared_class.associative,
+            );
+            PROPERTY_CACHE.with(|cache| {
+                cache.borrow_mut().insert(fid, fun.declared_class);
+            });
+            return fun.declared_class;
+        }
         let proof_start = std::time::Instant::now();
         let class = if fun.arg_bits.len() == 2
             && fun.arg_bits[0] == fun.arg_bits[1]
@@ -1481,7 +1743,8 @@ impl Environ {
             .collect::<Vec<_>>();
         solver.define_fun(
             fun.name,
-            args.iter().map(|(name, sort)| (name.as_str(), sort.as_str())),
+            args.iter()
+                .map(|(name, sort)| (name.as_str(), sort.as_str())),
             format!("(_ BitVec {})", fun.ret_bits),
             fun.expr.to_sygus(&fun.args),
         )?;
@@ -1562,7 +1825,6 @@ impl Environ {
             c.enabled = false;
         });
     }
-
 }
 
 fn prove_unsat(solver: &mut Solver<()>, property: &str, assertion: String) -> bool {
@@ -1585,6 +1847,10 @@ fn prove_unsat(solver: &mut Solver<()>, property: &str, assertion: String) -> bo
         start.elapsed().as_millis()
     );
     result
+}
+
+fn rule_class_any(class: RuleClass) -> bool {
+    class.commutative || class.idempotent || class.associative
 }
 
 /// True iff the grammar is just `((<NT> <Sort> ((Constant <Sort>))))` — the
@@ -1621,8 +1887,18 @@ mod tests {
             Some(p) => p,
             None => return,
         };
-        let nargs = plan.input_slots.iter().map(|(a, _)| a + 1).max().unwrap_or(0);
-        let max_bits = plan.input_slots.iter().map(|(_, b)| b + 1).max().unwrap_or(1);
+        let nargs = plan
+            .input_slots
+            .iter()
+            .map(|(a, _)| a + 1)
+            .max()
+            .unwrap_or(0);
+        let max_bits = plan
+            .input_slots
+            .iter()
+            .map(|(_, b)| b + 1)
+            .max()
+            .unwrap_or(1);
 
         for trial in 0..num_trials {
             let args: Vec<BitVec> = (0..nargs)
@@ -1649,8 +1925,19 @@ mod tests {
             Some(p) => p,
             None => return,
         };
-        let nargs = plan.input_slots.iter().map(|(a, _)| a + 1).max().unwrap_or(1).max(1);
-        let max_bits = plan.input_slots.iter().map(|(_, b)| b + 1).max().unwrap_or(1);
+        let nargs = plan
+            .input_slots
+            .iter()
+            .map(|(a, _)| a + 1)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let max_bits = plan
+            .input_slots
+            .iter()
+            .map(|(_, b)| b + 1)
+            .max()
+            .unwrap_or(1);
 
         let batch_size = 64.min(num_trials);
         let args_batch: Vec<Vec<BitVec>> = (0..batch_size)
@@ -1673,7 +1960,8 @@ mod tests {
                     full.bit(bit_idx),
                     pruned_val.bit(bit_idx),
                     "Batch divergence at demanded bit {} candidate {}",
-                    bit_idx, cand_idx
+                    bit_idx,
+                    cand_idx
                 );
             }
         }
@@ -1721,10 +2009,7 @@ mod tests {
             BoolAtom::InputBit { arg: 0, bit: 1 },
             BoolAtom::InputBit { arg: 0, bit: 2 },
         )];
-        let output_bits = vec![
-            BoolAtom::Temp(0),
-            BoolAtom::InputBit { arg: 0, bit: 3 },
-        ];
+        let output_bits = vec![BoolAtom::Temp(0), BoolAtom::InputBit { arg: 0, bit: 3 }];
         let plan = BitCircuitPlan {
             bindings,
             output_bits,
@@ -1867,11 +2152,7 @@ mod tests {
             BoolNode::Xor(BoolAtom::Temp(0), BoolAtom::InputBit { arg: 0, bit: 3 }),
             BoolNode::Atom(BoolAtom::InputBit { arg: 0, bit: 4 }),
         ];
-        let output_bits = vec![
-            BoolAtom::Temp(1),
-            BoolAtom::Temp(2),
-            BoolAtom::Temp(3),
-        ];
+        let output_bits = vec![BoolAtom::Temp(1), BoolAtom::Temp(2), BoolAtom::Temp(3)];
         let plan = BitCircuitPlan {
             bindings,
             output_bits,

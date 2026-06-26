@@ -15,6 +15,10 @@ use sygus_parser::ast::SyGuSTerm;
 /// Algebraic properties of grammar/term operators, recognized from `(assume …)`.
 #[derive(Default, Debug)]
 pub struct OpLaws {
+    /// Binary commutative operators: `(F x y) = (F y x)`.
+    pub binary_comm: HashSet<String>,
+    /// Binary idempotent operators: `(F x x) = x`.
+    pub binary_idemp: HashSet<String>,
     /// Associative operators (nested applications flatten into a sequence).
     pub assoc: HashSet<String>,
     /// "Set-cons" operators: an unordered collection built along a spine.
@@ -24,6 +28,10 @@ pub struct OpLaws {
     pub set_commute: bool,
     /// The collection is duplicate-insensitive (dedup elements).
     pub set_idemp: bool,
+    /// Set-cons elements that are neutral for a specific cons operator.
+    /// For example, a CFG self-unit production `S -> S` can be dropped from the
+    /// rule set without changing the least language.
+    pub set_drop: HashMap<String, HashSet<String>>,
 }
 
 impl OpLaws {
@@ -37,6 +45,15 @@ impl OpLaws {
             if let Some(f) = rec_assoc(l, r) {
                 laws.assoc.insert(f);
             }
+            if let Some(f) = rec_assoc(r, l) {
+                laws.assoc.insert(f);
+            }
+            if let Some(f) = rec_commute(l, r) {
+                laws.binary_comm.insert(f);
+            }
+            if let Some(f) = rec_idemp(l, r).or_else(|| rec_idemp(r, l)) {
+                laws.binary_idemp.insert(f);
+            }
             if let Some((f, g)) = rec_spine_commute(l, r) {
                 laws.set_ops.insert(f, (0, 1));
                 laws.set_ops.insert(g, (0, 1));
@@ -46,8 +63,23 @@ impl OpLaws {
                 laws.set_ops.entry(f).or_insert((0, 1));
                 laws.set_idemp = true;
             }
+            if let Some((f, elem)) = rec_spine_drop(l, r).or_else(|| rec_spine_drop(r, l)) {
+                laws.set_ops.entry(f.clone()).or_insert((0, 1));
+                laws.set_drop.entry(f).or_default().insert(elem);
+            }
         }
         laws
+    }
+}
+
+impl OpLaws {
+    pub fn binary_class(&self, op: &str) -> crate::enumerate::grammar::RuleClass {
+        crate::enumerate::grammar::RuleClass {
+            commutative: self.binary_comm.contains(op),
+            idempotent: self.binary_idemp.contains(op),
+            associative: self.assoc.contains(op),
+            ..Default::default()
+        }
     }
 }
 
@@ -65,6 +97,29 @@ fn as_var(t: &SyGuSTerm) -> Option<&str> {
     match t {
         SyGuSTerm::Identifier(id) => Some(id.get_name()),
         _ => None,
+    }
+}
+
+/// `(F x y) = (F y x)` ⇒ `F` commutative.
+fn rec_commute(l: &SyGuSTerm, r: &SyGuSTerm) -> Option<String> {
+    let (f, x, y) = as_bin(l)?;
+    let (fr, y2, x2) = as_bin(r)?;
+    let (x, y, x2, y2) = (as_var(x)?, as_var(y)?, as_var(x2)?, as_var(y2)?);
+    if f == fr && x == x2 && y == y2 && x != y {
+        Some(f.to_string())
+    } else {
+        None
+    }
+}
+
+/// `(F x x) = x` ⇒ `F` idempotent.
+fn rec_idemp(l: &SyGuSTerm, r: &SyGuSTerm) -> Option<String> {
+    let (f, x, y) = as_bin(l)?;
+    let (x, y, r) = (as_var(x)?, as_var(y)?, as_var(r)?);
+    if x == y && x == r {
+        Some(f.to_string())
+    } else {
+        None
     }
 }
 
@@ -109,5 +164,32 @@ fn rec_spine_idemp(l: &SyGuSTerm, r: &SyGuSTerm) -> Option<String> {
         Some(f.to_string())
     } else {
         None
+    }
+}
+
+/// `(F elem t) = t` ⇒ `elem` is neutral in `F`'s collection spine.
+fn rec_spine_drop(l: &SyGuSTerm, r: &SyGuSTerm) -> Option<(String, String)> {
+    let (f, elem, tail) = as_bin(l)?;
+    let tail = as_var(tail)?;
+    if as_var(r)? == tail {
+        Some((f.to_string(), term_key(elem)?))
+    } else {
+        None
+    }
+}
+
+fn term_key(t: &SyGuSTerm) -> Option<String> {
+    match t {
+        SyGuSTerm::Identifier(id) => Some(id.get_name().to_string()),
+        SyGuSTerm::Application(id, args) => {
+            if args.is_empty() {
+                Some(id.get_name().to_string())
+            } else {
+                let parts = args.iter().map(term_key).collect::<Option<Vec<_>>>()?;
+                Some(format!("({} {})", id.get_name(), parts.join(" ")))
+            }
+        }
+        SyGuSTerm::Annotated(inner, _) => term_key(inner),
+        _ => None,
     }
 }

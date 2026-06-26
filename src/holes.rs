@@ -63,7 +63,7 @@ pub struct HoleSpec {
     prods: HashMap<String, Vec<Tmpl>>,
     /// The input's define-funs, sent to the solver once as the base scope.
     defines: Vec<DefFun>,
-    /// The constraint expressions, asserted (verbatim) per skeleton.
+    /// The constraint expressions, asserted once in the solver base scope.
     constraints: Vec<String>,
     /// Operator laws for canonical dedup (from `(assume …)`).
     laws: crate::laws::OpLaws,
@@ -142,22 +142,13 @@ impl HoleSpec {
     /// Enumerate skeletons in increasing size; for each, SMT-solve the holes.
     /// Returns the inner `(define-fun …)` for the first satisfiable skeleton.
     pub fn solve(&self) -> crate::SolverResult<String> {
-        // Solver backend. z3 is the default and wins the *common* case: most
-        // skeletons are refuted in z3's preprocessing (no bit-blast), ~ms each
-        // incrementally. bitwuzla solves the expensive blast-bound skeletons
-        // ~2x faster, but — measured — it does not reuse the blasted base across
-        // push/pop, so each cheap skeleton costs it ~0.5s (≈ a fresh solve),
-        // making it ~10x slower overall here. Kept opt-in via
-        // `DRYAD_HOLE_SOLVER=bitwuzla` (useful for the blast-bound tail / a
-        // future per-skeleton portfolio), not the default.
-        let use_bitwuzla = std::env::var("DRYAD_HOLE_SOLVER").is_ok_and(|s| s == "bitwuzla");
-        let solver_name = if use_bitwuzla { "bitwuzla" } else { "z3" };
+        let recursive = self.is_recursive();
         info!(
-            "const-hole search: synth={} start={} nonterminals={} recursive={} solver={solver_name}",
+            "const-hole: synth={} start={} nts={} recursive={} solver=z3",
             self.synth_name,
             self.start,
             self.prods.len(),
-            self.is_recursive(),
+            recursive,
         );
         let max_size: usize = std::env::var("DRYAD_HOLE_MAX_SIZE")
             .ok()
@@ -168,7 +159,6 @@ impl HoleSpec {
         // on an empty size (completeness). A finite grammar has a maximum size;
         // once skeletons stop appearing for longer than any derivation, we're
         // done. Small sizes are legitimately empty before the minimum tree.
-        let recursive = self.is_recursive();
         let empty_cap = self.prods.len() + 2;
         let mut seen_any = false;
         let mut empty_streak = 0usize;
@@ -176,42 +166,16 @@ impl HoleSpec {
         // One persistent solver session: the (heavy) define-funs are sent once
         // as the base scope, then each skeleton is solved in a push/pop frame.
         // This amortizes process startup + define-fun setup across all skeletons.
-        let conf = if use_bitwuzla {
-            // bitwuzla speaks interactive SMT-LIB2 like yices-2; point the
-            // binary at it and ask for models (`-m`).
-            let mut conf = SmtConf::yices_2("bitwuzla");
-            conf.option("--lang");
-            conf.option("smt2");
-            conf.option("-m");
-            conf
-        } else {
-            SmtConf::default_z3()
-        };
+        let conf = SmtConf::default_z3();
         let mut solver = conf
             .spawn(Parser)
-            .map_err(|e| format!("failed to spawn {solver_name} (is it on PATH?): {e}"))?;
+            .map_err(|e| format!("failed to spawn z3 (is it on PATH?): {e}"))?;
         solver
             .set_logic(rsmt2::Logic::QF_BV)
-            .map_err(|e| format!("{solver_name} set-logic: {e}"))?;
-        // NB on solver strategy: a scenario-tuned tactic — `(then simplify
-        // ackermannize_bv aig smt)` — is ~4x faster than the default *per
-        // expensive query* (it abstracts the founded encoding's many `bvult`s
-        // over packed rank fields instead of eagerly bit-blasting them). But
-        // setting it as `:tactic.default_tactic` routes every check-sat through
-        // the *non-incremental* tactic, which costs the cheap majority their
-        // incremental fast path (measured: size<=7 8.4s -> 25s end-to-end). So
-        // it must be applied selectively (a per-skeleton portfolio: incremental
-        // z3 for the cheap path, ackermannized re-solve only for the slow tail),
-        // not as a global default. Left for that future change.
-        //
-        // Incremental-kernel set-options *were* swept here (they don't leave the
-        // incremental solver, so they can't regress the cheap path like the
-        // tactic does) — none helped end-to-end on the founded encoding:
-        // smt.bv.size_reduce / smt.bv.delay / smt.bv.watch_diseq / polysat
-        // (smt.bv.solver=1) / intblast (=2) were all ≥ baseline;
-        // rewriter.bv_extract_prop was ~10% (within noise). The accelerators
-        // that do help (ackermannize_bv, aig, bv-size-reduction, max-bv-sharing)
-        // live only in the non-incremental `qfbv` tactic, hence the portfolio.
+            .map_err(|e| format!("z3 set-logic: {e}"))?;
+        solver
+            .declare_const(self.synth_name.as_str(), self.ret_sort.as_str())
+            .map_err(|e| format!("z3 declare {}: {e}", self.synth_name))?;
         for d in &self.defines {
             solver
                 .define_fun(
@@ -222,7 +186,11 @@ impl HoleSpec {
                 )
                 .map_err(|e| format!("z3 define-fun {}: {e}", d.name))?;
         }
-
+        for c in &self.constraints {
+            solver
+                .assert(c.as_str())
+                .map_err(|e| format!("z3 assert: {e}"))?;
+        }
         // Canonical-form dedup: skeletons that denote the same grammar (modulo
         // the declared operator laws) have the same SAT result, so we check one
         // representative per canonical key.
@@ -243,8 +211,9 @@ impl HoleSpec {
             }
             seen_any = true;
             empty_streak = 0;
-            info!("const-hole: size {size}: {} skeleton(s)", skels.len());
             let size_start = std::time::Instant::now();
+            let size_tried_start = tried;
+            let size_deduped_start = deduped;
             for skel in &skels {
                 if !seen.insert(canon(skel, &self.laws)) {
                     deduped += 1;
@@ -265,8 +234,8 @@ impl HoleSpec {
                 if let Some(values) = res {
                     let filled = render(skel, &mut Vec::new(), Some(&values));
                     info!(
-                        "const-hole: SAT after {tried} skeletons (size {size}, {:?} at this size)",
-                        size_start.elapsed()
+                        "const-hole: sat size={size} checked={tried} deduped={deduped} elapsed={:?}",
+                        size_start.elapsed(),
                     );
                     return Ok(format!(
                         "(define-fun {} () {} {})",
@@ -275,10 +244,134 @@ impl HoleSpec {
                 }
             }
             debg!(
-                "const-hole: size {size} exhausted ({tried} checked, {deduped} deduped)"
+                "const-hole: size={size} skeletons={} checked={} deduped={} total_checked={} total_deduped={} elapsed={:?}",
+                skels.len(),
+                tried - size_tried_start,
+                deduped - size_deduped_start,
+                tried,
+                deduped,
+                size_start.elapsed(),
             );
         }
         Err("const-hole: no solution within DRYAD_HOLE_MAX_SIZE".into())
+    }
+
+    /// Enumerate skeletons in increasing size against a refuter query. A SAT
+    /// result means the skeleton has a counterexample certificate and is pruned;
+    /// the first UNSAT skeleton is returned.
+    pub fn solve_refuter(&self) -> crate::SolverResult<String> {
+        let recursive = self.is_recursive();
+        info!(
+            "const-hole refuter: synth={} start={} nts={} recursive={} solver=z3",
+            self.synth_name,
+            self.start,
+            self.prods.len(),
+            recursive,
+        );
+        let max_size: usize = std::env::var("DRYAD_HOLE_MAX_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(usize::MAX);
+
+        let empty_cap = self.prods.len() + 2;
+        let mut seen_any = false;
+        let mut empty_streak = 0usize;
+
+        let conf = SmtConf::default_z3();
+        let mut solver = conf
+            .spawn(Parser)
+            .map_err(|e| format!("failed to spawn z3 (is it on PATH?): {e}"))?;
+        solver
+            .set_logic(rsmt2::Logic::QF_BV)
+            .map_err(|e| format!("z3 set-logic: {e}"))?;
+        solver
+            .declare_const(self.synth_name.as_str(), self.ret_sort.as_str())
+            .map_err(|e| format!("z3 declare {}: {e}", self.synth_name))?;
+        for d in &self.defines {
+            solver
+                .define_fun(
+                    d.name.as_str(),
+                    d.args.iter().map(|(n, s)| (n.as_str(), s.as_str())),
+                    d.ret.as_str(),
+                    d.body.as_str(),
+                )
+                .map_err(|e| format!("z3 define-fun {}: {e}", d.name))?;
+        }
+        for c in &self.constraints {
+            solver
+                .assert(c.as_str())
+                .map_err(|e| format!("z3 assert: {e}"))?;
+        }
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut deduped = 0usize;
+        let mut tried = 0usize;
+        for size in 0..=max_size {
+            let skels = self.gen(&self.start, size, &mut Vec::new());
+            if skels.is_empty() {
+                if !recursive && seen_any {
+                    empty_streak += 1;
+                    if empty_streak > empty_cap {
+                        break;
+                    }
+                }
+                continue;
+            }
+            seen_any = true;
+            empty_streak = 0;
+            let size_start = std::time::Instant::now();
+            let size_tried_start = tried;
+            let size_deduped_start = deduped;
+            for skel in &skels {
+                if !seen.insert(canon(skel, &self.laws)) {
+                    deduped += 1;
+                    continue;
+                }
+                let mut sorts = Vec::new();
+                let body = render(skel, &mut sorts, None);
+                tried += 1;
+                let t = std::time::Instant::now();
+                let refuted = self.check_refuter(&mut solver, &body, &sorts)?;
+                debg!(
+                    "refuter skeleton #{tried} (size {size}, {} holes): {} in {:?} — {}",
+                    sorts.len(),
+                    if refuted {
+                        "SAT/refuted"
+                    } else {
+                        "unsat/accepted"
+                    },
+                    t.elapsed(),
+                    summarize(&body)
+                );
+                if !refuted {
+                    let defaults = sorts
+                        .iter()
+                        .map(|sort| {
+                            default_value(sort)
+                                .ok_or_else(|| format!("no default value for hole sort {sort}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let filled = render(skel, &mut Vec::new(), Some(&defaults));
+                    info!(
+                        "const-hole refuter: accepted size={size} checked={tried} deduped={deduped} elapsed={:?}",
+                        size_start.elapsed(),
+                    );
+                    return Ok(format!(
+                        "(define-fun {} () {} {})",
+                        self.synth_name, self.ret_sort, filled
+                    ));
+                }
+            }
+            debg!(
+                "const-hole refuter: size={size} skeletons={} checked={} deduped={} total_checked={} total_deduped={} elapsed={:?}",
+                skels.len(),
+                tried - size_tried_start,
+                deduped - size_deduped_start,
+                tried,
+                deduped,
+                size_start.elapsed(),
+            );
+        }
+        Err("const-hole refuter: no unrefuted candidate within DRYAD_HOLE_MAX_SIZE".into())
     }
 
     /// Whether some nonterminal can reach itself through structural
@@ -402,22 +495,18 @@ impl HoleSpec {
                 .declare_const(format!("h{i}"), sort.as_str())
                 .map_err(|e| format!("z3 declare h{i}: {e}"))?;
         }
-        solver
-            .define_fun(
-                self.synth_name.as_str(),
-                std::iter::empty::<(&str, &str)>(),
-                self.ret_sort.as_str(),
-                body,
-            )
-            .map_err(|e| format!("z3 define {}: {e}", self.synth_name))?;
-        for c in &self.constraints {
-            solver.assert(c.as_str()).map_err(|e| format!("z3 assert: {e}"))?;
-        }
-        let sat = solver.check_sat().map_err(|e| format!("z3 check-sat: {e}"))?;
+        self.assert_full_skeleton(solver, body)?;
+        let sat = solver
+            .check_sat()
+            .map_err(|e| format!("z3 check-sat: {e}"))?;
         let result = if sat {
-            let model = solver.get_model().map_err(|e| format!("z3 get-model: {e}"))?;
-            let vals: HashMap<String, String> =
-                model.into_iter().map(|(name, _, _, value)| (name, value)).collect();
+            let model = solver
+                .get_model()
+                .map_err(|e| format!("z3 get-model: {e}"))?;
+            let vals: HashMap<String, String> = model
+                .into_iter()
+                .map(|(name, _, _, value)| (name, value))
+                .collect();
             let values = (0..hole_sorts.len())
                 .map(|i| {
                     vals.get(&format!("h{i}"))
@@ -431,6 +520,40 @@ impl HoleSpec {
         };
         solver.pop(1).map_err(|e| format!("z3 pop: {e}"))?;
         Ok(result)
+    }
+
+    /// Refuter mode only needs SAT/UNSAT. On SAT the skeleton is discarded, so
+    /// do not request a model for annotation holes.
+    fn check_refuter(
+        &self,
+        solver: &mut Solver<Parser>,
+        body: &str,
+        hole_sorts: &[String],
+    ) -> crate::SolverResult<bool> {
+        solver.push(1).map_err(|e| format!("z3 push: {e}"))?;
+        for (i, sort) in hole_sorts.iter().enumerate() {
+            solver
+                .declare_const(format!("h{i}"), sort.as_str())
+                .map_err(|e| format!("z3 declare h{i}: {e}"))?;
+        }
+        self.assert_full_skeleton(solver, body)?;
+        let sat = solver
+            .check_sat()
+            .map_err(|e| format!("z3 check-sat: {e}"))?;
+        solver.pop(1).map_err(|e| format!("z3 pop: {e}"))?;
+        Ok(sat)
+    }
+
+    fn assert_full_skeleton(
+        &self,
+        solver: &mut Solver<Parser>,
+        body: &str,
+    ) -> crate::SolverResult<()> {
+        let bind_synth = format!("(= {} {body})", self.synth_name);
+        solver
+            .assert(bind_synth.as_str())
+            .map_err(|e| format!("z3 assert skeleton: {e}"))?;
+        Ok(())
     }
 }
 
@@ -482,6 +605,22 @@ fn render(skel: &Skel, sorts: &mut Vec<String>, values: Option<&[String]>) -> St
     }
 }
 
+fn bitvec_width(sort: &str) -> Option<usize> {
+    sort.strip_prefix("(_ BitVec ")
+        .and_then(|rest| rest.strip_suffix(')'))?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn default_value(sort: &str) -> Option<String> {
+    if sort == "Bool" {
+        return Some("false".to_string());
+    }
+    let width = bitvec_width(sort)?;
+    Some(format!("(_ bv0 {width})"))
+}
+
 // ---------------------------------------------------------------------------
 //  Canonical keys (apply the recognized `OpLaws` to a skeleton).
 // ---------------------------------------------------------------------------
@@ -489,7 +628,9 @@ fn render(skel: &Skel, sorts: &mut Vec<String>, values: Option<&[String]>) -> St
 /// Structural children (the `Constant` holes — always trailing `Ann` args —
 /// carry no grammar meaning, so they're dropped from the canonical key).
 fn structural(kids: &[Skel]) -> Vec<&Skel> {
-    kids.iter().filter(|k| !matches!(k, Skel::Hole(_))).collect()
+    kids.iter()
+        .filter(|k| !matches!(k, Skel::Hole(_)))
+        .collect()
 }
 
 /// Canonical key of a skeleton modulo the declared laws: associative ops are
@@ -508,7 +649,14 @@ fn canon(skel: &Skel, laws: &crate::laws::OpLaws) -> String {
                         break;
                     };
                     let st = structural(k);
-                    elems.push(canon(st[ei], laws));
+                    let elem = canon(st[ei], laws);
+                    if !laws
+                        .set_drop
+                        .get(h)
+                        .is_some_and(|drop| drop.contains(&elem))
+                    {
+                        elems.push(elem);
+                    }
                     cur = st[si];
                 }
                 if laws.set_commute {
@@ -595,10 +743,8 @@ fn product(pools: &[Vec<Skel>]) -> Vec<Vec<Skel>> {
 }
 
 // ---------------------------------------------------------------------------
-//  SMT backend — z3 via rsmt2 (mirrors cegis.rs). z3 measured fastest on these
-//  founded-annotation QF_BV queries (UNSAT-dominated, wide bit-vectors):
-//  ~1.4× over cvc5 and ~2× over bitwuzla. Solver values are read back as raw
-//  source strings and substituted verbatim into the skeleton.
+//  SMT backend — z3 via rsmt2 (mirrors cegis.rs). Solver values are read back
+//  as raw source strings and substituted verbatim into the skeleton.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
