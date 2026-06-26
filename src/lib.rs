@@ -10,10 +10,10 @@ use figment::{
 #[cfg(feature = "chatgpt")]
 use itertools::Itertools;
 use parse::{constraint::parse_ref_impl, deffun, ProgramEnv};
-use sygus_parser::ast::{SyGuSCmd, SyGuSFile};
 #[cfg(feature = "chatgpt")]
 use std::sync::mpsc;
 use std::{env, thread};
+use sygus_parser::ast::{SyGuSCmd, SyGuSFile};
 
 use crate::{exact::Constraint, parse::SynthProblem, search::search::SearchConfig};
 
@@ -23,9 +23,9 @@ pub mod chatgpt;
 mod deductive;
 pub mod enumerate;
 mod exact;
-mod holes;
 pub mod fwd_decls;
 pub mod hash;
+mod holes;
 mod laws;
 pub mod log;
 pub mod parse;
@@ -37,28 +37,28 @@ type SolverResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 impl SynthProblem<'_> {
     fn has_ite(&self) -> bool {
-    fn term_has_ite(term: &sygus_parser::ast::SyGuSTerm) -> bool {
-        match term {
-            sygus_parser::ast::SyGuSTerm::Application(id, args) => {
-                id.get_name() == "ite" || args.iter().any(term_has_ite)
+        fn term_has_ite(term: &sygus_parser::ast::SyGuSTerm) -> bool {
+            match term {
+                sygus_parser::ast::SyGuSTerm::Application(id, args) => {
+                    id.get_name() == "ite" || args.iter().any(term_has_ite)
+                }
+                sygus_parser::ast::SyGuSTerm::Annotated(inner, _) => term_has_ite(inner),
+                sygus_parser::ast::SyGuSTerm::Let(bindings, body) => {
+                    bindings.iter().any(|binding| term_has_ite(&binding.term)) || term_has_ite(body)
+                }
+                sygus_parser::ast::SyGuSTerm::Forall(_, body)
+                | sygus_parser::ast::SyGuSTerm::Exists(_, body) => term_has_ite(body),
+                _ => false,
             }
-            sygus_parser::ast::SyGuSTerm::Annotated(inner, _) => term_has_ite(inner),
-            sygus_parser::ast::SyGuSTerm::Let(bindings, body) => {
-                bindings.iter().any(|binding| term_has_ite(&binding.term)) || term_has_ite(body)
-            }
-            sygus_parser::ast::SyGuSTerm::Forall(_, body)
-            | sygus_parser::ast::SyGuSTerm::Exists(_, body) => term_has_ite(body),
-            _ => false,
         }
-    }
 
-    self.cfg.iter().any(|nt| {
-        nt.1.iter().any(|rule| match rule {
-            sygus_parser::ast::SyGuSGTerm::SyGuSTerm(term) => term_has_ite(&term),
-            _ => false,
+        self.cfg.iter().any(|nt| {
+            nt.1.iter().any(|rule| match rule {
+                sygus_parser::ast::SyGuSGTerm::SyGuSTerm(term) => term_has_ite(&term),
+                _ => false,
+            })
         })
-    })
-}
+    }
 }
 
 fn run_cegis_with_large_stack(
@@ -212,22 +212,21 @@ fn solve_file_inner(
     // names in Application position (producing `SynthApp`) — needed for
     // parent-spec emissions from delis (`(g a_arg b_arg c_arg)` inside
     // a Kleene-chain define-fun body).
-    let synth_registry: Vec<deffun::SynthEntry> = view
-        .synth_funs
-        .iter()
-        .map(|sf| -> SolverResult<_> {
-            let ret_bits = view
-                .sort_aliases
-                .parse_sort_width(sf.ret)
-                .ok_or_else(|| format!("synth-fun {} return sort: not a bit-vector", sf.name))?
-                as usize;
-            Ok(deffun::SynthEntry {
-                name: sf.name.to_string(),
-                arity: sf.args.len(),
-                ret_bits,
+    let synth_registry: Vec<deffun::SynthEntry> =
+        view.synth_funs
+            .iter()
+            .map(|sf| -> SolverResult<_> {
+                let ret_bits =
+                    view.sort_aliases.parse_sort_width(sf.ret).ok_or_else(|| {
+                        format!("synth-fun {} return sort: not a bit-vector", sf.name)
+                    })? as usize;
+                Ok(deffun::SynthEntry {
+                    name: sf.name.to_string(),
+                    arity: sf.args.len(),
+                    ret_bits,
+                })
             })
-        })
-        .collect::<SolverResult<Vec<_>>>()?;
+            .collect::<SolverResult<Vec<_>>>()?;
     deffun::set_synth_registry(&synth_registry);
     deffun::ENV.parse_from_view(&view)?;
 
@@ -258,7 +257,8 @@ fn solve_file_inner(
                 spec.bits(),
                 spec.labels().len()
             );
-            return spec.search(&deffun::ENV)?
+            return spec
+                .search(&deffun::ENV)?
                 .ok_or_else(|| "lfp: no solution".to_string().into());
         }
     }
@@ -270,7 +270,10 @@ fn solve_file_inner(
     if let Some(spec) = exact::Constraint::from_file(file, &problem)? {
         debg!(
             "exact search: {} (bits={}, examples={}, cmds={})",
-            problem.name, problem.bits, spec.num_examples(), file.cmds.len()
+            problem.name,
+            problem.bits,
+            spec.num_examples(),
+            file.cmds.len()
         );
         if let Ok(probe) = env::var("DRYAD_PROBE_G") {
             probe_candidate(&probe, &spec, &view)?;
@@ -311,9 +314,7 @@ fn solve_file_inner(
             Constraint::empty(problem.args.len(), problem.bits),
         )?;
         Ok(problem.format_solution(&result))
-    } else if let Some(ref_impl) =
-        parse_ref_impl(&view, problem.name, problem.args.len())?
-    {
+    } else if let Some(ref_impl) = parse_ref_impl(&view, problem.name, problem.args.len())? {
         let original_problem = problem.clone();
         let defaults = if problem.has_ite() {
             SearchConfig::default_refimpl()
@@ -347,12 +348,19 @@ fn solve_file_inner(
             let (sender, receiver) = mpsc::channel();
             let sd = sender.clone();
             let _ = thread::spawn({
-                let (config, problem, ref_impl) = (config.clone(), problem.clone(), ref_impl.clone());
+                let (config, problem, ref_impl) =
+                    (config.clone(), problem.clone(), ref_impl.clone());
                 move || sd.send(run_cegis_with_large_stack(config, problem, ref_impl))
             });
             let _ = thread::spawn(move || {
                 log::set_log_level(l);
-                let pbe = parse::constraint::generate_pbe(&ref_impl, 3, problem.args.len(), problem.bits, &mut config.rng());
+                let pbe = parse::constraint::generate_pbe(
+                    &ref_impl,
+                    3,
+                    problem.args.len(),
+                    problem.bits,
+                    &mut config.rng(),
+                );
                 info!("Use ChatGPT to guide the search");
                 let result = chatgpt::ask(&problem, pbe.clone(), config.gpt_version.clone());
                 info!("Use ChatGPT to guide the search: {:?}", result);
@@ -369,7 +377,13 @@ fn solve_file_inner(
                 let map = chatgpt::collect_subexpr(result);
                 let v = map
                     .into_iter()
-                    .flat_map(|(e, i)| if i >= 4 && e.size() < 10 { Some(e) } else { None })
+                    .flat_map(|(e, i)| {
+                        if i >= 4 && e.size() < 10 {
+                            Some(e)
+                        } else {
+                            None
+                        }
+                    })
                     .collect_vec();
                 if !v.is_empty() {
                     info!("Use ChatGPT to guide the search: {:?}", v);
@@ -395,6 +409,22 @@ fn solve_file_inner(
         )
         .into())
     }
+}
+
+fn solve_refuter_file_inner(
+    file: &SyGuSFile,
+    _config_path: Option<&str>,
+    description: String,
+    _min: bool,
+) -> SolverResult<String> {
+    let view = ProgramEnv::from_file(file);
+    if let Some(spec) = holes::HoleSpec::detect(&view) {
+        return spec.solve_refuter();
+    }
+    Err(format!(
+        "Unsupported refuter SyGuS benchmark shape for {description}: expected a nullary const-hole task"
+    )
+    .into())
 }
 
 pub fn solve_sygus_file(
@@ -423,6 +453,32 @@ pub fn solve_sygus_file(
     Ok(format!("(\n{}\n)", result))
 }
 
+pub fn solve_refuter_sygus_file(
+    file: &SyGuSFile,
+    config_path: Option<&str>,
+    description: &str,
+    verbose: u8,
+    min: bool,
+) -> SolverResult<String> {
+    log::set_log_level(verbose + 2);
+    unsafe {
+        env::set_var("RUST_MIN_STACK", "268435456");
+    }
+    const MAIN_STACK_SIZE: usize = 256 * 1024 * 1024;
+    let file = file.clone();
+    let config_path = config_path.map(str::to_string);
+    let description = description.to_string();
+    let handle = thread::Builder::new()
+        .name("main-worker".to_string())
+        .stack_size(MAIN_STACK_SIZE)
+        .spawn(move || solve_refuter_file_inner(&file, config_path.as_deref(), description, min))
+        .map_err(|e| format!("failed to spawn main worker: {e}"))?;
+    let result = handle
+        .join()
+        .map_err(|_| "main worker panicked".to_string())??;
+    Ok(format!("(\n{}\n)", result))
+}
+
 pub fn solve_sygus_cmds(
     cmds: &[SyGuSCmd],
     config_path: Option<&str>,
@@ -430,7 +486,9 @@ pub fn solve_sygus_cmds(
     verbose: u8,
     min: bool,
 ) -> SolverResult<String> {
-    let file = SyGuSFile { cmds: cmds.to_vec() };
+    let file = SyGuSFile {
+        cmds: cmds.to_vec(),
+    };
     match solve_sygus_file(&file, config_path, description, verbose, min) {
         Ok(result) => Ok(result),
         Err(err) => {
@@ -442,8 +500,8 @@ pub fn solve_sygus_cmds(
             sygus_parser::writer::write_cmds(&mut normalized, cmds)?;
             normalized.push(b'\n');
             let normalized = String::from_utf8(normalized)?;
-            let reparsed =
-                SyGuSFile::from_str(&normalized).map_err(|e| format!("failed to normalize SyGuS commands: {e}"))?;
+            let reparsed = SyGuSFile::from_str(&normalized)
+                .map_err(|e| format!("failed to normalize SyGuS commands: {e}"))?;
             solve_sygus_file(&reparsed, config_path, description, verbose, min)
         }
     }
