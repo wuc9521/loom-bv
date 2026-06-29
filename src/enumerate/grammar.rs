@@ -142,18 +142,26 @@ fn classify_op(op: &str, child_nts: &[usize]) -> RuleClass {
     let same_nt_pair = child_nts.len() == 2 && child_nts[0] == child_nts[1];
     // Native BV ops have known properties without needing probing.
     match op {
-        "bvudiv" | "bvurem" | "bvsdiv" | "bvsrem" => return RuleClass {
-            nonzero_rhs: child_nts.len() == 2,
-            ..Default::default()
-        },
-        "bvlshr" | "bvashr" | "bvshl" => return RuleClass {
-            shift_rhs_literal: child_nts.len() == 2,
-            ..Default::default()
-        },
+        "bvudiv" | "bvurem" | "bvsdiv" | "bvsrem" => {
+            return RuleClass {
+                nonzero_rhs: child_nts.len() == 2,
+                ..Default::default()
+            }
+        }
+        "bvlshr" | "bvashr" | "bvshl" => {
+            return RuleClass {
+                shift_rhs_literal: child_nts.len() == 2,
+                ..Default::default()
+            }
+        }
         _ => {}
     }
     if let Some(fid) = deffun::ENV.lookup(op, child_nts.len()) {
-        return deffun::ENV.prove_properties(fid, same_nt_pair);
+        return if same_nt_pair {
+            deffun::ENV.declared_class(fid)
+        } else {
+            RuleClass::default()
+        };
     }
     match op {
         "bvadd" | "bvmul" | "bvxor" => RuleClass {

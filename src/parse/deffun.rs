@@ -2,7 +2,6 @@ use std::cell::UnsafeCell;
 use std::hash::{Hash, Hasher};
 
 use derive_more::DebugCustom;
-use rsmt2::{SmtConf, Solver};
 use rustc_hash::{FxHashMap, FxHasher};
 use sygus_parser::ast::SyGuSFile;
 
@@ -35,8 +34,6 @@ struct EvalCacheState {
 thread_local! {
     static EVAL_CACHE_STATE: std::cell::RefCell<EvalCacheState> =
         std::cell::RefCell::new(EvalCacheState::default());
-    static PROPERTY_CACHE: std::cell::RefCell<FxHashMap<usize, RuleClass>> =
-        std::cell::RefCell::new(FxHashMap::default());
 
     /// Per-thread synth-fun registry: (name, arity, ret_bits) → synth_idx.
     /// Populated in `solve_file_inner` from `ProgramEnv.synth_funs` before
@@ -940,83 +937,6 @@ impl BoolAtom {
         bindings.push(node);
         BoolAtom::Temp(idx)
     }
-
-    /// Bit `bit` (LSB = 0) of an arbitrary expression in the bit-blastable
-    /// fragment `{Const, Var, Extract, Concat, Not, And, Or, Xor, Ite, BVult,
-    /// BVule}`. This is what lets the founded encoding — which moves multi-bit
-    /// rank fields through `concat`/`extract`/`ite` and compares them with
-    /// `bvult` — lower to a `BitCircuit` instead of falling back to `Generic`.
-    /// `None` for anything outside the fragment (arithmetic), bailing to Generic.
-    fn bit_of(
-        expr: &OwnedExpr,
-        bit: usize,
-        nargs: usize,
-        bindings: &mut Vec<BoolNode>,
-        let_offsets: &[usize],
-        dedup: &mut rustc_hash::FxHashMap<BoolNode, usize>,
-    ) -> Option<Self> {
-        macro_rules! rec {
-            ($e:expr, $b:expr) => {
-                Self::bit_of($e, $b, nargs, bindings, let_offsets, dedup)?
-            };
-        }
-        match expr {
-            OwnedExpr::Const(value) if bit < value.bits() => Some(Self::Const(value.bit(bit))),
-            OwnedExpr::Var(idx, w) if *idx < nargs => {
-                (bit < *w).then_some(Self::InputBit { arg: *idx, bit })
-            }
-            // A let-bound variable holds a 1-bit value at its recorded slot.
-            OwnedExpr::Var(idx, _) if bit == 0 => {
-                let li = idx.checked_sub(nargs)?;
-                let_offsets.get(li).copied().map(Self::Temp)
-            }
-            // Bit `bit` of slice `[lo..=hi]` is bit `lo+bit` of the source.
-            OwnedExpr::Extract(src, _hi, lo) => {
-                Self::bit_of(src, *lo as usize + bit, nargs, bindings, let_offsets, dedup)
-            }
-            // SMT `(concat high low)`: low occupies the low `width(low)` bits.
-            OwnedExpr::Concat(high, low) => {
-                let lw = low.width();
-                if bit < lw {
-                    Self::bit_of(low, bit, nargs, bindings, let_offsets, dedup)
-                } else {
-                    Self::bit_of(high, bit - lw, nargs, bindings, let_offsets, dedup)
-                }
-            }
-            OwnedExpr::Not(a) => Some(Self::intern(BoolNode::Not(rec!(a, bit)), bindings, dedup)),
-            OwnedExpr::And(a, b) => Some(Self::intern(
-                BoolNode::And(rec!(a, bit), rec!(b, bit)),
-                bindings,
-                dedup,
-            )),
-            OwnedExpr::Or(a, b) => Some(Self::intern(
-                BoolNode::Or(rec!(a, bit), rec!(b, bit)),
-                bindings,
-                dedup,
-            )),
-            OwnedExpr::Xor(a, b) => Some(Self::intern(
-                BoolNode::Xor(rec!(a, bit), rec!(b, bit)),
-                bindings,
-                dedup,
-            )),
-            // `ite` condition is 1-bit; each result bit selects per-bit.
-            OwnedExpr::Ite(c, t, e) => Some(Self::intern(
-                BoolNode::Ite(rec!(c, 0), rec!(t, bit), rec!(e, bit)),
-                bindings,
-                dedup,
-            )),
-            // Comparators are a 1-bit boolean function of the operand bits.
-            OwnedExpr::BVult(a, b) if bit == 0 => {
-                let cmp = ult_owned(a, b, a.width())?;
-                Self::bit_of(&cmp, 0, nargs, bindings, let_offsets, dedup)
-            }
-            OwnedExpr::BVule(a, b) if bit == 0 => {
-                let cmp = OwnedExpr::Not(Box::new(ult_owned(b, a, a.width())?));
-                Self::bit_of(&cmp, 0, nargs, bindings, let_offsets, dedup)
-            }
-            _ => None,
-        }
-    }
 }
 
 impl BoolNode {
@@ -1130,6 +1050,162 @@ fn value_from_words(words: Vec<u64>, bits: usize) -> BitVec {
     }
 }
 
+fn compile_bit_vector(
+    expr: &OwnedExpr,
+    nargs: usize,
+    bindings: &mut Vec<BoolNode>,
+    let_offsets: &[usize],
+    dedup: &mut rustc_hash::FxHashMap<BoolNode, usize>,
+) -> Option<Vec<BoolAtom>> {
+    let unary = |atoms: Vec<BoolAtom>,
+                 bindings: &mut Vec<BoolNode>,
+                 dedup: &mut rustc_hash::FxHashMap<BoolNode, usize>| {
+        atoms
+            .into_iter()
+            .map(|atom| BoolAtom::intern(BoolNode::Not(atom), bindings, dedup))
+            .collect::<Vec<_>>()
+    };
+    let binary = |lhs: Vec<BoolAtom>,
+                  rhs: Vec<BoolAtom>,
+                  make: fn(BoolAtom, BoolAtom) -> BoolNode,
+                  bindings: &mut Vec<BoolNode>,
+                  dedup: &mut rustc_hash::FxHashMap<BoolNode, usize>| {
+        (lhs.len() == rhs.len()).then(|| {
+            lhs.into_iter()
+                .zip(rhs)
+                .map(|(a, b)| BoolAtom::intern(make(a, b), bindings, dedup))
+                .collect::<Vec<_>>()
+        })
+    };
+
+    let bits = match expr {
+        OwnedExpr::Const(value) => (0..value.bits())
+            .map(|bit| BoolAtom::Const(value.bit(bit)))
+            .collect(),
+        OwnedExpr::Var(idx, width) if *idx < nargs => (0..*width)
+            .map(|bit| BoolAtom::InputBit { arg: *idx, bit })
+            .collect(),
+        OwnedExpr::Var(idx, width) if *width == 1 => {
+            let let_idx = idx.checked_sub(nargs)?;
+            vec![BoolAtom::Temp(*let_offsets.get(let_idx)?)]
+        }
+        OwnedExpr::Extract(src, hi, lo) => {
+            let src_bits = compile_bit_vector(src, nargs, bindings, let_offsets, dedup)?;
+            let lo = *lo as usize;
+            let hi = *hi as usize;
+            if lo > hi || hi >= src_bits.len() {
+                return None;
+            }
+            src_bits[lo..=hi].to_vec()
+        }
+        OwnedExpr::Concat(high, low) => {
+            let mut out = compile_bit_vector(low, nargs, bindings, let_offsets, dedup)?;
+            out.extend(compile_bit_vector(
+                high,
+                nargs,
+                bindings,
+                let_offsets,
+                dedup,
+            )?);
+            out
+        }
+        OwnedExpr::Not(inner) => unary(
+            compile_bit_vector(inner, nargs, bindings, let_offsets, dedup)?,
+            bindings,
+            dedup,
+        ),
+        OwnedExpr::And(lhs, rhs) => binary(
+            compile_bit_vector(lhs, nargs, bindings, let_offsets, dedup)?,
+            compile_bit_vector(rhs, nargs, bindings, let_offsets, dedup)?,
+            BoolNode::And,
+            bindings,
+            dedup,
+        )?,
+        OwnedExpr::Or(lhs, rhs) => binary(
+            compile_bit_vector(lhs, nargs, bindings, let_offsets, dedup)?,
+            compile_bit_vector(rhs, nargs, bindings, let_offsets, dedup)?,
+            BoolNode::Or,
+            bindings,
+            dedup,
+        )?,
+        OwnedExpr::Xor(lhs, rhs) => binary(
+            compile_bit_vector(lhs, nargs, bindings, let_offsets, dedup)?,
+            compile_bit_vector(rhs, nargs, bindings, let_offsets, dedup)?,
+            BoolNode::Xor,
+            bindings,
+            dedup,
+        )?,
+        OwnedExpr::Ite(cond, then_expr, else_expr) => {
+            let cond = compile_bit_vector(cond, nargs, bindings, let_offsets, dedup)?;
+            if cond.len() != 1 {
+                return None;
+            }
+            let then_bits = compile_bit_vector(then_expr, nargs, bindings, let_offsets, dedup)?;
+            let else_bits = compile_bit_vector(else_expr, nargs, bindings, let_offsets, dedup)?;
+            if then_bits.len() != else_bits.len() {
+                return None;
+            }
+            then_bits
+                .into_iter()
+                .zip(else_bits)
+                .map(|(then_bit, else_bit)| {
+                    BoolAtom::intern(
+                        BoolNode::Ite(cond[0].clone(), then_bit, else_bit),
+                        bindings,
+                        dedup,
+                    )
+                })
+                .collect()
+        }
+        OwnedExpr::BVult(lhs, rhs) => {
+            let lhs = compile_bit_vector(lhs, nargs, bindings, let_offsets, dedup)?;
+            let rhs = compile_bit_vector(rhs, nargs, bindings, let_offsets, dedup)?;
+            vec![compile_ult_bits(&lhs, &rhs, bindings, dedup)?]
+        }
+        OwnedExpr::BVule(lhs, rhs) => {
+            let lhs = compile_bit_vector(lhs, nargs, bindings, let_offsets, dedup)?;
+            let rhs = compile_bit_vector(rhs, nargs, bindings, let_offsets, dedup)?;
+            let lt = compile_ult_bits(&rhs, &lhs, bindings, dedup)?;
+            vec![BoolAtom::intern(BoolNode::Not(lt), bindings, dedup)]
+        }
+        _ => return None,
+    };
+    (bits.len() == expr.width()).then_some(bits)
+}
+
+fn compile_ult_bits(
+    lhs: &[BoolAtom],
+    rhs: &[BoolAtom],
+    bindings: &mut Vec<BoolNode>,
+    dedup: &mut rustc_hash::FxHashMap<BoolNode, usize>,
+) -> Option<BoolAtom> {
+    if lhs.len() != rhs.len() {
+        return None;
+    }
+    let mut lt = BoolAtom::Const(false);
+    for (a, b) in lhs.iter().cloned().zip(rhs.iter().cloned()) {
+        let a_lt_b = BoolAtom::intern(
+            BoolNode::And(
+                BoolAtom::intern(BoolNode::Not(a.clone()), bindings, dedup),
+                b.clone(),
+            ),
+            bindings,
+            dedup,
+        );
+        let a_xor_b = BoolAtom::intern(BoolNode::Xor(a, b), bindings, dedup);
+        let a_eq_b = BoolAtom::intern(BoolNode::Not(a_xor_b), bindings, dedup);
+        lt = BoolAtom::intern(
+            BoolNode::Or(
+                a_lt_b,
+                BoolAtom::intern(BoolNode::And(a_eq_b, lt), bindings, dedup),
+            ),
+            bindings,
+            dedup,
+        );
+    }
+    Some(lt)
+}
+
 impl BitCircuitPlan {
     /// Try to compile a define-fun body into a flat boolean circuit.
     /// Handles let-bindings (must be 1-bit each), then a concat tree whose
@@ -1153,21 +1229,11 @@ impl BitCircuitPlan {
         if let OwnedExpr::Const(_) = current {
             return None;
         }
-        // Lower each output bit through the bit-blastable fragment. `bit_of`
-        // handles multi-bit data movement (concat/extract/ite) and comparators
-        // (bvult), so bodies that aren't a flat concat of 1-bit leaves — like
-        // the founded encoding, which routes 15-bit rank fields — still compile.
-        let mut output_bits = Vec::with_capacity(ret_bits);
         let mut dedup = rustc_hash::FxHashMap::default();
-        for j in 0..ret_bits {
-            output_bits.push(BoolAtom::bit_of(
-                current,
-                j,
-                nargs,
-                &mut bindings,
-                &let_offsets,
-                &mut dedup,
-            )?);
+        let output_bits =
+            compile_bit_vector(current, nargs, &mut bindings, &let_offsets, &mut dedup)?;
+        if output_bits.len() != ret_bits {
+            return None;
         }
         let mut seen_inputs = rustc_hash::FxHashSet::default();
         for node in &bindings {
@@ -1561,7 +1627,6 @@ impl Environ {
 
     pub fn clear(&self) {
         self.inner().clear();
-        PROPERTY_CACHE.with(|cache| cache.borrow_mut().clear());
     }
 
     pub fn parse_from_file(&self, file: &SyGuSFile) -> Result<(), Error> {
@@ -1651,6 +1716,9 @@ impl Environ {
     pub fn name(&self, id: usize) -> &'static str {
         &self.inner()[id].name
     }
+    pub fn declared_class(&self, id: usize) -> RuleClass {
+        self.inner()[id].declared_class
+    }
     pub fn eval_defined(
         &self,
         id: usize,
@@ -1676,116 +1744,6 @@ impl Environ {
         let v = f.eval(self, args, bindings)?;
         EVAL_CACHE_STATE.with(|c| c.borrow_mut().map.insert(key, v.clone()));
         Ok(v)
-    }
-
-    pub fn prove_properties(&self, fid: usize, same_nt_pair: bool) -> RuleClass {
-        if !same_nt_pair {
-            return RuleClass::default();
-        }
-        if let Some(class) = PROPERTY_CACHE.with(|cache| cache.borrow().get(&fid).copied()) {
-            return class;
-        }
-
-        let fun = self.deffun(fid);
-        if rule_class_any(fun.declared_class) {
-            debg!(
-                "properties {}: commutative={} idempotent={} associative={} source=axiom",
-                fun.name,
-                fun.declared_class.commutative,
-                fun.declared_class.idempotent,
-                fun.declared_class.associative,
-            );
-            PROPERTY_CACHE.with(|cache| {
-                cache.borrow_mut().insert(fid, fun.declared_class);
-            });
-            return fun.declared_class;
-        }
-        let proof_start = std::time::Instant::now();
-        let class = if fun.arg_bits.len() == 2
-            && fun.arg_bits[0] == fun.arg_bits[1]
-            && fun.ret_bits == fun.arg_bits[0]
-        {
-            match self.prove_binary_properties(fid) {
-                Ok(class) => class,
-                Err(err) => {
-                    debg!("property proof failed for {}: {}", fun.name, err);
-                    RuleClass::default()
-                }
-            }
-        } else {
-            RuleClass::default()
-        };
-        debg!(
-            "properties {}: commutative={} idempotent={} associative={} proof_ms={}",
-            fun.name,
-            class.commutative,
-            class.idempotent,
-            class.associative,
-            proof_start.elapsed().as_millis()
-        );
-        PROPERTY_CACHE.with(|cache| {
-            cache.borrow_mut().insert(fid, class);
-        });
-        class
-    }
-
-    fn prove_binary_properties(&self, fid: usize) -> Result<RuleClass, rsmt2::errors::Error> {
-        let mut solver = Solver::new(SmtConf::default_z3(), ())?;
-        solver.set_logic(rsmt2::Logic::QF_BV)?;
-        solver.set_option(":timeout", 5_000)?;
-
-        let fun = self.deffun(fid);
-        let args = fun
-            .args
-            .iter()
-            .zip(&fun.arg_bits)
-            .map(|(name, bits)| ((*name).to_string(), format!("(_ BitVec {bits})")))
-            .collect::<Vec<_>>();
-        solver.define_fun(
-            fun.name,
-            args.iter()
-                .map(|(name, sort)| (name.as_str(), sort.as_str())),
-            format!("(_ BitVec {})", fun.ret_bits),
-            fun.expr.to_sygus(&fun.args),
-        )?;
-
-        let sort = format!("(_ BitVec {})", fun.arg_bits[0]);
-        solver.declare_const("prop_x", &sort)?;
-        solver.declare_const("prop_y", &sort)?;
-        solver.declare_const("prop_z", &sort)?;
-
-        let app = |lhs: &str, rhs: &str| format!("({} {lhs} {rhs})", fun.name);
-        let commutative = prove_unsat(
-            &mut solver,
-            "commutative",
-            format!(
-                "(not (= {} {}))",
-                app("prop_x", "prop_y"),
-                app("prop_y", "prop_x")
-            ),
-        );
-        let idempotent = prove_unsat(
-            &mut solver,
-            "idempotent",
-            format!("(not (= {} prop_x))", app("prop_x", "prop_x")),
-        );
-        let associative = prove_unsat(
-            &mut solver,
-            "associative",
-            format!(
-                "(not (= {} {}))",
-                app(&app("prop_x", "prop_y"), "prop_z"),
-                app("prop_x", &app("prop_y", "prop_z"))
-            ),
-        );
-
-        Ok(RuleClass {
-            commutative,
-            idempotent: idempotent && commutative,
-            associative,
-            nonzero_rhs: false,
-            shift_rhs_literal: false,
-        })
     }
 
     /// Enable the thread-local eval-defined memo cache. Used by the
@@ -1825,32 +1783,6 @@ impl Environ {
             c.enabled = false;
         });
     }
-}
-
-fn prove_unsat(solver: &mut Solver<()>, property: &str, assertion: String) -> bool {
-    let start = std::time::Instant::now();
-    if solver.push(1).is_err() {
-        return false;
-    }
-    let result = match solver.assert(assertion).and_then(|_| solver.check_sat()) {
-        Ok(sat) => !sat,
-        Err(err) => {
-            debg!("{} property check failed: {}", property, err);
-            false
-        }
-    };
-    let _ = solver.pop(1);
-    debg!(
-        "{} property result={} proof_ms={}",
-        property,
-        result,
-        start.elapsed().as_millis()
-    );
-    result
-}
-
-fn rule_class_any(class: RuleClass) -> bool {
-    class.commutative || class.idempotent || class.associative
 }
 
 /// True iff the grammar is just `((<NT> <Sort> ((Constant <Sort>))))` — the
