@@ -486,23 +486,11 @@ pub fn solve_sygus_cmds(
     verbose: u8,
     min: bool,
 ) -> SolverResult<String> {
-    let file = SyGuSFile {
-        cmds: cmds.to_vec(),
-    };
-    match solve_sygus_file(&file, config_path, description, verbose, min) {
-        Ok(result) => Ok(result),
-        Err(err) => {
-            let message = err.to_string();
-            if !message.contains("Unsupported SyGuS benchmark shape") {
-                return Err(err);
-            }
-            let mut normalized = Vec::new();
-            sygus_parser::writer::write_cmds(&mut normalized, cmds)?;
-            normalized.push(b'\n');
-            let normalized = String::from_utf8(normalized)?;
-            let reparsed = SyGuSFile::from_str(&normalized)
-                .map_err(|e| format!("failed to normalize SyGuS commands: {e}"))?;
-            solve_sygus_file(&reparsed, config_path, description, verbose, min)
-        }
-    }
+    let mut normalized = Vec::new();
+    sygus_parser::writer::write_cmds(&mut normalized, cmds)?;
+    normalized.push(b'\n');
+    let normalized = String::from_utf8(normalized)?;
+    let reparsed = SyGuSFile::from_str(&normalized)
+        .map_err(|e| format!("failed to normalize SyGuS commands: {e}"))?;
+    solve_sygus_file(&reparsed, config_path, description, verbose, min)
 }
