@@ -64,42 +64,46 @@ impl CegisState {
             });
             match a {
                 Some(Ok(true)) => {
-                let model = solver
-                    .get_model()
-                    .map_err(|e| format!("failed to read verifier model: {e}"))?;
-                let mut args = (0..self.arg_widths.len())
-                    .map(|_| BitVec::zero(self.bits))
-                    .collect_vec();
-                for (name, _, _, value) in model.into_iter() {
-                    let value = parse_solver_bv(&value, self.bits);
-                    let index = VAR_NAMES
-                        .iter()
-                        .enumerate()
-                        .find(|(_i, x)| x == &&&name)
-                        .unwrap()
-                        .0;
-                    args[index] = value;
-                }
-                if let Ok(out) = self.ref_impl.eval(&*args) {
-                    self.examples.add_example(&*args, out.clone());
-                    info!("{:?} can not be verified. {:?} -> {}", expr, args, out);
-                    return Ok(false);
-                } else {
-                    let statement = if let [a] = &*args {
-                        format!("(distinct v0 {})", a.to_smt_hex())
+                    let model = solver
+                        .get_model()
+                        .map_err(|e| format!("failed to read verifier model: {e}"))?;
+                    let mut args = (0..self.arg_widths.len())
+                        .map(|_| BitVec::zero(self.bits))
+                        .collect_vec();
+                    for (name, _, _, value) in model.into_iter() {
+                        let value = parse_solver_bv(&value, self.bits);
+                        let index = VAR_NAMES
+                            .iter()
+                            .enumerate()
+                            .find(|(_i, x)| x == &&&name)
+                            .unwrap()
+                            .0;
+                        args[index] = value;
+                    }
+                    if let Ok(out) = self.ref_impl.eval(&*args) {
+                        self.examples.add_example(&*args, out.clone());
+                        info!("{:?} can not be verified. {:?} -> {}", expr, args, out);
+                        return Ok(false);
                     } else {
-                        format!(
-                            "(not (and {}))",
-                            args.iter()
-                                .enumerate()
-                                .map(|(i, x)| format!("(= {} {})", VAR_NAMES[i], x.to_smt_hex()))
-                                .join(" ")
-                        )
-                    };
-                    solver
-                        .assert(statement)
-                        .map_err(|e| format!("failed to refine verifier constraint: {e}"))?;
-                }
+                        let statement = if let [a] = &*args {
+                            format!("(distinct v0 {})", a.to_smt_hex())
+                        } else {
+                            format!(
+                                "(not (and {}))",
+                                args.iter()
+                                    .enumerate()
+                                    .map(|(i, x)| format!(
+                                        "(= {} {})",
+                                        VAR_NAMES[i],
+                                        x.to_smt_hex()
+                                    ))
+                                    .join(" ")
+                            )
+                        };
+                        solver
+                            .assert(statement)
+                            .map_err(|e| format!("failed to refine verifier constraint: {e}"))?;
+                    }
                 }
                 Some(Ok(false)) => return Ok(true),
                 Some(Err(e)) => return Err(format!("verifier solver check_sat failed: {e}")),

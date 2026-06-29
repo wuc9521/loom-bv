@@ -19,7 +19,11 @@ impl Iterator for BitIter {
         } else {
             let b = self.0 & 1;
             self.0 = self.0 >> 1;
-            if b == 0 { Some(false) } else { Some(true) }
+            if b == 0 {
+                Some(false)
+            } else {
+                Some(true)
+            }
         }
     }
 }
@@ -46,7 +50,11 @@ impl Iterator for OnePosIter {
     fn next(&mut self) -> Option<Self::Item> {
         let a = self.0.trailing_zeros();
         self.0 = self.0 & !(1 << a);
-        if a == 64 { None } else { Some(a) }
+        if a == 64 {
+            None
+        } else {
+            Some(a)
+        }
     }
 }
 
@@ -77,9 +85,8 @@ impl Iterator for TSubsetIter {
                 }
                 return Some(self.1);
             }
-            
         }
-        
+
         return None;
     }
 }
@@ -111,7 +118,9 @@ impl Iterator for CombIter {
             if self.0 != 0 {
                 self.0 = 0;
                 return Some(cur);
-            } else { return None; }
+            } else {
+                return None;
+            }
         }
         self.0 = self.0 & !u64::bits(0, fo + 1) | u64::bits(fo - to - 1, fo);
         Some(cur)
@@ -125,16 +134,14 @@ impl CombIter {
     }
 }
 
-
-
-
-
 #[extension_trait]
 pub impl BitSetU64Ext for u64 {
     fn from_bits(iter: impl Iterator<Item = bool>) -> u64 {
         let mut result = 0;
         for (i, p) in iter.enumerate() {
-            if p { result |= 1 << i; }
+            if p {
+                result |= 1 << i;
+            }
         }
         result
     }
@@ -153,11 +160,11 @@ pub impl BitSetU64Ext for u64 {
     fn subset_iter(self) -> SubsetIter {
         SubsetIter::new(self)
     }
-    fn split_iter(self) -> impl Iterator<Item=(u64, u64)> {
-        self.subset_iter().flat_map(move |i|{
-            i.subset_iter().chain([0u64].into_iter()).map(move |j| {
-                (i, (self & !i) | j)
-            })
+    fn split_iter(self) -> impl Iterator<Item = (u64, u64)> {
+        self.subset_iter().flat_map(move |i| {
+            i.subset_iter()
+                .chain([0u64].into_iter())
+                .map(move |j| (i, (self & !i) | j))
         })
     }
     fn pos_of_subset(self, other: u64) -> u64 {
@@ -172,7 +179,9 @@ pub impl BitSetU64Ext for u64 {
     fn subset_of_pos(self, other: u64) -> u64 {
         let mut res = 0u64;
         for (i, p) in self.one_iter().zip(other.bit_iter()) {
-            if p { res |= i }
+            if p {
+                res |= i
+            }
         }
         return res;
     }
@@ -188,10 +197,10 @@ pub impl BitSetU64Ext for u64 {
     }
     fn combs(self, r: u64) -> u64 {
         self.fact() / (r.fact() * (self - r).fact())
-    }    
+    }
     fn comb_iter(self, r: u64) -> CombIter {
         CombIter::new(r as u32, self as u32)
-    }    
+    }
 }
 
 #[cfg(test)]
@@ -212,21 +221,23 @@ mod tests {
             println!("{:?}", v);
             assert!(v.len() == (1 << p.count_ones()) - 1);
         }
-        
+
         let a = 0x17.split_iter().collect_vec();
         println!("{:?}", a);
-        
     }
     #[test]
     fn test_b() {
-        for (r, n) in [(2u64, 6u64), (7, 12), (8, 15) ] {
+        for (r, n) in [(2u64, 6u64), (7, 12), (8, 15)] {
             let v = n.comb_iter(r).collect_vec();
             assert_eq!(v.len(), n.combs(r) as usize);
         }
     }
 }
 
-pub fn run_with_timeout<T: Send + 'static>(duration: u64, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+pub fn run_with_timeout<T: Send + 'static>(
+    duration: u64,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
     let (tx, rx) = mpsc::channel();
     let l = log::log_level();
     let _ = thread::spawn(move || {

@@ -21,10 +21,7 @@ impl BitVec {
         if bits <= 64 {
             let mask = mask_u64(bits);
             let raw = raw & mask;
-            BitVec::Small {
-                bits,
-                raw,
-            }
+            BitVec::Small { bits, raw }
         } else {
             let raw = truncate_big(BigUint::from(raw), bits);
             BitVec::Big {
@@ -37,10 +34,7 @@ impl BitVec {
     pub fn from_biguint(raw: BigUint, bits: usize) -> Self {
         if bits <= 64 {
             let raw = (raw & BigUint::from(mask_u64(bits))).to_u64().unwrap_or(0);
-            BitVec::Small {
-                bits,
-                raw,
-            }
+            BitVec::Small { bits, raw }
         } else {
             let raw = truncate_big(raw, bits);
             BitVec::Big {
@@ -55,10 +49,19 @@ impl BitVec {
             let raw = words.first().copied().unwrap_or(0) & mask_u64(bits);
             BitVec::Small { bits, raw }
         } else {
-            let raw = truncate_big(BigUint::from_slice(
-                &words.iter().flat_map(|w| [*w as u32, (*w >> 32) as u32]).collect::<Vec<_>>()
-            ), bits);
-            BitVec::Big { bits, raw: Arc::new(raw) }
+            let raw = truncate_big(
+                BigUint::from_slice(
+                    &words
+                        .iter()
+                        .flat_map(|w| [*w as u32, (*w >> 32) as u32])
+                        .collect::<Vec<_>>(),
+                ),
+                bits,
+            );
+            BitVec::Big {
+                bits,
+                raw: Arc::new(raw),
+            }
         }
     }
 
@@ -94,7 +97,12 @@ impl BitVec {
     pub fn count_ones(&self) -> u32 {
         match self {
             BitVec::Small { raw, .. } => raw.count_ones(),
-            BitVec::Big { raw, .. } => raw.as_ref().to_u64_digits().iter().map(|d| d.count_ones()).sum(),
+            BitVec::Big { raw, .. } => raw
+                .as_ref()
+                .to_u64_digits()
+                .iter()
+                .map(|d| d.count_ones())
+                .sum(),
         }
     }
 
@@ -257,7 +265,10 @@ impl BitVec {
         let bits = self.bits();
         if bits <= 3 {
             let raw = self.as_u64_lossy();
-            let bin: String = (0..bits).rev().map(|i| if (raw >> i) & 1 == 1 { '1' } else { '0' }).collect();
+            let bin: String = (0..bits)
+                .rev()
+                .map(|i| if (raw >> i) & 1 == 1 { '1' } else { '0' })
+                .collect();
             return format!("#b{}", bin);
         }
         let hex_len = bits.div_ceil(4).max(1);
@@ -328,7 +339,11 @@ impl BitVec {
             let modulo = BigUint::one() << bits;
             let a = self.to_biguint();
             let b = rhs.to_biguint();
-            let r = if a >= b { a - b } else { modulo.clone() - (b - a) };
+            let r = if a >= b {
+                a - b
+            } else {
+                modulo.clone() - (b - a)
+            };
             Self::from_biguint(r, bits)
         }
     }
@@ -404,9 +419,15 @@ impl BitVec {
         }
         let bits = self.bits();
         if bits <= 64 {
-            Some(Self::from_u64(self.as_u64_lossy() / rhs.as_u64_lossy(), bits))
+            Some(Self::from_u64(
+                self.as_u64_lossy() / rhs.as_u64_lossy(),
+                bits,
+            ))
         } else {
-            Some(Self::from_biguint(self.to_biguint() / rhs.to_biguint(), bits))
+            Some(Self::from_biguint(
+                self.to_biguint() / rhs.to_biguint(),
+                bits,
+            ))
         }
     }
 
@@ -416,9 +437,15 @@ impl BitVec {
         }
         let bits = self.bits();
         if bits <= 64 {
-            Some(Self::from_u64(self.as_u64_lossy() % rhs.as_u64_lossy(), bits))
+            Some(Self::from_u64(
+                self.as_u64_lossy() % rhs.as_u64_lossy(),
+                bits,
+            ))
         } else {
-            Some(Self::from_biguint(self.to_biguint() % rhs.to_biguint(), bits))
+            Some(Self::from_biguint(
+                self.to_biguint() % rhs.to_biguint(),
+                bits,
+            ))
         }
     }
 
@@ -465,7 +492,8 @@ impl BitVec {
         if (&unsigned & &sign_bit).is_zero() {
             BigInt::from_biguint(Sign::Plus, unsigned)
         } else {
-            BigInt::from_biguint(Sign::Plus, unsigned) - BigInt::from_biguint(Sign::Plus, BigUint::one() << bits)
+            BigInt::from_biguint(Sign::Plus, unsigned)
+                - BigInt::from_biguint(Sign::Plus, BigUint::one() << bits)
         }
     }
 

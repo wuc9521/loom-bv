@@ -11,18 +11,18 @@
 
 use std::time::Instant;
 
-use crate::{debg, info};
 use crate::enumerate::{
     expr::OwnedExpr,
-    grammar::{for_each_candidate_tuple, for_each_size_split, Config},
+    grammar::{for_each_size_split, Config, TemplateExpr},
     value::BitVec,
 };
 use crate::exact::dedup::SeenMode;
 use crate::exact::stats::DedupStats;
-use crate::exact::types::{Candidate, ExactEvalCache, Grammar, ExactRule, Node, NodeId};
+use crate::exact::types::{Candidate, ExactEvalCache, ExactRule, Grammar, Node, NodeId};
 use crate::exact::verifier::Verifier;
-use crate::parse::{self, deffun, SynthProblem};
 use crate::parse::deffun::BitCircuitPlan;
+use crate::parse::{self, deffun, SynthProblem};
+use crate::{debg, info};
 
 pub fn run_search<'a>(
     grammar: Grammar<'a>,
@@ -104,8 +104,12 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     if let Some(pruned) = plan.pruned(nt_relevant) {
                         debg!(
                             "COI: nt[{}] fid={} pruned {}/{} bindings, inputs {}/{}",
-                            nt_idx, fid, pruned.bindings.len(), plan.bindings.len(),
-                            pruned.input_slots.len(), plan.input_slots.len()
+                            nt_idx,
+                            fid,
+                            pruned.bindings.len(),
+                            plan.bindings.len(),
+                            pruned.input_slots.len(),
+                            plan.input_slots.len()
                         );
                         pruned_plans.insert((nt_idx, fid), std::rc::Rc::new(pruned));
                     }
@@ -158,8 +162,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 let mut changed = false;
                 for nt_idx in 0..self.grammar.nts.len() {
                     for rule_idx in 0..self.grammar.nts[nt_idx].1.len() {
-                        let ExactRule::Alias(child_nt) =
-                            &self.grammar.nts[nt_idx].1[rule_idx]
+                        let ExactRule::Alias(child_nt) = &self.grammar.nts[nt_idx].1[rule_idx]
                         else {
                             continue;
                         };
@@ -235,8 +238,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 let mut changed = false;
                 for nt_idx in 0..self.grammar.nts.len() {
                     for rule_idx in 0..self.grammar.nts[nt_idx].1.len() {
-                        let ExactRule::Alias(child_nt) =
-                            &self.grammar.nts[nt_idx].1[rule_idx]
+                        let ExactRule::Alias(child_nt) = &self.grammar.nts[nt_idx].1[rule_idx]
                         else {
                             continue;
                         };
@@ -281,27 +283,27 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 let Some(values) = self.eval_leaf(&expr) else {
                     return Ok(None);
                 };
-                Ok(self.try_push_new(
+                Ok(self.try_push_new(nt_idx, size, values, || Node {
                     nt_idx,
-                    size,
-                    values,
-                    || Node { nt_idx, rule_idx, children: Vec::new() },
-                ))
+                    rule_idx,
+                    children: Vec::new(),
+                }))
             }
-            ExactRule::Op { fid, child_nts, class } => {
+            ExactRule::Op {
+                fid,
+                child_nts,
+                class,
+            } => {
                 if size <= child_nts.len() {
                     return Ok(None);
                 }
                 let child_total = size - 1;
-                let mut staged: Vec<(Vec<BitVec>, Vec<NodeId>)> = Vec::new();
-                let by_size = &self.by_size;
                 let num_examples = self.num_examples;
-                let nodes = &self.nodes;
-                let assoc_skip_lhs = class.associative
-                    && child_nts.len() == 2
-                    && child_nts[0] == child_nts[1];
+                let assoc_skip_lhs =
+                    class.associative && child_nts.len() == 2 && child_nts[0] == child_nts[1];
                 let nary_pruned = self.pruned_plans.get(&(nt_idx, fid)).cloned();
-                let nary_batch_plan: Option<&BitCircuitPlan> = nary_pruned.as_deref()
+                let nary_batch_plan: Option<&BitCircuitPlan> = nary_pruned
+                    .as_deref()
                     .or_else(|| deffun::ENV.deffun(fid).bit_circuit_plan());
                 let use_batch = nary_batch_plan.is_some_and(|p| p.bindings.len() > 256);
                 let mut splits = Vec::with_capacity(child_nts.len());
@@ -312,116 +314,143 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     let mut batch_nodes: Vec<Vec<NodeId>> = Vec::with_capacity(64);
                     let mut batch_args: Vec<Vec<BitVec>> = Vec::with_capacity(64);
 
-                    let flush_batch = |batch_nodes: &mut Vec<Vec<NodeId>>,
-                                       batch_args: &mut Vec<Vec<BitVec>>,
-                                       staged: &mut Vec<(Vec<BitVec>, Vec<NodeId>)>,
-                                       plan: &BitCircuitPlan,
-                                       k: usize| {
-                        let count = batch_nodes.len();
-                        if count == 0 { return; }
-
-                        let staged_base = staged.len();
-                        for j in 0..count {
-                            staged.push((Vec::with_capacity(k), batch_nodes[j].clone()));
-                        }
-                        let refs: Vec<&[BitVec]> = batch_args.iter().map(|a| a.as_slice()).collect();
-                        for i in 0..k {
-                            let example_refs: Vec<&[BitVec]> = (0..count)
-                                .map(|j| refs[j * k + i])
-                                .collect();
-                            let results = plan.eval_batch(&example_refs, count);
-                            for (j, val) in results.into_iter().enumerate() {
-                                staged[staged_base + j].0.push(val);
-                            }
-                        }
-
-                        batch_nodes.clear();
-                        batch_args.clear();
-                    };
-
-                    let enqueue_tuple = |tuple: &[&Candidate],
-                                              batch_nodes: &mut Vec<Vec<NodeId>>,
-                                              batch_args: &mut Vec<Vec<BitVec>>,
-                                              staged: &mut Vec<(Vec<BitVec>, Vec<NodeId>)>,
-                                              plan: &BitCircuitPlan,
-                                              k: usize| {
-                        if assoc_skip_lhs && nodes[tuple[0].node].rule_idx == rule_idx {
-                            return;
-                        }
-                        let children: Vec<NodeId> = tuple.iter().map(|c| c.node).collect();
-                        for i in 0..k {
-                            let args: Vec<BitVec> = tuple.iter().map(|c| c.values[i].clone()).collect();
-                            batch_args.push(args);
-                        }
-                        batch_nodes.push(children);
-                        if batch_nodes.len() == 64 {
-                            flush_batch(batch_nodes, batch_args, staged, plan, k);
-                        }
-                    };
-
                     let is_binary_same_nt = nargs == 2 && child_nts[0] == child_nts[1];
                     if is_binary_same_nt && class.commutative {
                         let nt = child_nts[0];
+                        let tuple_child_nts = [nt, nt];
                         for lhs_size in 1..=child_total / 2 {
                             let rhs_size = child_total - lhs_size;
-                            let lhs_pool = by_size[nt].get(lhs_size).map(Vec::as_slice).unwrap_or(&[]);
-                            let rhs_pool = by_size[nt].get(rhs_size).map(Vec::as_slice).unwrap_or(&[]);
-                            if lhs_pool.is_empty() || rhs_pool.is_empty() { continue; }
+                            let lhs_len = self.pool_len(nt, lhs_size);
+                            let rhs_len = self.pool_len(nt, rhs_size);
+                            if lhs_len == 0 || rhs_len == 0 {
+                                continue;
+                            }
+                            let tuple_sizes = [lhs_size, rhs_size];
                             if lhs_size == rhs_size {
-                                for (i, lhs) in lhs_pool.iter().enumerate() {
-                                    let start = if class.idempotent { i + 1 } else { i };
-                                    for rhs in &rhs_pool[start..] {
-                                        enqueue_tuple(&[lhs, rhs], &mut batch_nodes, &mut batch_args, &mut staged, plan, k);
+                                for lhs_idx in 0..lhs_len {
+                                    let start = if class.idempotent {
+                                        lhs_idx + 1
+                                    } else {
+                                        lhs_idx
+                                    };
+                                    for rhs_idx in start..rhs_len {
+                                        let tuple_indices = [lhs_idx, rhs_idx];
+                                        self.enqueue_batch_from_indices(
+                                            &tuple_child_nts,
+                                            &tuple_sizes,
+                                            &tuple_indices,
+                                            rule_idx,
+                                            assoc_skip_lhs,
+                                            &mut batch_nodes,
+                                            &mut batch_args,
+                                            k,
+                                        );
+                                        if batch_nodes.len() == 64 {
+                                            if let Some(found) = self.flush_eval_batch(
+                                                nt_idx,
+                                                rule_idx,
+                                                size,
+                                                &mut batch_nodes,
+                                                &mut batch_args,
+                                                plan,
+                                                k,
+                                            ) {
+                                                return Ok(Some(found));
+                                            }
+                                        }
                                     }
                                 }
                             } else {
-                                for lhs in lhs_pool {
-                                    for rhs in rhs_pool {
-                                        enqueue_tuple(&[lhs, rhs], &mut batch_nodes, &mut batch_args, &mut staged, plan, k);
+                                for lhs_idx in 0..lhs_len {
+                                    for rhs_idx in 0..rhs_len {
+                                        let tuple_indices = [lhs_idx, rhs_idx];
+                                        self.enqueue_batch_from_indices(
+                                            &tuple_child_nts,
+                                            &tuple_sizes,
+                                            &tuple_indices,
+                                            rule_idx,
+                                            assoc_skip_lhs,
+                                            &mut batch_nodes,
+                                            &mut batch_args,
+                                            k,
+                                        );
+                                        if batch_nodes.len() == 64 {
+                                            if let Some(found) = self.flush_eval_batch(
+                                                nt_idx,
+                                                rule_idx,
+                                                size,
+                                                &mut batch_nodes,
+                                                &mut batch_args,
+                                                plan,
+                                                k,
+                                            ) {
+                                                return Ok(Some(found));
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     } else {
-                        for_each_size_split(
-                            child_total,
-                            nargs,
-                            &mut splits,
-                            &mut |sizes| {
-                                let pools: Vec<&[Candidate]> = child_nts
-                                    .iter()
-                                    .zip(sizes.iter())
-                                    .map(|(child_nt, child_size)| {
-                                        by_size[*child_nt]
-                                            .get(*child_size)
-                                            .map(Vec::as_slice)
-                                            .unwrap_or(&[][..])
-                                    })
-                                    .collect();
-                                if pools.iter().any(|pool| pool.is_empty()) {
-                                    return;
+                        let mut found = None;
+                        for_each_size_split(child_total, nargs, &mut splits, &mut |sizes| {
+                            if found.is_some() {
+                                return;
+                            }
+                            let pool_lens: Vec<usize> = child_nts
+                                .iter()
+                                .zip(sizes.iter())
+                                .map(|(child_nt, child_size)| self.pool_len(*child_nt, *child_size))
+                                .collect();
+                            if pool_lens.iter().any(|len| *len == 0) {
+                                return;
+                            }
+                            let mut indices = Vec::with_capacity(nargs);
+                            for_each_index_tuple(&pool_lens, &mut indices, &mut |indices| {
+                                if !self.enqueue_batch_from_indices(
+                                    &child_nts,
+                                    sizes,
+                                    indices,
+                                    rule_idx,
+                                    assoc_skip_lhs,
+                                    &mut batch_nodes,
+                                    &mut batch_args,
+                                    k,
+                                ) {
+                                    return false;
                                 }
-                                let mut tuple = Vec::with_capacity(nargs);
-                                for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
-                                    if assoc_skip_lhs && nodes[tuple[0].node].rule_idx == rule_idx {
-                                        return;
+                                if batch_nodes.len() == 64 {
+                                    if let Some(result) = self.flush_eval_batch(
+                                        nt_idx,
+                                        rule_idx,
+                                        size,
+                                        &mut batch_nodes,
+                                        &mut batch_args,
+                                        plan,
+                                        k,
+                                    ) {
+                                        found = Some(result);
+                                        return true;
                                     }
-                                    let children: Vec<NodeId> = tuple.iter().map(|c| c.node).collect();
-                                    for i in 0..k {
-                                        let args: Vec<BitVec> = tuple.iter().map(|c| c.values[i].clone()).collect();
-                                        batch_args.push(args);
-                                    }
-                                    batch_nodes.push(children);
-
-                                    if batch_nodes.len() == 64 {
-                                        flush_batch(&mut batch_nodes, &mut batch_args, &mut staged, plan, k);
-                                    }
-                                });
-                            },
-                        );
+                                }
+                                false
+                            });
+                        });
+                        if let Some(found) = found {
+                            return Ok(Some(found));
+                        }
                     }
-                    // flush remaining
-                    flush_batch(&mut batch_nodes, &mut batch_args, &mut staged, plan, k);
+                    if let Some(found) = self.flush_eval_batch(
+                        nt_idx,
+                        rule_idx,
+                        size,
+                        &mut batch_nodes,
+                        &mut batch_args,
+                        plan,
+                        k,
+                    ) {
+                        return Ok(Some(found));
+                    }
                 } else {
                     let is_binary_same_nt = child_nts.len() == 2 && child_nts[0] == child_nts[1];
 
@@ -430,19 +459,27 @@ impl<'a, 'g> Searcher<'a, 'g> {
                         let rhs_nt = child_nts[1];
                         let lhs_size = child_total - 1;
                         if lhs_size >= 1 {
-                            let lhs_pool = by_size[lhs_nt].get(lhs_size).map(Vec::as_slice).unwrap_or(&[]);
-                            let rhs_pool = by_size[rhs_nt].get(1).map(Vec::as_slice).unwrap_or(&[]);
-                            if !lhs_pool.is_empty() && !rhs_pool.is_empty() {
-                                for lhs in lhs_pool {
-
-                                    for rhs in rhs_pool {
-
-                                        let tuple: &[&Candidate] = &[lhs, rhs];
-                                        let Some(values) =
-                                            Self::eval_nary_with_plan(fid, tuple, num_examples, nary_pruned.as_deref())
-                                        else { continue };
-                                        let children = vec![lhs.node, rhs.node];
-                                        staged.push((values, children));
+                            let lhs_len = self.pool_len(lhs_nt, lhs_size);
+                            let rhs_len = self.pool_len(rhs_nt, 1);
+                            if lhs_len != 0 && rhs_len != 0 {
+                                let tuple_child_nts = [lhs_nt, rhs_nt];
+                                let tuple_sizes = [lhs_size, 1];
+                                for lhs_idx in 0..lhs_len {
+                                    for rhs_idx in 0..rhs_len {
+                                        let tuple_indices = [lhs_idx, rhs_idx];
+                                        if let Some(found) = self.try_push_nary_from_indices(
+                                            nt_idx,
+                                            rule_idx,
+                                            size,
+                                            fid,
+                                            &tuple_child_nts,
+                                            &tuple_sizes,
+                                            &tuple_indices,
+                                            num_examples,
+                                            nary_pruned.as_deref(),
+                                        ) {
+                                            return Ok(Some(found));
+                                        }
                                     }
                                 }
                             }
@@ -450,97 +487,145 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     } else if is_binary_same_nt && class.commutative {
                         // Commutative: only enumerate lhs_size <= rhs_size
                         let nt = child_nts[0];
+                        let tuple_child_nts = [nt, nt];
                         for lhs_size in 1..=child_total / 2 {
                             let rhs_size = child_total - lhs_size;
-                            let lhs_pool = by_size[nt].get(lhs_size).map(Vec::as_slice).unwrap_or(&[]);
-                            let rhs_pool = by_size[nt].get(rhs_size).map(Vec::as_slice).unwrap_or(&[]);
-                            if lhs_pool.is_empty() || rhs_pool.is_empty() { continue; }
+                            let lhs_len = self.pool_len(nt, lhs_size);
+                            let rhs_len = self.pool_len(nt, rhs_size);
+                            if lhs_len == 0 || rhs_len == 0 {
+                                continue;
+                            }
+                            let tuple_sizes = [lhs_size, rhs_size];
 
                             if lhs_size == rhs_size {
-                                for (i, lhs) in lhs_pool.iter().enumerate() {
-                                    if assoc_skip_lhs && self.nodes[lhs.node].rule_idx == rule_idx { continue; }
-                                    let start = if class.idempotent { i + 1 } else { i };
-                                    for rhs in &rhs_pool[start..] {
-
-                                        if class.nonzero_rhs && rhs.values.iter().all(|v| v.is_zero()) { continue; }
-                                        let tuple: &[&Candidate] = &[lhs, rhs];
-                                        let Some(values) =
-                                            Self::eval_nary_with_plan(fid, tuple, num_examples, nary_pruned.as_deref())
-                                        else { continue };
-                                        let children = vec![lhs.node, rhs.node];
-                                        staged.push((values, children));
+                                for lhs_idx in 0..lhs_len {
+                                    let start = if class.idempotent {
+                                        lhs_idx + 1
+                                    } else {
+                                        lhs_idx
+                                    };
+                                    for rhs_idx in start..rhs_len {
+                                        let tuple_indices = [lhs_idx, rhs_idx];
+                                        if self.should_skip_tuple(
+                                            &tuple_child_nts,
+                                            &tuple_sizes,
+                                            &tuple_indices,
+                                            rule_idx,
+                                            assoc_skip_lhs,
+                                            class.nonzero_rhs,
+                                        ) {
+                                            continue;
+                                        }
+                                        if let Some(found) = self.try_push_nary_from_indices(
+                                            nt_idx,
+                                            rule_idx,
+                                            size,
+                                            fid,
+                                            &tuple_child_nts,
+                                            &tuple_sizes,
+                                            &tuple_indices,
+                                            num_examples,
+                                            nary_pruned.as_deref(),
+                                        ) {
+                                            return Ok(Some(found));
+                                        }
                                     }
                                 }
                             } else {
                                 // Off-diagonal: full cross-product (lhs_size < rhs_size already ensures no dup)
-                                for lhs in lhs_pool {
-                                    if assoc_skip_lhs && self.nodes[lhs.node].rule_idx == rule_idx { continue; }
-                                    for rhs in rhs_pool {
-                                        if class.nonzero_rhs && rhs.values.iter().all(|v| v.is_zero()) { continue; }
-                                        let tuple: &[&Candidate] = &[lhs, rhs];
-                                        let Some(values) =
-                                            Self::eval_nary_with_plan(fid, tuple, num_examples, nary_pruned.as_deref())
-                                        else { continue };
-                                        let children = vec![lhs.node, rhs.node];
-                                        staged.push((values, children));
+                                for lhs_idx in 0..lhs_len {
+                                    for rhs_idx in 0..rhs_len {
+                                        let tuple_indices = [lhs_idx, rhs_idx];
+                                        if self.should_skip_tuple(
+                                            &tuple_child_nts,
+                                            &tuple_sizes,
+                                            &tuple_indices,
+                                            rule_idx,
+                                            assoc_skip_lhs,
+                                            class.nonzero_rhs,
+                                        ) {
+                                            continue;
+                                        }
+                                        if let Some(found) = self.try_push_nary_from_indices(
+                                            nt_idx,
+                                            rule_idx,
+                                            size,
+                                            fid,
+                                            &tuple_child_nts,
+                                            &tuple_sizes,
+                                            &tuple_indices,
+                                            num_examples,
+                                            nary_pruned.as_deref(),
+                                        ) {
+                                            return Ok(Some(found));
+                                        }
                                     }
                                 }
                             }
                         }
                     } else {
                         // General case: full cross-product
+                        let mut found = None;
                         for_each_size_split(
                             child_total,
                             child_nts.len(),
                             &mut splits,
                             &mut |sizes| {
-                                let pools: Vec<&[Candidate]> = child_nts
+                                if found.is_some() {
+                                    return;
+                                }
+                                let pool_lens: Vec<usize> = child_nts
                                     .iter()
                                     .zip(sizes.iter())
                                     .map(|(child_nt, child_size)| {
-                                        by_size[*child_nt]
-                                            .get(*child_size)
-                                            .map(Vec::as_slice)
-                                            .unwrap_or(&[][..])
+                                        self.pool_len(*child_nt, *child_size)
                                     })
                                     .collect();
-                                if pools.iter().any(|pool| pool.is_empty()) {
+                                if pool_lens.iter().any(|len| *len == 0) {
                                     return;
                                 }
-                                let mut tuple = Vec::with_capacity(child_nts.len());
-                                for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
-                                    if assoc_skip_lhs && self.nodes[tuple[0].node].rule_idx == rule_idx {
-                                        return;
+                                let mut indices = Vec::with_capacity(child_nts.len());
+                                for_each_index_tuple(&pool_lens, &mut indices, &mut |indices| {
+                                    if self.should_skip_tuple(
+                                        &child_nts,
+                                        sizes,
+                                        indices,
+                                        rule_idx,
+                                        assoc_skip_lhs,
+                                        class.nonzero_rhs,
+                                    ) {
+                                        return false;
                                     }
-                                    if class.nonzero_rhs && child_nts.len() == 2 {
-                                        if tuple[1].values.iter().all(|v| v.is_zero()) { return; }
+                                    if let Some(result) = self.try_push_nary_from_indices(
+                                        nt_idx,
+                                        rule_idx,
+                                        size,
+                                        fid,
+                                        &child_nts,
+                                        sizes,
+                                        indices,
+                                        num_examples,
+                                        nary_pruned.as_deref(),
+                                    ) {
+                                        found = Some(result);
+                                        return true;
                                     }
-                                    let Some(values) =
-                                        Self::eval_nary_with_plan(fid, tuple, num_examples, nary_pruned.as_deref())
-                                    else {
-                                        return;
-                                    };
-                                    let children = tuple.iter().map(|c| c.node).collect();
-                                    staged.push((values, children));
+                                    false
                                 });
                             },
                         );
-                    }
-                }
-
-                for (values, children) in staged {
-                    if let Some(found) = self.try_push_new(
-                        nt_idx,
-                        size,
-                        values,
-                        || Node { nt_idx, rule_idx, children },
-                    ) {
-                        return Ok(Some(found));
+                        if let Some(found) = found {
+                            return Ok(Some(found));
+                        }
                     }
                 }
                 Ok(None)
             }
-            ExactRule::GenericTemplate { template, child_nts, base_size } => {
+            ExactRule::GenericTemplate {
+                template,
+                child_nts,
+                base_size,
+            } => {
                 if base_size > size {
                     return Ok(None);
                 }
@@ -554,16 +639,18 @@ impl<'a, 'g> Searcher<'a, 'g> {
                             let args = self.verifier.example_args(i);
                             match template.evaluate_with_args(args, &mut self.leaf_cache) {
                                 Ok(v) => values.push(v),
-                                Err(_) => { ok = false; break; }
+                                Err(_) => {
+                                    ok = false;
+                                    break;
+                                }
                             }
                         }
                         if ok {
-                            return Ok(self.try_push_new(
+                            return Ok(self.try_push_new(nt_idx, size, values, || Node {
                                 nt_idx,
-                                size,
-                                values,
-                                || Node { nt_idx, rule_idx, children: Vec::new() },
-                            ));
+                                rule_idx,
+                                children: Vec::new(),
+                            }));
                         }
                     }
                     return Ok(None);
@@ -571,9 +658,6 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 if child_total < child_nts.len() {
                     return Ok(None);
                 }
-                let mut staged: Vec<(Vec<BitVec>, Vec<NodeId>)> = Vec::new();
-                let by_size = &self.by_size;
-                let leaf_cache = &mut self.leaf_cache;
                 let num_examples = self.num_examples;
                 // Snapshot per-example args once so the inner closures
                 // don't borrow `self` (which is needed mutably elsewhere).
@@ -581,56 +665,39 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     .map(|i| self.verifier.example_args(i).to_vec())
                     .collect();
                 let mut splits = Vec::with_capacity(child_nts.len());
-                for_each_size_split(
-                    child_total,
-                    child_nts.len(),
-                    &mut splits,
-                    &mut |sizes| {
-                        let pools: Vec<&[Candidate]> = child_nts
-                            .iter()
-                            .zip(sizes.iter())
-                            .map(|(child_nt, child_size)| {
-                                by_size[*child_nt]
-                                    .get(*child_size)
-                                    .map(Vec::as_slice)
-                                    .unwrap_or(&[][..])
-                            })
-                            .collect();
-                        if pools.iter().any(|pool| pool.is_empty()) {
-                            return;
-                        }
-                        let mut tuple = Vec::with_capacity(child_nts.len());
-                        for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
-                            let mut all_values = Vec::with_capacity(num_examples);
-                            let mut ok = true;
-                            for i in 0..num_examples {
-                                let child_values: Vec<BitVec> =
-                                    tuple.iter().map(|c| c.values[i].clone()).collect();
-                                match template.evaluate_with_args_and_children(
-                                    &example_arg_snapshot[i],
-                                    &child_values,
-                                    leaf_cache,
-                                ) {
-                                    Ok(v) => all_values.push(v),
-                                    Err(_) => { ok = false; break; }
-                                }
-                            }
-                            if ok {
-                                let children = tuple.iter().map(|c| c.node).collect();
-                                staged.push((all_values, children));
-                            }
-                        });
-                    },
-                );
-                for (values, children) in staged {
-                    if let Some(found) = self.try_push_new(
-                        nt_idx,
-                        size,
-                        values,
-                        || Node { nt_idx, rule_idx, children },
-                    ) {
-                        return Ok(Some(found));
+                let mut found = None;
+                for_each_size_split(child_total, child_nts.len(), &mut splits, &mut |sizes| {
+                    if found.is_some() {
+                        return;
                     }
+                    let pool_lens: Vec<usize> = child_nts
+                        .iter()
+                        .zip(sizes.iter())
+                        .map(|(child_nt, child_size)| self.pool_len(*child_nt, *child_size))
+                        .collect();
+                    if pool_lens.iter().any(|len| *len == 0) {
+                        return;
+                    }
+                    let mut indices = Vec::with_capacity(child_nts.len());
+                    for_each_index_tuple(&pool_lens, &mut indices, &mut |indices| {
+                        if let Some(result) = self.try_push_template_from_indices(
+                            nt_idx,
+                            rule_idx,
+                            size,
+                            &template,
+                            &child_nts,
+                            sizes,
+                            indices,
+                            &example_arg_snapshot,
+                        ) {
+                            found = Some(result);
+                            return true;
+                        }
+                        false
+                    });
+                });
+                if let Some(found) = found {
+                    return Ok(Some(found));
                 }
                 Ok(None)
             }
@@ -670,6 +737,196 @@ impl<'a, 'g> Searcher<'a, 'g> {
         Some(values)
     }
 
+    fn pool_len(&self, nt_idx: usize, size: usize) -> usize {
+        self.by_size[nt_idx].get(size).map(Vec::len).unwrap_or(0)
+    }
+
+    fn should_skip_tuple(
+        &self,
+        child_nts: &[usize],
+        sizes: &[usize],
+        indices: &[usize],
+        rule_idx: usize,
+        assoc_skip_lhs: bool,
+        nonzero_rhs: bool,
+    ) -> bool {
+        if assoc_skip_lhs {
+            let lhs = &self.by_size[child_nts[0]][sizes[0]][indices[0]];
+            if self.nodes[lhs.node].rule_idx == rule_idx {
+                return true;
+            }
+        }
+        if nonzero_rhs && child_nts.len() == 2 {
+            let rhs = &self.by_size[child_nts[1]][sizes[1]][indices[1]];
+            if rhs.values.iter().all(|v| v.is_zero()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn eval_nary_from_indices(
+        &self,
+        fid: usize,
+        child_nts: &[usize],
+        sizes: &[usize],
+        indices: &[usize],
+        num_examples: usize,
+        pruned_plan: Option<&BitCircuitPlan>,
+    ) -> Option<(Vec<BitVec>, Vec<NodeId>)> {
+        let tuple: Vec<&Candidate> = child_nts
+            .iter()
+            .zip(sizes.iter())
+            .zip(indices.iter())
+            .map(|((child_nt, child_size), index)| &self.by_size[*child_nt][*child_size][*index])
+            .collect();
+        let values = Self::eval_nary_with_plan(fid, &tuple, num_examples, pruned_plan)?;
+        let children = tuple.iter().map(|c| c.node).collect();
+        Some((values, children))
+    }
+
+    fn try_push_nary_from_indices(
+        &mut self,
+        nt_idx: usize,
+        rule_idx: usize,
+        size: usize,
+        fid: usize,
+        child_nts: &[usize],
+        sizes: &[usize],
+        indices: &[usize],
+        num_examples: usize,
+        pruned_plan: Option<&BitCircuitPlan>,
+    ) -> Option<OwnedExpr> {
+        let (values, children) =
+            self.eval_nary_from_indices(fid, child_nts, sizes, indices, num_examples, pruned_plan)?;
+        self.try_push_new(nt_idx, size, values, || Node {
+            nt_idx,
+            rule_idx,
+            children,
+        })
+    }
+
+    fn enqueue_batch_from_indices(
+        &self,
+        child_nts: &[usize],
+        sizes: &[usize],
+        indices: &[usize],
+        rule_idx: usize,
+        assoc_skip_lhs: bool,
+        batch_nodes: &mut Vec<Vec<NodeId>>,
+        batch_args: &mut Vec<Vec<BitVec>>,
+        k: usize,
+    ) -> bool {
+        if self.should_skip_tuple(child_nts, sizes, indices, rule_idx, assoc_skip_lhs, false) {
+            return false;
+        }
+        let children = child_nts
+            .iter()
+            .zip(sizes.iter())
+            .zip(indices.iter())
+            .map(|((child_nt, child_size), index)| self.by_size[*child_nt][*child_size][*index].node)
+            .collect();
+        for i in 0..k {
+            let args = child_nts
+                .iter()
+                .zip(sizes.iter())
+                .zip(indices.iter())
+                .map(|((child_nt, child_size), index)| {
+                    self.by_size[*child_nt][*child_size][*index].values[i].clone()
+                })
+                .collect();
+            batch_args.push(args);
+        }
+        batch_nodes.push(children);
+        true
+    }
+
+    fn flush_eval_batch(
+        &mut self,
+        nt_idx: usize,
+        rule_idx: usize,
+        size: usize,
+        batch_nodes: &mut Vec<Vec<NodeId>>,
+        batch_args: &mut Vec<Vec<BitVec>>,
+        plan: &BitCircuitPlan,
+        k: usize,
+    ) -> Option<OwnedExpr> {
+        let count = batch_nodes.len();
+        if count == 0 {
+            return None;
+        }
+
+        let mut batch_values: Vec<Vec<BitVec>> =
+            (0..count).map(|_| Vec::with_capacity(k)).collect();
+        let refs: Vec<&[BitVec]> = batch_args.iter().map(|a| a.as_slice()).collect();
+        for i in 0..k {
+            let example_refs: Vec<&[BitVec]> = (0..count).map(|j| refs[j * k + i]).collect();
+            let results = plan.eval_batch(&example_refs, count);
+            for (j, val) in results.into_iter().enumerate() {
+                batch_values[j].push(val);
+            }
+        }
+
+        for j in 0..count {
+            let values = std::mem::take(&mut batch_values[j]);
+            let children = std::mem::take(&mut batch_nodes[j]);
+            if let Some(found) = self.try_push_new(nt_idx, size, values, || Node {
+                nt_idx,
+                rule_idx,
+                children,
+            }) {
+                batch_nodes.clear();
+                batch_args.clear();
+                return Some(found);
+            }
+        }
+        batch_nodes.clear();
+        batch_args.clear();
+        None
+    }
+
+    fn try_push_template_from_indices(
+        &mut self,
+        nt_idx: usize,
+        rule_idx: usize,
+        size: usize,
+        template: &TemplateExpr,
+        child_nts: &[usize],
+        sizes: &[usize],
+        indices: &[usize],
+        example_arg_snapshot: &[Vec<BitVec>],
+    ) -> Option<OwnedExpr> {
+        let num_examples = self.num_examples;
+        let mut all_values = Vec::with_capacity(num_examples);
+        for example_args in example_arg_snapshot.iter().take(num_examples) {
+            let child_values: Vec<BitVec> = child_nts
+                .iter()
+                .zip(sizes.iter())
+                .zip(indices.iter())
+                .map(|((child_nt, child_size), index)| {
+                    self.by_size[*child_nt][*child_size][*index]
+                        .values[all_values.len()]
+                        .clone()
+                })
+                .collect();
+            let value = template
+                .evaluate_with_args_and_children(example_args, &child_values, &mut self.leaf_cache)
+                .ok()?;
+            all_values.push(value);
+        }
+        let children = child_nts
+            .iter()
+            .zip(sizes.iter())
+            .zip(indices.iter())
+            .map(|((child_nt, child_size), index)| self.by_size[*child_nt][*child_size][*index].node)
+            .collect();
+        self.try_push_new(nt_idx, size, all_values, || Node {
+            nt_idx,
+            rule_idx,
+            children,
+        })
+    }
+
     // ----- Push helpers
 
     fn try_push_new(
@@ -680,19 +937,22 @@ impl<'a, 'g> Searcher<'a, 'g> {
         build_node: impl FnOnce() -> Node,
     ) -> Option<OwnedExpr> {
         let is_start = nt_idx == self.grammar.start;
-        let node = self.intern_node(build_node());
-        let matches_spec = is_start && self.run_verify(node, &values);
         // Values-based dedup collapses to "every candidate is a duplicate"
         // when there are no examples (structural-only spec). Skip it then —
         // intern_node gives per-call uniqueness, and structural matching
         // happens via the materialize closure in `run_verify`.
-        if !values.is_empty()
-            && self.seen.contains_or_insert_multi(nt_idx, &values, size)
-        {
+        if !values.is_empty() && self.seen.contains_or_insert_multi(nt_idx, &values, size) {
             return None;
         }
-        let vi_key: Vec<u64> = values.iter().map(|v| v.first_u64_word()).collect();
-        self.value_index[nt_idx].entry(vi_key).or_default().push(node);
+        let node = self.intern_node(build_node());
+        let matches_spec = is_start && self.run_verify(node, &values);
+        if self.enable_compose && !values.is_empty() {
+            let vi_key: Vec<u64> = values.iter().map(|v| v.first_u64_word()).collect();
+            self.value_index[nt_idx]
+                .entry(vi_key)
+                .or_default()
+                .push(node);
+        }
         self.by_size[nt_idx][size].push(Candidate { node, values });
         if matches_spec {
             return self.grammar.materialize_node(node, &self.nodes);
@@ -706,14 +966,16 @@ impl<'a, 'g> Searcher<'a, 'g> {
         candidate: Candidate,
         size: usize,
     ) -> Option<OwnedExpr> {
-        let is_start = nt_idx == self.grammar.start;
-        let matches_spec = is_start && self.run_verify(candidate.node, &candidate.values);
         if !candidate.values.is_empty()
-            && self.seen.contains_or_insert_multi(nt_idx, &candidate.values, size)
+            && self
+                .seen
+                .contains_or_insert_multi(nt_idx, &candidate.values, size)
         {
             return None;
         }
         let node = candidate.node;
+        let is_start = nt_idx == self.grammar.start;
+        let matches_spec = is_start && self.run_verify(node, &candidate.values);
         self.by_size[nt_idx][size].push(candidate);
         if matches_spec {
             return self.grammar.materialize_node(node, &self.nodes);
@@ -756,13 +1018,23 @@ impl<'a, 'g> Searcher<'a, 'g> {
         // One-time diagnostic: check invertibility of first candidate on first rule
         if self.by_size[start].iter().map(|b| b.len()).sum::<usize>() == 5 {
             for rule in &self.grammar.nts[start].1 {
-                let ExactRule::Op { fid, child_nts, .. } = rule else { continue };
-                if child_nts.len() != 2 { continue }
-                let plan = self.pruned_plans.get(&(start, *fid))
+                let ExactRule::Op { fid, child_nts, .. } = rule else {
+                    continue;
+                };
+                if child_nts.len() != 2 {
+                    continue;
+                }
+                let plan = self
+                    .pruned_plans
+                    .get(&(start, *fid))
                     .map(|rc| rc.as_ref())
                     .or_else(|| deffun::ENV.deffun(*fid).bit_circuit_plan());
                 let Some(plan) = plan else { continue };
-                if let Some(c1) = self.by_size[child_nts[0]].iter().flat_map(|b| b.iter()).next() {
+                if let Some(c1) = self.by_size[child_nts[0]]
+                    .iter()
+                    .flat_map(|b| b.iter())
+                    .next()
+                {
                     let pe = plan.partial_eval(0, &c1.values[0]);
                     let mut n_const = 0;
                     let mut n_input = 0;
@@ -798,15 +1070,14 @@ impl<'a, 'g> Searcher<'a, 'g> {
         let vi_key: Vec<u64> = targets.iter().map(|v| v.first_u64_word()).collect();
         if let Some(nodes) = self.value_index[nt].get(&vi_key) {
             for &node_id in nodes {
-                let c = self.by_size[nt].iter()
+                let c = self.by_size[nt]
+                    .iter()
                     .flat_map(|b| b.iter())
                     .find(|c| c.node == node_id);
                 let Some(c) = c else { continue };
-                let ok = (0..k).all(|ex| {
-                    match masks {
-                        Some(m) => c.values[ex].matches_masked(&targets[ex], &m[ex]),
-                        None => c.values[ex] == targets[ex],
-                    }
+                let ok = (0..k).all(|ex| match masks {
+                    Some(m) => c.values[ex].matches_masked(&targets[ex], &m[ex]),
+                    None => c.values[ex] == targets[ex],
                 });
                 if ok {
                     return self.grammar.materialize_node(node_id, &self.nodes);
@@ -829,13 +1100,21 @@ impl<'a, 'g> Searcher<'a, 'g> {
             }
         }
 
-        if depth == 0 { return None; }
+        if depth == 0 {
+            return None;
+        }
 
         // Try composing via each binary rule for this NT
         for rule in &self.grammar.nts[nt].1 {
-            let ExactRule::Op { fid, child_nts, .. } = rule else { continue };
-            if child_nts.len() != 2 { continue }
-            let plan = self.pruned_plans.get(&(nt, *fid))
+            let ExactRule::Op { fid, child_nts, .. } = rule else {
+                continue;
+            };
+            if child_nts.len() != 2 {
+                continue;
+            }
+            let plan = self
+                .pruned_plans
+                .get(&(nt, *fid))
                 .map(|rc| rc.as_ref())
                 .or_else(|| deffun::ENV.deffun(*fid).bit_circuit_plan());
             let Some(plan) = plan else { continue };
@@ -850,20 +1129,32 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 for bucket in &self.by_size[child_nts[fixed_pos]] {
                     for c1 in bucket {
                         if let Some(sub_targets) = self.invert_for_other(
-                            plan, fixed_pos, other_pos, c1, targets, masks,
-                            k, out_bits, other_bits, n_other_words,
+                            plan,
+                            fixed_pos,
+                            other_pos,
+                            c1,
+                            targets,
+                            masks,
+                            k,
+                            out_bits,
+                            other_bits,
+                            n_other_words,
                         ) {
                             // Try finding or composing the sub-target
                             let other_nt = child_nts[other_pos];
-                            if let Some(sub_expr) = self.compose_value(
-                                other_nt, &sub_targets, None, depth - 1,
-                            ) {
+                            if let Some(sub_expr) =
+                                self.compose_value(other_nt, &sub_targets, None, depth - 1)
+                            {
                                 let mut child_exprs = vec![OwnedExpr::Const(BitVec::zero(1)); 2];
-                                child_exprs[fixed_pos] = self.grammar.materialize_node(c1.node, &self.nodes)?;
+                                child_exprs[fixed_pos] =
+                                    self.grammar.materialize_node(c1.node, &self.nodes)?;
                                 child_exprs[other_pos] = sub_expr;
                                 info!(
                                     "compose: fid={} ({}) fixed_pos={} depth={}",
-                                    fid, deffun::ENV.name(*fid), fixed_pos, depth
+                                    fid,
+                                    deffun::ENV.name(*fid),
+                                    fixed_pos,
+                                    depth
                                 );
                                 return Some(OwnedExpr::Func(*fid, child_exprs));
                             }
@@ -896,14 +1187,18 @@ impl<'a, 'g> Searcher<'a, 'g> {
             let mut tw = vec![0u64; n_other_words];
             for b in 0..out_bits {
                 let demanded = masks.map_or(true, |m| m[ex].bit(b));
-                if !demanded { continue; }
+                if !demanded {
+                    continue;
+                }
                 match pe[b] {
                     PartialBit::Const(v) => {
                         if v != targets[ex].bit(b) {
                             return None;
                         }
                     }
-                    PartialBit::Input { arg, bit, negated } if arg == other_pos && bit < other_bits => {
+                    PartialBit::Input { arg, bit, negated }
+                        if arg == other_pos && bit < other_bits =>
+                    {
                         let required = targets[ex].bit(b) ^ negated;
                         if required {
                             tw[bit / 64] |= 1u64 << (bit % 64);
@@ -918,6 +1213,25 @@ impl<'a, 'g> Searcher<'a, 'g> {
     }
 }
 
+fn for_each_index_tuple(
+    pool_lens: &[usize],
+    tuple: &mut Vec<usize>,
+    callback: &mut impl FnMut(&[usize]) -> bool,
+) -> bool {
+    if tuple.len() == pool_lens.len() {
+        return callback(tuple);
+    }
+    let depth = tuple.len();
+    for index in 0..pool_lens[depth] {
+        tuple.push(index);
+        if for_each_index_tuple(pool_lens, tuple, callback) {
+            tuple.pop();
+            return true;
+        }
+        tuple.pop();
+    }
+    false
+}
 
 fn log_grammar_summary(grammar: &Grammar<'_>) {
     let mut leaf = 0usize;
@@ -959,15 +1273,9 @@ pub fn search_problem<'a>(
 ) -> parse::Result<OwnedExpr> {
     let cfg_start = Instant::now();
     let multi = Config::from_problem(problem)?;
-    debg!(
-        "exact multi-config built in {:?}",
-        cfg_start.elapsed()
-    );
+    debg!("exact multi-config built in {:?}", cfg_start.elapsed());
     let grammar_start = Instant::now();
     let grammar = Grammar::from_config(&multi);
-    debg!(
-        "exact grammar built in {:?}",
-        grammar_start.elapsed()
-    );
+    debg!("exact grammar built in {:?}", grammar_start.elapsed());
     run_search(grammar, verifier, min, enable_decomp)
 }

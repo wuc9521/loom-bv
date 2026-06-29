@@ -1,12 +1,9 @@
 use std::{collections::HashSet, hash::BuildHasherDefault};
 
-
-
 #[allow(missing_copy_implementations)]
 pub struct FnvHasher(u64);
 
 impl Default for FnvHasher {
-
     #[inline]
     fn default() -> FnvHasher {
         FnvHasher(0xcbf29ce484222325)

@@ -11,9 +11,7 @@ use crate::{
 
 use super::{
     expr::OwnedExpr,
-    grammar::{
-        for_each_candidate_tuple, for_each_size_split, Config, Rule, TemplateExpr,
-    },
+    grammar::{for_each_candidate_tuple, for_each_size_split, Config, Rule, TemplateExpr},
 };
 
 fn dynamic_usage_for_capacity<K, V>(cap: usize) -> usize {
@@ -263,18 +261,23 @@ impl<'a, const N: usize> Algo<'a, N> {
                                             }
                                         }
                                         let mut tuple = Vec::with_capacity(child_nts.len());
-                                        for_each_candidate_tuple(&pools, &mut tuple, &mut |tuple| {
-                                            let child_exprs = tuple
-                                                .iter()
-                                                .map(|cand| cand.expr.clone())
-                                                .collect::<Vec<_>>();
-                                            let expr = match template.instantiate(&child_exprs) {
-                                                Ok(expr) => expr,
-                                                Err(_) => return,
-                                            };
-                                            let value = expr.eval_bv(&self.args);
-                                            staged.push((expr, value));
-                                        });
+                                        for_each_candidate_tuple(
+                                            &pools,
+                                            &mut tuple,
+                                            &mut |tuple| {
+                                                let child_exprs = tuple
+                                                    .iter()
+                                                    .map(|cand| cand.expr.clone())
+                                                    .collect::<Vec<_>>();
+                                                let expr = match template.instantiate(&child_exprs)
+                                                {
+                                                    Ok(expr) => expr,
+                                                    Err(_) => return,
+                                                };
+                                                let value = expr.eval_bv(&self.args);
+                                                staged.push((expr, value));
+                                            },
+                                        );
                                     },
                                 );
                             }
@@ -282,7 +285,10 @@ impl<'a, const N: usize> Algo<'a, N> {
                                 self.insert_candidate(nt, expr, value, &mut next[nt], &mut f)?;
                             }
                         }
-                        Rule::ChatGPT { expr, size: target_size } => {
+                        Rule::ChatGPT {
+                            expr,
+                            size: target_size,
+                        } => {
                             if size == target_size {
                                 let value = expr.eval_bv(&self.args);
                                 self.insert_candidate(
@@ -483,9 +489,7 @@ impl<'a, const N: usize> Algo<'a, N> {
             if class.nonzero_rhs && rhs.value.any_eq(&Bv::ZEROS) {
                 return;
             }
-            let expr = match template
-                .instantiate(&[lhs.expr.clone(), rhs.expr.clone()])
-            {
+            let expr = match template.instantiate(&[lhs.expr.clone(), rhs.expr.clone()]) {
                 Ok(e) => e,
                 Err(_) => return,
             };
@@ -496,10 +500,8 @@ impl<'a, const N: usize> Algo<'a, N> {
         // Optional rhs filter: shifts restrict the rhs to size-1 leaves
         // (Var / Const / Func — anything that lives at exprs[NT][1]).
         let rhs_is_leaf = |c: &Candidate<N>| {
-            matches!(
-                c.expr,
-                OwnedExpr::Var(_, _) | OwnedExpr::Const(_)
-            ) || matches!(&c.expr, OwnedExpr::Func(_, args) if args.is_empty())
+            matches!(c.expr, OwnedExpr::Var(_, _) | OwnedExpr::Const(_))
+                || matches!(&c.expr, OwnedExpr::Func(_, args) if args.is_empty())
         };
 
         let bucket = |nt: usize, size: usize| -> &[Candidate<N>] {
@@ -619,31 +621,34 @@ impl<'a, const N: usize> Algo<'a, N> {
 
 impl OwnedExpr {
     fn bit_width(&self) -> usize {
-    match self {
-        OwnedExpr::Concat(a, b) => a.bit_width() + b.bit_width(),
-        OwnedExpr::Extract(_, hi, lo) => (*hi - *lo + 1) as usize,
-        OwnedExpr::Func(id, _) => crate::parse::deffun::ENV.ret_bits(*id),
-        OwnedExpr::Const(v) => v.bits(),
-        OwnedExpr::Var(_, width) => *width,
-        OwnedExpr::Let(_, _, body) => body.bit_width(),
-        OwnedExpr::Not(a) | OwnedExpr::Neg(a) => a.bit_width(),
-        OwnedExpr::Add(a, _)
-        | OwnedExpr::Xor(a, _)
-        | OwnedExpr::And(a, _)
-        | OwnedExpr::Or(a, _)
-        | OwnedExpr::Mul(a, _)
-        | OwnedExpr::Sub(a, _)
-        | OwnedExpr::LShr(a, _)
-        | OwnedExpr::AShr(a, _)
-        | OwnedExpr::Shl(a, _)
-        | OwnedExpr::UDiv(a, _)
-        | OwnedExpr::URem(a, _)
-        | OwnedExpr::SDiv(a, _)
-        | OwnedExpr::SRem(a, _) => a.bit_width(),
-        OwnedExpr::Ite(_, a, _) => a.bit_width(),
-        OwnedExpr::BVule(_, _) | OwnedExpr::BVult(_, _) | OwnedExpr::BVsle(_, _) | OwnedExpr::BVslt(_, _) => 1,
-        OwnedExpr::SynthApp(idx, _) => crate::parse::deffun::synth_ret_bits(*idx),
-    }
+        match self {
+            OwnedExpr::Concat(a, b) => a.bit_width() + b.bit_width(),
+            OwnedExpr::Extract(_, hi, lo) => (*hi - *lo + 1) as usize,
+            OwnedExpr::Func(id, _) => crate::parse::deffun::ENV.ret_bits(*id),
+            OwnedExpr::Const(v) => v.bits(),
+            OwnedExpr::Var(_, width) => *width,
+            OwnedExpr::Let(_, _, body) => body.bit_width(),
+            OwnedExpr::Not(a) | OwnedExpr::Neg(a) => a.bit_width(),
+            OwnedExpr::Add(a, _)
+            | OwnedExpr::Xor(a, _)
+            | OwnedExpr::And(a, _)
+            | OwnedExpr::Or(a, _)
+            | OwnedExpr::Mul(a, _)
+            | OwnedExpr::Sub(a, _)
+            | OwnedExpr::LShr(a, _)
+            | OwnedExpr::AShr(a, _)
+            | OwnedExpr::Shl(a, _)
+            | OwnedExpr::UDiv(a, _)
+            | OwnedExpr::URem(a, _)
+            | OwnedExpr::SDiv(a, _)
+            | OwnedExpr::SRem(a, _) => a.bit_width(),
+            OwnedExpr::Ite(_, a, _) => a.bit_width(),
+            OwnedExpr::BVule(_, _)
+            | OwnedExpr::BVult(_, _)
+            | OwnedExpr::BVsle(_, _)
+            | OwnedExpr::BVslt(_, _) => 1,
+            OwnedExpr::SynthApp(idx, _) => crate::parse::deffun::synth_ret_bits(*idx),
+        }
     }
 }
 // (extract / concat helpers were duplicated here; see `Bv::extract` and

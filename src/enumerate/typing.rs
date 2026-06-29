@@ -152,7 +152,9 @@ pub fn check_sort<'s>(term: &'s SyGuSTerm, env: &[(&'s str, Sort)]) -> parse::Re
                 let rhs = check_sort(&args[1], env)?;
                 if !lhs.same_family(rhs) {
                     return Err(new_custom_error_span(
-                        format!("sort error: `=` operands have mismatched sorts {lhs:?} and {rhs:?}"),
+                        format!(
+                            "sort error: `=` operands have mismatched sorts {lhs:?} and {rhs:?}"
+                        ),
                         empty_span(),
                     ));
                 }

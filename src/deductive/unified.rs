@@ -26,11 +26,17 @@ fn slice_count_zeros(a: &[BitVec]) -> u32 {
 }
 
 fn slice_and(a: &[BitVec], b: &[BitVec]) -> Vec<BitVec> {
-    a.iter().zip(b.iter()).map(|(ai, bi)| ai.clone().bitand(bi.clone())).collect()
+    a.iter()
+        .zip(b.iter())
+        .map(|(ai, bi)| ai.clone().bitand(bi.clone()))
+        .collect()
 }
 
 fn slice_or(a: &[BitVec], b: &[BitVec]) -> Vec<BitVec> {
-    a.iter().zip(b.iter()).map(|(ai, bi)| ai.clone().bitor(bi.clone())).collect()
+    a.iter()
+        .zip(b.iter())
+        .map(|(ai, bi)| ai.clone().bitor(bi.clone()))
+        .collect()
 }
 
 fn slice_not(a: &[BitVec]) -> Vec<BitVec> {
@@ -38,11 +44,17 @@ fn slice_not(a: &[BitVec]) -> Vec<BitVec> {
 }
 
 fn slice_xor(a: &[BitVec], b: &[BitVec]) -> Vec<BitVec> {
-    a.iter().zip(b.iter()).map(|(ai, bi)| ai.clone().bitxor(bi.clone())).collect()
+    a.iter()
+        .zip(b.iter())
+        .map(|(ai, bi)| ai.clone().bitxor(bi.clone()))
+        .collect()
 }
 
 fn slice_sub(a: &[BitVec], b: &[BitVec]) -> Vec<BitVec> {
-    a.iter().zip(b.iter()).map(|(ai, bi)| ai.clone().sub(bi.clone())).collect()
+    a.iter()
+        .zip(b.iter())
+        .map(|(ai, bi)| ai.clone().sub(bi.clone()))
+        .collect()
 }
 
 fn slice_eq(a: &[BitVec], b: &[BitVec]) -> bool {
@@ -148,7 +160,8 @@ impl CombineRule {
                 && (self.n >= spec.len() || spec.test_and(expr))
             {
                 let committed = slice_or(&slice_not(&self.mask), values);
-                self.entries.push(CombineEntry::And(expr.clone(), committed));
+                self.entries
+                    .push(CombineEntry::And(expr.clone(), committed));
                 self.mask = slice_and(&self.mask, values);
             }
         }
@@ -200,7 +213,9 @@ impl CombineRule {
                 }
             }
         }
-        if size > 4 { return None; }
+        if size > 4 {
+            return None;
+        }
         Some(res)
     }
 }

@@ -126,13 +126,17 @@ impl<'a> LfpSpec<'a> {
             .grammar_deps_for(0)
             .is_some_and(|deps| deps.requires_recursion())
             || env
-            .define_funs
-            .iter()
-            .any(|def| term_mentions_symbol(def.body, synth.name));
+                .define_funs
+                .iter()
+                .any(|def| term_mentions_symbol(def.body, synth.name));
         if !references_self {
             return None;
         }
-        Some(Self::Recursive { synth, bits, labels })
+        Some(Self::Recursive {
+            synth,
+            bits,
+            labels,
+        })
     }
 
     pub fn bits(&self) -> usize {
@@ -200,10 +204,7 @@ impl<'a> LfpSpec<'a> {
             ret_sort: op.ret.clone(),
         };
         let labels: BTreeMap<usize, bool> = self.labels().iter().copied().collect();
-        let spec = super::bitspec::Constraint::from_labels(
-            self.bits(),
-            labels,
-        );
+        let spec = super::bitspec::Constraint::from_labels(self.bits(), labels);
         info!(
             "{}: routing to exact search with fixpoint='{}' (bits={}, labels={})",
             self.variant_tag(),
@@ -264,7 +265,10 @@ fn pick_constant_and_structural<'a>(
 ) -> Option<(SynthFunView<'a>, SynthFunView<'a>)> {
     let a = &synths[0];
     let b = &synths[1];
-    match (is_constant_grammar(a.grammar?), is_constant_grammar(b.grammar?)) {
+    match (
+        is_constant_grammar(a.grammar?),
+        is_constant_grammar(b.grammar?),
+    ) {
         (true, false) => Some((*a, *b)),
         (false, true) => Some((*b, *a)),
         _ => None,
@@ -272,7 +276,9 @@ fn pick_constant_and_structural<'a>(
 }
 
 fn is_closure_constraint(term: &SyGuSTerm, left: &str, right: &str) -> bool {
-    let SyGuSTerm::Application(id, args) = term else { return false; };
+    let SyGuSTerm::Application(id, args) = term else {
+        return false;
+    };
     if id.get_name() != "=" || args.len() != 2 {
         return false;
     }
@@ -288,7 +294,9 @@ fn parse_label_constraint(term: &SyGuSTerm, target: &str) -> Option<(usize, bool
         }
         _ => (term, false),
     };
-    let SyGuSTerm::Application(eq, args) = term else { return None; };
+    let SyGuSTerm::Application(eq, args) = term else {
+        return None;
+    };
     if eq.get_name() != "=" || args.len() != 2 {
         return None;
     }
@@ -301,16 +309,22 @@ fn parse_label_constraint(term: &SyGuSTerm, target: &str) -> Option<(usize, bool
         }
         _ => return None,
     };
-    let SyGuSTerm::Application(id, ex_args) = extract_side else { return None; };
+    let SyGuSTerm::Application(id, ex_args) = extract_side else {
+        return None;
+    };
     let bit_idx = extract_single_bit_idx(id)?;
     if ex_args.len() != 1 {
         return None;
     }
-    let SyGuSTerm::Identifier(tgt_id) = &ex_args[0] else { return None; };
+    let SyGuSTerm::Identifier(tgt_id) = &ex_args[0] else {
+        return None;
+    };
     if tgt_id.get_name() != target {
         return None;
     }
-    let SyGuSTerm::Literal(Literal::BinConst(bits)) = lit_side else { return None; };
+    let SyGuSTerm::Literal(Literal::BinConst(bits)) = lit_side else {
+        return None;
+    };
     if bits.len() != 1 || bits.chars().any(|c| c != '0' && c != '1') {
         return None;
     }
@@ -342,9 +356,7 @@ impl OwnedExpr {
         for _ in 0..=bits {
             let next = self
                 .eval_with_bindings(&[aux.clone()], &[(closure_name, &aux)])
-                .map_err(|_| {
-                    new_custom_error_span("lfp: divide-by-zero".into(), empty_span())
-                })?;
+                .map_err(|_| new_custom_error_span("lfp: divide-by-zero".into(), empty_span()))?;
             if next == aux {
                 return Ok(next);
             }

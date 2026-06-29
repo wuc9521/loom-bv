@@ -61,7 +61,9 @@ pub struct SearchConfig {
     pub enable_composition: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl SearchConfig {
     pub fn default_pbe() -> Self {
@@ -79,7 +81,8 @@ impl SearchConfig {
             gpt_version: "gpt-4o".into(),
             is_pbe: false,
             seed: usize::MAX,
-            enable_sampling: true, min: true,
+            enable_sampling: true,
+            min: true,
             enable_composition: false,
         }
     }
@@ -98,7 +101,8 @@ impl SearchConfig {
             gpt_version: "gpt-4o".into(),
             is_pbe: false,
             seed: usize::MAX,
-            enable_sampling: true, min: true,
+            enable_sampling: true,
+            min: true,
             enable_composition: false,
         }
     }
@@ -117,7 +121,8 @@ impl SearchConfig {
             gpt_version: "gpt-4o".into(),
             is_pbe: false,
             seed: usize::MAX,
-            enable_sampling: true, min: true,
+            enable_sampling: true,
+            min: true,
             enable_composition: false,
         }
     }
@@ -136,7 +141,8 @@ impl SearchConfig {
             gpt_version: "gpt-4o".into(),
             is_pbe: false,
             seed: usize::MAX,
-            enable_sampling: false, min: true,
+            enable_sampling: false,
+            min: true,
             enable_composition: false,
         }
     }
@@ -155,7 +161,10 @@ impl SearchConfig {
     ) -> parse::Result<OwnedExpr> {
         if !self.enable_sampling {
             return crate::exact::search::search_problem(
-                problem, pbecstr, self.min, self.enable_composition,
+                problem,
+                pbecstr,
+                self.min,
+                self.enable_composition,
             );
         }
         let mut limited_ite = self.limited_ite;
@@ -319,12 +328,7 @@ impl SearchConfig {
                 ]
                 .choose(&mut rng)
                 .unwrap();
-                additional_check.random_example(
-                    &mut rng,
-                    *mask,
-                    ref_impl,
-                    problem.args.len(),
-                )
+                additional_check.random_example(&mut rng, *mask, ref_impl, problem.args.len())
             }
             for _ in 0..std::cmp::max(self.random_example, 1) {
                 let mask = [
@@ -338,19 +342,17 @@ impl SearchConfig {
                 ]
                 .choose(&mut rng)
                 .unwrap();
-                cegis.examples.random_example(
-                    &mut rng,
-                    *mask,
-                    ref_impl,
-                    problem.args.len(),
-                );
+                cegis
+                    .examples
+                    .random_example(&mut rng, *mask, ref_impl, problem.args.len());
             }
         }
 
         let mut result = self.search(&problem, &cegis.examples, no_additional_check.clone())?;
-        while !cegis.verify(&result).map_err(|e| {
-            parse::new_custom_error_span(e, ())
-        })? {
+        while !cegis
+            .verify(&result)
+            .map_err(|e| parse::new_custom_error_span(e, ()))?
+        {
             result = self.search(
                 &problem,
                 &cegis.examples,

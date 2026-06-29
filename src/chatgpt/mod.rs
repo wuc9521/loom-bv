@@ -5,12 +5,7 @@ use openai::chat::{
 };
 // use tree_sitter::Language;
 
-use crate::{
-    debg,
-    enumerate::expr::OwnedExpr,
-    exact::Constraint,
-    parse::SynthProblem,
-};
+use crate::{debg, enumerate::expr::OwnedExpr, exact::Constraint, parse::SynthProblem};
 
 use self::parsing::Env;
 

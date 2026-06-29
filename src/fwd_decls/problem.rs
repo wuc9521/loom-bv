@@ -59,8 +59,7 @@ impl FwdDeclsProblem {
             .position(|sf| sf.grammar.is_some())
             .ok_or_else(|| {
                 new_custom_error_span(
-                    "fwd-decls: no synth-fun has a grammar; nothing to enumerate over"
-                        .to_string(),
+                    "fwd-decls: no synth-fun has a grammar; nothing to enumerate over".to_string(),
                     empty_span(),
                 )
             })?;
@@ -113,10 +112,7 @@ struct FixpointParts<'a> {
 }
 
 /// Match `(= AUX (bvor BASELINE (PROP ENTRY)))` and return the names.
-fn match_fixpoint_shape<'a>(
-    term: &'a SyGuSTerm,
-    entry_name: &str,
-) -> Option<FixpointParts<'a>> {
+fn match_fixpoint_shape<'a>(term: &'a SyGuSTerm, entry_name: &str) -> Option<FixpointParts<'a>> {
     let term = strip_annotation(term);
     let SyGuSTerm::Application(op, args) = term else {
         return None;
@@ -216,15 +212,17 @@ fn build_recipe(parts: FixpointParts<'_>) -> parse::Result<LfpRecipe> {
         )
     })?;
     // Baseline is a constant define-fun; evaluate once.
-    let baseline = deffun::ENV.eval_defined(baseline_fid, &[], &[]).map_err(|e| {
-        new_custom_error_span(
-            format!(
-                "fwd-decls: failed to evaluate baseline `{}`: {:?}",
-                parts.baseline_name, e
-            ),
-            empty_span(),
-        )
-    })?;
+    let baseline = deffun::ENV
+        .eval_defined(baseline_fid, &[], &[])
+        .map_err(|e| {
+            new_custom_error_span(
+                format!(
+                    "fwd-decls: failed to evaluate baseline `{}`: {:?}",
+                    parts.baseline_name, e
+                ),
+                empty_span(),
+            )
+        })?;
     Ok(LfpRecipe {
         aux_synth_idx,
         baseline,

@@ -52,11 +52,8 @@ pub trait Verifier {
     /// fwd-decls) call it; PBE verifiers never invoke it, so the
     /// Searcher pays no DAG-walk / clone cost on every candidate.
     /// Returns `true` iff the candidate satisfies the spec.
-    fn verify(
-        &self,
-        values: &[BitVec],
-        materialize: &mut dyn FnMut() -> Option<OwnedExpr>,
-    ) -> bool;
+    fn verify(&self, values: &[BitVec], materialize: &mut dyn FnMut() -> Option<OwnedExpr>)
+        -> bool;
 }
 
 impl Verifier for Constraint {

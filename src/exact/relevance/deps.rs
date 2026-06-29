@@ -19,11 +19,7 @@ use super::bits::{BitDep, BitSet};
 pub type DepCache = FxHashMap<(usize, usize), Option<BitDep>>;
 pub type TemplateDepCache = FxHashMap<(usize, usize), Option<BitDep>>;
 
-pub fn get_deffun_dep_bit(
-    fid: usize,
-    bit: usize,
-    cache: &mut DepCache,
-) -> Option<BitDep> {
+pub fn get_deffun_dep_bit(fid: usize, bit: usize, cache: &mut DepCache) -> Option<BitDep> {
     if let Some(dep) = cache.get(&(fid, bit)) {
         return dep.clone();
     }
@@ -41,14 +37,12 @@ pub fn get_deffun_dep_bit(
     dep
 }
 
-pub fn get_deffun_dep_bits(
-    fid: usize,
-    demanded: &BitSet,
-    cache: &mut DepCache,
-) -> Option<BitDep> {
+pub fn get_deffun_dep_bits(fid: usize, demanded: &BitSet, cache: &mut DepCache) -> Option<BitDep> {
     let arg_bits = deffun::ENV.arg_bits(fid).to_vec();
     match deffun::ENV.plan(fid) {
-        DefineFunPlan::BitCircuit(plan) => Some(compute_bit_circuit_dep_bits(plan, &arg_bits, demanded)),
+        DefineFunPlan::BitCircuit(plan) => {
+            Some(compute_bit_circuit_dep_bits(plan, &arg_bits, demanded))
+        }
         DefineFunPlan::Generic {
             root,
             slot_bits,
@@ -115,12 +109,7 @@ fn compute_bit_circuit_dep_bits(
     arg_bits: &[usize],
     demanded: &BitSet,
 ) -> BitDep {
-    fn visit_atom(
-        atom: &BoolAtom,
-        bindings: &[BoolNode],
-        seen: &mut [bool],
-        out: &mut BitDep,
-    ) {
+    fn visit_atom(atom: &BoolAtom, bindings: &[BoolNode], seen: &mut [bool], out: &mut BitDep) {
         match atom {
             BoolAtom::Const(_) => {}
             BoolAtom::InputBit { arg, bit } => out.per_arg[*arg].insert(*bit),
@@ -129,7 +118,9 @@ fn compute_bit_circuit_dep_bits(
                     return;
                 }
                 match &bindings[*idx] {
-                    BoolNode::Atom(atom) | BoolNode::Not(atom) => visit_atom(atom, bindings, seen, out),
+                    BoolNode::Atom(atom) | BoolNode::Not(atom) => {
+                        visit_atom(atom, bindings, seen, out)
+                    }
                     BoolNode::And(lhs, rhs) | BoolNode::Or(lhs, rhs) | BoolNode::Xor(lhs, rhs) => {
                         visit_atom(lhs, bindings, seen, out);
                         visit_atom(rhs, bindings, seen, out);
@@ -510,7 +501,8 @@ fn compute_expr_dep_bit(
                 for (arg_idx, bits) in outer.per_arg.iter().enumerate() {
                     let arg = args.get(arg_idx)?;
                     for inner_bit in bits.iter_ones() {
-                        combined.union_inplace(&compute_expr_dep_bit(arg, arg_bits, inner_bit, cache)?);
+                        combined
+                            .union_inplace(&compute_expr_dep_bit(arg, arg_bits, inner_bit, cache)?);
                     }
                 }
                 Some(combined)

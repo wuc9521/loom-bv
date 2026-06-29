@@ -89,7 +89,11 @@ impl<const N: usize> Bv<N> {
             return Self::ZEROS;
         }
         let width = hi.saturating_sub(lo).saturating_add(1).min(64);
-        let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+        let mask = if width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
         Bv(self.map(|lane| (lane >> lo) & mask))
     }
 
@@ -100,7 +104,11 @@ impl<const N: usize> Bv<N> {
             return rhs;
         }
         let shift = rhs_bits as u32;
-        let mask = if rhs_bits == 0 { 0 } else { (1u64 << shift) - 1 };
+        let mask = if rhs_bits == 0 {
+            0
+        } else {
+            (1u64 << shift) - 1
+        };
         Bv(self
             .into_iter_fixed()
             .zip(rhs.into_iter_fixed())

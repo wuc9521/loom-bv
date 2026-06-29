@@ -124,5 +124,4 @@ impl DedupStats {
             c.per_nt_size.clear();
         });
     }
-
 }

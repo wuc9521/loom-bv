@@ -6,9 +6,9 @@
 
 use crate::enumerate::{expr::OwnedExpr, value::BitVec};
 use crate::exact::relevance;
-use crate::exact::types::{Grammar, ExactRule, Node, NodeId};
-use crate::{debg, info};
+use crate::exact::types::{ExactRule, Grammar, Node, NodeId};
 use crate::parse::deffun;
+use crate::{debg, info};
 
 // ---------------------------------------------------------------------------
 //  Grammar — Node-DAG materialization and evaluation
@@ -55,15 +55,13 @@ impl<'a> Grammar<'a> {
         match &self.nts[node.nt_idx].1[node.rule_idx] {
             ExactRule::Alias(_) => self.materialize_node(node.children[0], nodes),
             ExactRule::Leaf(expr) => Some(expr.clone()),
-            ExactRule::Op { fid, .. } => {
-                Some(OwnedExpr::Func(
-                    *fid,
-                    node.children
-                        .iter()
-                        .map(|child| self.materialize_node(*child, nodes))
-                        .collect::<Option<Vec<_>>>()?,
-                ))
-            }
+            ExactRule::Op { fid, .. } => Some(OwnedExpr::Func(
+                *fid,
+                node.children
+                    .iter()
+                    .map(|child| self.materialize_node(*child, nodes))
+                    .collect::<Option<Vec<_>>>()?,
+            )),
             ExactRule::GenericTemplate { template, .. } => {
                 let child_exprs = node
                     .children

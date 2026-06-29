@@ -373,17 +373,14 @@ mod tests {
     fn program_env_tracks_recursive_synth_grammar_use() {
         let file = SyGuSFile::from_str(
             r#"
-            (set-feature :recursion true)
             (synth-fun h () (_ BitVec 1)
-              ((B (_ BitVec 1))
-               ((B (_ BitVec 1) (#b0 h)))))
+              ((B (_ BitVec 1) (#b0 h))))
             (check-synth)
             "#,
         )
         .unwrap();
         let env = ProgramEnv::from_file(&file);
 
-        assert!(env.features.recursion);
         assert!(env.grammar_deps[0].uses_self);
         assert!(env.grammar_deps[0].requires_recursion());
     }

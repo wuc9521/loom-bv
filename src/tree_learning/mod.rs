@@ -1,6 +1,4 @@
-use std::{
-    cell::RefCell,
-};
+use std::cell::RefCell;
 
 use crate::enumerate::expr::OwnedExpr as BvExpr;
 use bumpalo::Bump;
@@ -22,8 +20,7 @@ pub enum SubProblem<'a> {
     },
 }
 
-impl<'a> SubProblem<'a> {
-}
+impl<'a> SubProblem<'a> {}
 
 pub type SubProb<'a> = &'a RefCell<SubProblem<'a>>;
 

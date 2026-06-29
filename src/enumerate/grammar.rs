@@ -331,7 +331,9 @@ impl TemplateExpr {
             TemplateExpr::Leaf(expr) => TemplateExpr::Leaf(expr),
             TemplateExpr::App(id, args) => TemplateExpr::App(
                 id,
-                args.into_iter().map(|arg| arg.shift_slots(offset)).collect(),
+                args.into_iter()
+                    .map(|arg| arg.shift_slots(offset))
+                    .collect(),
             ),
         }
     }
@@ -341,7 +343,11 @@ pub fn build_owned_application(id: &Identifier, args: &[OwnedExpr]) -> parse::Re
     fn extract_indices(id: &Identifier) -> Option<(u64, u64)> {
         let (hi, lo) = crate::parse::extract_indices_from_identifier(id)?;
         let (hi, lo) = (hi as u64, lo as u64);
-        if hi >= lo { Some((hi, lo)) } else { None }
+        if hi >= lo {
+            Some((hi, lo))
+        } else {
+            None
+        }
     }
 
     let opname = id.get_name();
@@ -388,16 +394,28 @@ pub fn build_owned_application(id: &Identifier, args: &[OwnedExpr]) -> parse::Re
     operator2!("bvsle", BVsle);
     operator2!("bvslt", BVslt);
     if opname == "bvugt" && args.len() == 2 {
-        return Ok(OwnedExpr::BVult(Box::new(args[1].clone()), Box::new(args[0].clone())));
+        return Ok(OwnedExpr::BVult(
+            Box::new(args[1].clone()),
+            Box::new(args[0].clone()),
+        ));
     }
     if opname == "bvuge" && args.len() == 2 {
-        return Ok(OwnedExpr::BVule(Box::new(args[1].clone()), Box::new(args[0].clone())));
+        return Ok(OwnedExpr::BVule(
+            Box::new(args[1].clone()),
+            Box::new(args[0].clone()),
+        ));
     }
     if opname == "bvsgt" && args.len() == 2 {
-        return Ok(OwnedExpr::BVslt(Box::new(args[1].clone()), Box::new(args[0].clone())));
+        return Ok(OwnedExpr::BVslt(
+            Box::new(args[1].clone()),
+            Box::new(args[0].clone()),
+        ));
     }
     if opname == "bvsge" && args.len() == 2 {
-        return Ok(OwnedExpr::BVsle(Box::new(args[1].clone()), Box::new(args[0].clone())));
+        return Ok(OwnedExpr::BVsle(
+            Box::new(args[1].clone()),
+            Box::new(args[0].clone()),
+        ));
     }
     operator1!("not", Not);
     if opname == "and" && args.len() >= 2 {

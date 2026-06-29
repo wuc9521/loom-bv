@@ -34,7 +34,7 @@ pub mod verifier;
 
 pub use bitspec::Constraint;
 pub use stats::DedupStats;
-pub use types::{Grammar, ExactRule};
+pub use types::{ExactRule, Grammar};
 
 // Cache control wrappers used by the LFP/closure frontend.
 pub fn enable_eval_cache() {

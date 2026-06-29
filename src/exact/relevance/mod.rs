@@ -15,12 +15,10 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::{info, parse::deffun};
 
-use super::{Grammar, ExactRule};
+use super::{ExactRule, Grammar};
 
 use bits::{BitDep, BitSet, WorkItem};
-use deps::{
-    compute_template_dep_bit, get_deffun_dep_bits, DepCache, TemplateDepCache,
-};
+use deps::{compute_template_dep_bit, get_deffun_dep_bits, DepCache, TemplateDepCache};
 
 pub struct Relevance<'a> {
     grammar: &'a Grammar<'a>,

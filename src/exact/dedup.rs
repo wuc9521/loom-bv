@@ -37,23 +37,20 @@ impl SeenMode {
         }
     }
 
-    pub fn contains_or_insert_multi(
-        &mut self,
-        nt: usize,
-        values: &[BitVec],
-        size: usize,
-    ) -> bool {
+    pub fn contains_or_insert_multi(&mut self, nt: usize, values: &[BitVec], size: usize) -> bool {
         match self {
-            SeenMode::MultiExact { maps } => {
-                match maps[nt].entry(values.to_vec()) {
-                    Entry::Occupied(_) => true,
-                    Entry::Vacant(e) => {
-                        e.insert(size);
-                        false
-                    }
+            SeenMode::MultiExact { maps } => match maps[nt].entry(values.to_vec()) {
+                Entry::Occupied(_) => true,
+                Entry::Vacant(e) => {
+                    e.insert(size);
+                    false
                 }
-            }
-            SeenMode::MultiProjected { relevant_bits, num_examples, maps } => {
+            },
+            SeenMode::MultiProjected {
+                relevant_bits,
+                num_examples,
+                maps,
+            } => {
                 let key = project_multi(values, &relevant_bits[nt], *num_examples);
                 match maps[nt].entry(key) {
                     Entry::Occupied(_) => true,
@@ -67,7 +64,11 @@ impl SeenMode {
     }
 }
 
-fn project_multi(values: &[BitVec], relevant_bits: &[usize], _num_examples: usize) -> ProjectionKey {
+fn project_multi(
+    values: &[BitVec],
+    relevant_bits: &[usize],
+    _num_examples: usize,
+) -> ProjectionKey {
     let mut words = Vec::new();
     for value in values {
         words.extend(value.project_bits(relevant_bits));

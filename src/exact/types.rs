@@ -47,11 +47,7 @@ pub struct ExactEvalCache {
 }
 
 impl TemplateExpr {
-    pub fn evaluate(
-        &self,
-        args: &[BitVec],
-        cache: &mut ExactEvalCache,
-    ) -> Result<BitVec, ()> {
+    pub fn evaluate(&self, args: &[BitVec], cache: &mut ExactEvalCache) -> Result<BitVec, ()> {
         match self {
             TemplateExpr::Slot(i) => Ok(args[*i].clone()),
             TemplateExpr::Leaf(expr) => cache
@@ -160,15 +156,23 @@ fn eval_op_on_values(op: &str, values: &[BitVec]) -> Result<BitVec, ()> {
         ("bvsge", 2) => Ok(op::sle(values[1].clone(), values[0].clone())),
         ("and", n) if n >= 2 => {
             let mut acc = values[0].clone();
-            for a in &values[1..] { acc = acc.bitor(a.clone()); }
+            for a in &values[1..] {
+                acc = acc.bitor(a.clone());
+            }
             Ok(acc)
         }
         ("or", n) if n >= 2 => {
             let mut acc = values[0].clone();
-            for a in &values[1..] { acc = acc.bitand(a.clone()); }
+            for a in &values[1..] {
+                acc = acc.bitand(a.clone());
+            }
             Ok(acc)
         }
-        ("ite", 3) => Ok(op::ite(values[0].clone(), values[1].clone(), values[2].clone())),
+        ("ite", 3) => Ok(op::ite(
+            values[0].clone(),
+            values[1].clone(),
+            values[2].clone(),
+        )),
         _ => {
             if let Some(fid) = deffun::ENV.lookup(op, values.len()) {
                 deffun::ENV.eval_defined(fid, values, &[]).map_err(|_| ())

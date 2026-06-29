@@ -77,8 +77,7 @@ impl SampleConfig {
         let mut filter = self
             .filter
             .state(args.clone(), &out, &bump, self.partial_solution);
-        let mut algo =
-            algo::Algo::new(problem, args, out.clone(), self.dag_size, &bump)?;
+        let mut algo = algo::Algo::new(problem, args, out.clone(), self.dag_size, &bump)?;
         let _ = algo.run_until(|algo, e, v| filter.filter(algo, e, v, sol));
         let result = !filter.solved;
         info!(
@@ -98,7 +97,7 @@ impl SampleConfig {
     ) -> parse::Result<bool> {
         use crate::deductive::unified::DeductiveState;
         use crate::enumerate::grammar::Config;
-        use crate::exact::{Constraint, search::enumerate_start, types::Grammar};
+        use crate::exact::{search::enumerate_start, types::Grammar, Constraint};
         use rand::seq::IteratorRandom;
 
         let n = min(self.sample, sol.pbecstr.len());
@@ -141,9 +140,7 @@ impl SampleConfig {
                 solved = true;
                 return Err(());
             }
-            if deductive.count >= count_limit
-                || (solved && deductive.count >= count_limit_solved)
-            {
+            if deductive.count >= count_limit || (solved && deductive.count >= count_limit_solved) {
                 return Err(());
             }
             Ok(())

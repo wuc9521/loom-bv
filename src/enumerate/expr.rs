@@ -58,7 +58,11 @@ pub fn format_func_app(fid: usize, args: &[&Expr<'_>]) -> String {
     if args.is_empty() {
         return name.to_string();
     }
-    let rendered = args.iter().map(|a| format!("{}", a)).collect::<Vec<_>>().join(" ");
+    let rendered = args
+        .iter()
+        .map(|a| format!("{}", a))
+        .collect::<Vec<_>>()
+        .join(" ");
     format!("({} {})", name, rendered)
 }
 
@@ -124,18 +128,30 @@ impl<'a> Expr<'a> {
             return Ok(value.extract(*hi, *lo));
         }
         if let Expr::Func(id, args_expr) = self {
-            let values = args_expr.iter().map(|a| a.eval(args)).collect::<Result<Vec<_>, _>>()?;
+            let values = args_expr
+                .iter()
+                .map(|a| a.eval(args))
+                .collect::<Result<Vec<_>, _>>()?;
             return deffun::ENV.eval_defined(*id, &values, &[]);
-        }        if let Expr::Const(a) = self {
+        }
+        if let Expr::Const(a) = self {
             return Ok(a.clone());
         }
         if let Expr::Ite(a, b, c) = self {
             return Ok(op::ite(a.eval(args)?, b.eval(args)?, c.eval(args)?));
         }
-        if let Expr::BVule(a, b) = self { return Ok(op::ule(a.eval(args)?, b.eval(args)?)); }
-        if let Expr::BVult(a, b) = self { return Ok(op::ult(a.eval(args)?, b.eval(args)?)); }
-        if let Expr::BVsle(a, b) = self { return Ok(op::sle(a.eval(args)?, b.eval(args)?)); }
-        if let Expr::BVslt(a, b) = self { return Ok(op::slt(a.eval(args)?, b.eval(args)?)); }
+        if let Expr::BVule(a, b) = self {
+            return Ok(op::ule(a.eval(args)?, b.eval(args)?));
+        }
+        if let Expr::BVult(a, b) = self {
+            return Ok(op::ult(a.eval(args)?, b.eval(args)?));
+        }
+        if let Expr::BVsle(a, b) = self {
+            return Ok(op::sle(a.eval(args)?, b.eval(args)?));
+        }
+        if let Expr::BVslt(a, b) = self {
+            return Ok(op::slt(a.eval(args)?, b.eval(args)?));
+        }
         all_ops!(arity nonzero);
         panic!("should not reach here. {:?}", self);
     }
@@ -171,10 +187,18 @@ impl<'a> Expr<'a> {
         if let Expr::Ite(a, b, c) = self {
             return op::bv::ite(a.eval_bv(args), b.eval_bv(args), c.eval_bv(args));
         }
-        if let Expr::BVule(a, b) = self { return op::bv::ule(a.eval_bv(args), b.eval_bv(args)); }
-        if let Expr::BVult(a, b) = self { return op::bv::ult(a.eval_bv(args), b.eval_bv(args)); }
-        if let Expr::BVsle(a, b) = self { return op::bv::sle(a.eval_bv(args), b.eval_bv(args)); }
-        if let Expr::BVslt(a, b) = self { return op::bv::slt(a.eval_bv(args), b.eval_bv(args)); }
+        if let Expr::BVule(a, b) = self {
+            return op::bv::ule(a.eval_bv(args), b.eval_bv(args));
+        }
+        if let Expr::BVult(a, b) = self {
+            return op::bv::ult(a.eval_bv(args), b.eval_bv(args));
+        }
+        if let Expr::BVsle(a, b) = self {
+            return op::bv::sle(a.eval_bv(args), b.eval_bv(args));
+        }
+        if let Expr::BVslt(a, b) = self {
+            return op::bv::slt(a.eval_bv(args), b.eval_bv(args));
+        }
         all_ops!(arity);
         panic!("should not reach here. {:?}", self);
     }
@@ -215,7 +239,10 @@ impl<'a> Expr<'a> {
             return bump.alloc(Expr::Extract(Self::from_owned(bump, a), *hi, *lo));
         }
         if let OwnedExpr::Func(id, owned_args) = expr {
-            let children: Vec<&'a Expr<'a>> = owned_args.iter().map(|a| Self::from_owned(bump, a)).collect();
+            let children: Vec<&'a Expr<'a>> = owned_args
+                .iter()
+                .map(|a| Self::from_owned(bump, a))
+                .collect();
             let slice = bump.alloc_slice_copy(&children);
             return bump.alloc(Expr::Func(*id, slice));
         }
@@ -232,10 +259,30 @@ impl<'a> Expr<'a> {
                 Self::from_owned(bump, c),
             ));
         }
-        if let OwnedExpr::BVule(a, b) = expr { return bump.alloc(Expr::BVule(Self::from_owned(bump, a), Self::from_owned(bump, b))); }
-        if let OwnedExpr::BVult(a, b) = expr { return bump.alloc(Expr::BVult(Self::from_owned(bump, a), Self::from_owned(bump, b))); }
-        if let OwnedExpr::BVsle(a, b) = expr { return bump.alloc(Expr::BVsle(Self::from_owned(bump, a), Self::from_owned(bump, b))); }
-        if let OwnedExpr::BVslt(a, b) = expr { return bump.alloc(Expr::BVslt(Self::from_owned(bump, a), Self::from_owned(bump, b))); }
+        if let OwnedExpr::BVule(a, b) = expr {
+            return bump.alloc(Expr::BVule(
+                Self::from_owned(bump, a),
+                Self::from_owned(bump, b),
+            ));
+        }
+        if let OwnedExpr::BVult(a, b) = expr {
+            return bump.alloc(Expr::BVult(
+                Self::from_owned(bump, a),
+                Self::from_owned(bump, b),
+            ));
+        }
+        if let OwnedExpr::BVsle(a, b) = expr {
+            return bump.alloc(Expr::BVsle(
+                Self::from_owned(bump, a),
+                Self::from_owned(bump, b),
+            ));
+        }
+        if let OwnedExpr::BVslt(a, b) = expr {
+            return bump.alloc(Expr::BVslt(
+                Self::from_owned(bump, a),
+                Self::from_owned(bump, b),
+            ));
+        }
         all_ops!(arity);
         panic!();
     }
@@ -379,7 +426,11 @@ impl OwnedExpr {
         fn extract_indices(id: &Identifier) -> Option<(u64, u64)> {
             let (hi, lo) = crate::parse::extract_indices_from_identifier(id)?;
             let (hi, lo) = (hi as u64, lo as u64);
-            if hi >= lo { Some((hi, lo)) } else { None }
+            if hi >= lo {
+                Some((hi, lo))
+            } else {
+                None
+            }
         }
 
         fn identifier_to_value(id: &Identifier) -> Option<parse::Result<BitVec>> {
@@ -393,15 +444,21 @@ impl OwnedExpr {
                 Some(Ok(BitVec::from_u64(1, 1)))
             } else if let Some(digits) = name.strip_prefix("#x") {
                 let bits = digits.len() * 4;
-                Some(crate::parse::constraint::parse_bv_digits(digits, 16, bits.max(1)))
+                Some(crate::parse::constraint::parse_bv_digits(
+                    digits,
+                    16,
+                    bits.max(1),
+                ))
             } else if let Some(digits) = name.strip_prefix("#b") {
                 let bits = digits.len();
-                Some(crate::parse::constraint::parse_bv_digits(digits, 2, bits.max(1)))
+                Some(crate::parse::constraint::parse_bv_digits(
+                    digits,
+                    2,
+                    bits.max(1),
+                ))
             } else if let Some(digits) = name.strip_prefix("#d") {
                 Some(crate::parse::constraint::parse_bv_digits(digits, 10, 64))
-            } else if let Some((digits, width)) =
-                crate::parse::constraint::indexed_bv_literal(id)
-            {
+            } else if let Some((digits, width)) = crate::parse::constraint::indexed_bv_literal(id) {
                 // SMT-LIB indexed bit-vector literal `(_ bvDECIMAL WIDTH)`.
                 Some(crate::parse::constraint::parse_bv_digits(digits, 10, width))
             } else {
@@ -481,16 +538,28 @@ impl OwnedExpr {
                 operator2!("bvsle", BVsle);
                 operator2!("bvslt", BVslt);
                 if opname == "bvugt" && args.len() == 2 {
-                    return Ok(Self::BVult(Box::new(Self::from_term_lower(&args[1], env)?), Box::new(Self::from_term_lower(&args[0], env)?)));
+                    return Ok(Self::BVult(
+                        Box::new(Self::from_term_lower(&args[1], env)?),
+                        Box::new(Self::from_term_lower(&args[0], env)?),
+                    ));
                 }
                 if opname == "bvuge" && args.len() == 2 {
-                    return Ok(Self::BVule(Box::new(Self::from_term_lower(&args[1], env)?), Box::new(Self::from_term_lower(&args[0], env)?)));
+                    return Ok(Self::BVule(
+                        Box::new(Self::from_term_lower(&args[1], env)?),
+                        Box::new(Self::from_term_lower(&args[0], env)?),
+                    ));
                 }
                 if opname == "bvsgt" && args.len() == 2 {
-                    return Ok(Self::BVslt(Box::new(Self::from_term_lower(&args[1], env)?), Box::new(Self::from_term_lower(&args[0], env)?)));
+                    return Ok(Self::BVslt(
+                        Box::new(Self::from_term_lower(&args[1], env)?),
+                        Box::new(Self::from_term_lower(&args[0], env)?),
+                    ));
                 }
                 if opname == "bvsge" && args.len() == 2 {
-                    return Ok(Self::BVsle(Box::new(Self::from_term_lower(&args[1], env)?), Box::new(Self::from_term_lower(&args[0], env)?)));
+                    return Ok(Self::BVsle(
+                        Box::new(Self::from_term_lower(&args[1], env)?),
+                        Box::new(Self::from_term_lower(&args[0], env)?),
+                    ));
                 }
                 // SyGuS boolean connectives may appear in define-fun bodies; booleans
                 // are represented as 1-bit bitvectors in this codebase.
@@ -608,16 +677,27 @@ impl OwnedExpr {
         if let OwnedExpr::Ite(a, b, c) = self {
             return 1 + a.size() + b.size() + c.size();
         }
-        if let OwnedExpr::BVule(a, b) = self { return 1 + a.size() + b.size(); }
-        if let OwnedExpr::BVult(a, b) = self { return 1 + a.size() + b.size(); }
-        if let OwnedExpr::BVsle(a, b) = self { return 1 + a.size() + b.size(); }
-        if let OwnedExpr::BVslt(a, b) = self { return 1 + a.size() + b.size(); }
+        if let OwnedExpr::BVule(a, b) = self {
+            return 1 + a.size() + b.size();
+        }
+        if let OwnedExpr::BVult(a, b) = self {
+            return 1 + a.size() + b.size();
+        }
+        if let OwnedExpr::BVsle(a, b) = self {
+            return 1 + a.size() + b.size();
+        }
+        if let OwnedExpr::BVslt(a, b) = self {
+            return 1 + a.size() + b.size();
+        }
         all_ops!(arity);
         panic!();
     }
 
     pub fn to_sygus(&self, arg_names: &[&str]) -> String {
-        let scoped = arg_names.iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
+        let scoped = arg_names
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
         self.to_sygus_with_env(&scoped)
     }
 
@@ -707,10 +787,34 @@ impl OwnedExpr {
                 c.to_sygus_with_env(names)
             );
         }
-        if let OwnedExpr::BVule(a, b) = self { return format!("(bvule {} {})", a.to_sygus_with_env(names), b.to_sygus_with_env(names)); }
-        if let OwnedExpr::BVult(a, b) = self { return format!("(bvult {} {})", a.to_sygus_with_env(names), b.to_sygus_with_env(names)); }
-        if let OwnedExpr::BVsle(a, b) = self { return format!("(bvsle {} {})", a.to_sygus_with_env(names), b.to_sygus_with_env(names)); }
-        if let OwnedExpr::BVslt(a, b) = self { return format!("(bvslt {} {})", a.to_sygus_with_env(names), b.to_sygus_with_env(names)); }
+        if let OwnedExpr::BVule(a, b) = self {
+            return format!(
+                "(bvule {} {})",
+                a.to_sygus_with_env(names),
+                b.to_sygus_with_env(names)
+            );
+        }
+        if let OwnedExpr::BVult(a, b) = self {
+            return format!(
+                "(bvult {} {})",
+                a.to_sygus_with_env(names),
+                b.to_sygus_with_env(names)
+            );
+        }
+        if let OwnedExpr::BVsle(a, b) = self {
+            return format!(
+                "(bvsle {} {})",
+                a.to_sygus_with_env(names),
+                b.to_sygus_with_env(names)
+            );
+        }
+        if let OwnedExpr::BVslt(a, b) = self {
+            return format!(
+                "(bvslt {} {})",
+                a.to_sygus_with_env(names),
+                b.to_sygus_with_env(names)
+            );
+        }
         all_ops!(arity);
         unreachable!()
     }
@@ -740,10 +844,18 @@ impl<'a> From<&Expr<'a>> for OwnedExpr {
                 Box::new((*e3).into()),
             );
         }
-        if let Expr::BVule(a, b) = value { return OwnedExpr::BVule(Box::new((*a).into()), Box::new((*b).into())); }
-        if let Expr::BVult(a, b) = value { return OwnedExpr::BVult(Box::new((*a).into()), Box::new((*b).into())); }
-        if let Expr::BVsle(a, b) = value { return OwnedExpr::BVsle(Box::new((*a).into()), Box::new((*b).into())); }
-        if let Expr::BVslt(a, b) = value { return OwnedExpr::BVslt(Box::new((*a).into()), Box::new((*b).into())); }
+        if let Expr::BVule(a, b) = value {
+            return OwnedExpr::BVule(Box::new((*a).into()), Box::new((*b).into()));
+        }
+        if let Expr::BVult(a, b) = value {
+            return OwnedExpr::BVult(Box::new((*a).into()), Box::new((*b).into()));
+        }
+        if let Expr::BVsle(a, b) = value {
+            return OwnedExpr::BVsle(Box::new((*a).into()), Box::new((*b).into()));
+        }
+        if let Expr::BVslt(a, b) = value {
+            return OwnedExpr::BVslt(Box::new((*a).into()), Box::new((*b).into()));
+        }
         macro_rules! foreach_op {
             (1, $op:ident) => {
                 if let Expr::$op(e1) = value {
@@ -826,9 +938,7 @@ mod tests {
         use crate::parse::deffun::DefineFunPlan;
 
         // f(x: 4 bits) = bvult(x[1:0], x[3:2])
-        let slice = |hi, lo| {
-            OwnedExpr::Extract(Box::new(OwnedExpr::Var(0, 4)), hi, lo)
-        };
+        let slice = |hi, lo| OwnedExpr::Extract(Box::new(OwnedExpr::Var(0, 4)), hi, lo);
         let body = OwnedExpr::BVult(Box::new(slice(1, 0)), Box::new(slice(3, 2)));
         let plan = DefineFunPlan::compile(&body, &[4]);
         let DefineFunPlan::BitCircuit(bc) = &plan else {
@@ -868,7 +978,10 @@ impl OwnedExpr {
             | OwnedExpr::SDiv(a, _)
             | OwnedExpr::SRem(a, _) => a.width(),
             OwnedExpr::Ite(_, a, _) => a.width(),
-            OwnedExpr::BVule(_, _) | OwnedExpr::BVult(_, _) | OwnedExpr::BVsle(_, _) | OwnedExpr::BVslt(_, _) => 1,
+            OwnedExpr::BVule(_, _)
+            | OwnedExpr::BVult(_, _)
+            | OwnedExpr::BVsle(_, _)
+            | OwnedExpr::BVslt(_, _) => 1,
             OwnedExpr::SynthApp(idx, _) => deffun::synth_ret_bits(*idx),
         }
     }
@@ -971,16 +1084,28 @@ impl OwnedExpr {
             ));
         }
         if let OwnedExpr::BVule(a, b) = self {
-            return Ok(op::ule(a.eval_with_bindings(args, bindings)?, b.eval_with_bindings(args, bindings)?));
+            return Ok(op::ule(
+                a.eval_with_bindings(args, bindings)?,
+                b.eval_with_bindings(args, bindings)?,
+            ));
         }
         if let OwnedExpr::BVult(a, b) = self {
-            return Ok(op::ult(a.eval_with_bindings(args, bindings)?, b.eval_with_bindings(args, bindings)?));
+            return Ok(op::ult(
+                a.eval_with_bindings(args, bindings)?,
+                b.eval_with_bindings(args, bindings)?,
+            ));
         }
         if let OwnedExpr::BVsle(a, b) = self {
-            return Ok(op::sle(a.eval_with_bindings(args, bindings)?, b.eval_with_bindings(args, bindings)?));
+            return Ok(op::sle(
+                a.eval_with_bindings(args, bindings)?,
+                b.eval_with_bindings(args, bindings)?,
+            ));
         }
         if let OwnedExpr::BVslt(a, b) = self {
-            return Ok(op::slt(a.eval_with_bindings(args, bindings)?, b.eval_with_bindings(args, bindings)?));
+            return Ok(op::slt(
+                a.eval_with_bindings(args, bindings)?,
+                b.eval_with_bindings(args, bindings)?,
+            ));
         }
         if let OwnedExpr::SynthApp(synth_idx, call_args) = self {
             let evaled_args = call_args
@@ -1050,7 +1175,10 @@ impl OwnedExpr {
             return a.eval_bv(args).extract(*hi, *lo);
         }
         if let OwnedExpr::Func(id, exprs) = self {
-            let values = exprs.iter().map(|expr| expr.eval_bv(args)).collect::<Vec<_>>();
+            let values = exprs
+                .iter()
+                .map(|expr| expr.eval_bv(args))
+                .collect::<Vec<_>>();
             return deffun::ENV.apply(*id).eval_bv(&values);
         }
         if let OwnedExpr::Const(a) = self {
@@ -1062,10 +1190,18 @@ impl OwnedExpr {
         if let OwnedExpr::Ite(e1, e2, e3) = self {
             return op::bv::ite(e1.eval_bv(args), e2.eval_bv(args), e3.eval_bv(args));
         }
-        if let OwnedExpr::BVule(a, b) = self { return op::bv::ule(a.eval_bv(args), b.eval_bv(args)); }
-        if let OwnedExpr::BVult(a, b) = self { return op::bv::ult(a.eval_bv(args), b.eval_bv(args)); }
-        if let OwnedExpr::BVsle(a, b) = self { return op::bv::sle(a.eval_bv(args), b.eval_bv(args)); }
-        if let OwnedExpr::BVslt(a, b) = self { return op::bv::slt(a.eval_bv(args), b.eval_bv(args)); }
+        if let OwnedExpr::BVule(a, b) = self {
+            return op::bv::ule(a.eval_bv(args), b.eval_bv(args));
+        }
+        if let OwnedExpr::BVult(a, b) = self {
+            return op::bv::ult(a.eval_bv(args), b.eval_bv(args));
+        }
+        if let OwnedExpr::BVsle(a, b) = self {
+            return op::bv::sle(a.eval_bv(args), b.eval_bv(args));
+        }
+        if let OwnedExpr::BVslt(a, b) = self {
+            return op::bv::slt(a.eval_bv(args), b.eval_bv(args));
+        }
         all_ops!(arity);
         panic!("Should not reach here.")
     }

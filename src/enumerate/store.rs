@@ -1,7 +1,4 @@
-
-use super::{Bv, expr::Expr};
-
-
+use super::{expr::Expr, Bv};
 
 #[derive(Clone)]
 pub struct Store<'a, const N: usize>(Vec<Vec<(&'a Expr<'a>, Bv<N>)>>);
@@ -15,17 +12,10 @@ impl<'a, const N: usize> Store<'a, N> {
     pub fn set(&self, s: u64) -> &Vec<(&'a Expr<'a>, Bv<N>)> {
         &self.0[s as usize]
     }
-    pub fn append(&mut self, s: u64, r : Vec<(&'a Expr<'a>, Bv<N>)>) {
+    pub fn append(&mut self, s: u64, r: Vec<(&'a Expr<'a>, Bv<N>)>) {
         self.0[s as usize] = r;
     }
     pub fn len(&self) -> usize {
         self.0.iter().map(|x| x.len()).sum()
     }
-    
-
 }
-
-
-
-
-

@@ -250,10 +250,7 @@ pub fn parse_bit_constraints_grouped(
                 if let Some(old) = known_bits.get(&bit).copied() {
                     if old != val {
                         return Err(new_custom_error_span(
-                            format!(
-                                "Conflicting constraints on bit {} of {}",
-                                bit, target_name
-                            ),
+                            format!("Conflicting constraints on bit {} of {}", bit, target_name),
                             empty_span(),
                         ));
                     }
@@ -476,10 +473,7 @@ fn extract_on_phi_range(term: &SyGuSTerm, target: &str) -> Option<(usize, usize)
     }
 }
 
-fn collect_bit_constraints(
-    term: &SyGuSTerm,
-    target_name: &str,
-) -> Option<Vec<(usize, bool)>> {
+fn collect_bit_constraints(term: &SyGuSTerm, target_name: &str) -> Option<Vec<(usize, bool)>> {
     if let SyGuSTerm::Annotated(inner, _) = term {
         return collect_bit_constraints(inner, target_name);
     }
@@ -561,111 +555,108 @@ pub fn parse_ref_impl(
     target_name: &str,
     target_arity: usize,
 ) -> Result<Option<OwnedExpr>> {
-        fn target_var_indices(args: &[SyGuSTerm], target_args: &[SortedVar]) -> Option<Vec<usize>> {
-            let mut indices = Vec::with_capacity(args.len());
-            for arg in args {
-                let name = term_var_name(arg)?;
-                let idx = target_args.iter().position(|v| v.name == name)?;
-                indices.push(idx);
-            }
-            Some(indices)
+    fn target_var_indices(args: &[SyGuSTerm], target_args: &[SortedVar]) -> Option<Vec<usize>> {
+        let mut indices = Vec::with_capacity(args.len());
+        for arg in args {
+            let name = term_var_name(arg)?;
+            let idx = target_args.iter().position(|v| v.name == name)?;
+            indices.push(idx);
         }
+        Some(indices)
+    }
 
-        fn helper_env_from_call(
-            helper_formals: &[SortedVar],
-            helper_call_args: &[SyGuSTerm],
-            target_args: &[SortedVar],
-        ) -> Option<Vec<(&'static str, u64)>> {
-            if helper_formals.len() != helper_call_args.len() {
-                return None;
-            }
-            let mapping = target_var_indices(helper_call_args, target_args)?;
-            let mut env = target_args
-                .iter()
-                .map(|arg| {
-                    let name =
-                        Box::leak(format!("__unused_target_arg_{}", arg.name).into_boxed_str());
-                    (name as &'static str, 64_u64)
-                })
-                .collect::<Vec<_>>();
-            for (formal, target_idx) in helper_formals.iter().zip(mapping) {
-                let name = Box::leak(formal.name.clone().into_boxed_str()) as &'static str;
-                env[target_idx] = (name, 64);
-            }
-            Some(env)
+    fn helper_env_from_call(
+        helper_formals: &[SortedVar],
+        helper_call_args: &[SyGuSTerm],
+        target_args: &[SortedVar],
+    ) -> Option<Vec<(&'static str, u64)>> {
+        if helper_formals.len() != helper_call_args.len() {
+            return None;
         }
-
-        for def in &view.define_funs {
-            if def.name != target_name || def.args.len() != target_arity {
-                continue;
-            }
-            let vargs: Vec<(&'static str, u64)> = def
-                .args
-                .iter()
-                .map(|v| {
-                    let name = Box::leak(v.name.clone().into_boxed_str()) as &'static str;
-                    let bits = view.sort_aliases.parse_sort_width(&v.sort).unwrap_or(1) as u64;
-                    (name, bits)
-                })
-                .collect();
-            let e = OwnedExpr::from_term(def.body, &*vargs)?;
-        return Ok(Some(e));
-        }
-
-        let Some(target_decl) = view
-            .synth_funs
+        let mapping = target_var_indices(helper_call_args, target_args)?;
+        let mut env = target_args
             .iter()
-            .copied()
-            .find(|synth| synth.name == target_name)
-            .map(|synth| synth.args)
-        else {
-            return Ok(None);
+            .map(|arg| {
+                let name = Box::leak(format!("__unused_target_arg_{}", arg.name).into_boxed_str());
+                (name as &'static str, 64_u64)
+            })
+            .collect::<Vec<_>>();
+        for (formal, target_idx) in helper_formals.iter().zip(mapping) {
+            let name = Box::leak(formal.name.clone().into_boxed_str()) as &'static str;
+            env[target_idx] = (name, 64);
+        }
+        Some(env)
+    }
+
+    for def in &view.define_funs {
+        if def.name != target_name || def.args.len() != target_arity {
+            continue;
+        }
+        let vargs: Vec<(&'static str, u64)> = def
+            .args
+            .iter()
+            .map(|v| {
+                let name = Box::leak(v.name.clone().into_boxed_str()) as &'static str;
+                let bits = view.sort_aliases.parse_sort_width(&v.sort).unwrap_or(1) as u64;
+                (name, bits)
+            })
+            .collect();
+        let e = OwnedExpr::from_term(def.body, &*vargs)?;
+        return Ok(Some(e));
+    }
+
+    let Some(target_decl) = view
+        .synth_funs
+        .iter()
+        .copied()
+        .find(|synth| synth.name == target_name)
+        .map(|synth| synth.args)
+    else {
+        return Ok(None);
+    };
+
+    for term in &view.constraints {
+        let Some((lhs_eq, rhs_eq)) = term_eq(term) else {
+            continue;
         };
 
-        for term in &view.constraints {
-            let Some((lhs_eq, rhs_eq)) = term_eq(term) else {
+        let mut candidate = None;
+        for (lhs, rhs) in [(lhs_eq, rhs_eq), (rhs_eq, lhs_eq)] {
+            let Some((rhs_name, rhs_args)) = term_app(rhs) else {
                 continue;
             };
-
-            let mut candidate = None;
-            for (lhs, rhs) in [(lhs_eq, rhs_eq), (rhs_eq, lhs_eq)] {
-                let Some((rhs_name, rhs_args)) = term_app(rhs) else {
-                    continue;
-                };
-                if rhs_name != target_name || rhs_args.len() != target_arity {
-                    continue;
-                }
-                let expected = (0..target_decl.len()).collect::<Vec<_>>();
-                if target_var_indices(rhs_args, target_decl).as_deref() != Some(expected.as_slice())
-                {
-                    continue;
-                }
-                let Some((helper_name, helper_call_args)) = term_app(lhs) else {
-                    continue;
-                };
-                candidate = Some((helper_name, helper_call_args));
-                break;
+            if rhs_name != target_name || rhs_args.len() != target_arity {
+                continue;
             }
-
-            let Some((helper_name, helper_call_args)) = candidate else {
+            let expected = (0..target_decl.len()).collect::<Vec<_>>();
+            if target_var_indices(rhs_args, target_decl).as_deref() != Some(expected.as_slice()) {
+                continue;
+            }
+            let Some((helper_name, helper_call_args)) = term_app(lhs) else {
                 continue;
             };
-
-            for helper_def in &view.define_funs {
-                if helper_def.name != helper_name {
-                    continue;
-                }
-                let Some(env) =
-                    helper_env_from_call(helper_def.args, helper_call_args, target_decl)
-                else {
-                    continue;
-                };
-                let e = OwnedExpr::from_term(helper_def.body, &env)?;
-                return Ok(Some(e));
-            }
+            candidate = Some((helper_name, helper_call_args));
+            break;
         }
 
-        Ok(None)
+        let Some((helper_name, helper_call_args)) = candidate else {
+            continue;
+        };
+
+        for helper_def in &view.define_funs {
+            if helper_def.name != helper_name {
+                continue;
+            }
+            let Some(env) = helper_env_from_call(helper_def.args, helper_call_args, target_decl)
+            else {
+                continue;
+            };
+            let e = OwnedExpr::from_term(helper_def.body, &env)?;
+            return Ok(Some(e));
+        }
+    }
+
+    Ok(None)
 }
 
 #[cfg(feature = "chatgpt")]

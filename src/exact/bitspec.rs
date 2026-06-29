@@ -13,16 +13,12 @@ use crate::{
         value::BitVec,
         Bv,
     },
-    exact::{
-        relevance::Relevance,
-        search::search_problem,
-        types::Grammar,
-    },
+    exact::{relevance::Relevance, search::search_problem, types::Grammar},
     parse::{
         self,
         constraint::{
-            literal_to_value, parse_bit_constraints_grouped, parse_target_define_fun,
-            term_call_to, term_eq, BitConstraintExample,
+            literal_to_value, parse_bit_constraints_grouped, parse_target_define_fun, term_call_to,
+            term_eq, BitConstraintExample,
         },
         ProblemView, SynthProblem,
     },
@@ -139,7 +135,7 @@ impl Constraint {
                     mask: all_ones(bits),
                 }],
                 structural: vec![],
-                }));
+            }));
         }
         if let Some((parsed, structural)) =
             parse_bit_constraints_grouped(file, problem.name, problem.bits, &problem.args)?
@@ -156,7 +152,7 @@ impl Constraint {
                 args: problem.args.len(),
                 examples,
                 structural,
-                }));
+            }));
         }
         Ok(None)
     }
@@ -425,18 +421,11 @@ impl Constraint {
         format!("Here are some examples:\n{}", siter.join("\n"))
     }
 
-    pub fn search(
-        &self,
-        problem: &SynthProblem<'static>,
-        min: bool,
-    ) -> parse::Result<OwnedExpr> {
+    pub fn search(&self, problem: &SynthProblem<'static>, min: bool) -> parse::Result<OwnedExpr> {
         search_problem(problem, self, min, false)
     }
 
-    pub fn compute_relevant_bits(
-        &self,
-        grammar: &Grammar<'_>,
-    ) -> Option<Vec<Vec<usize>>> {
+    pub fn compute_relevant_bits(&self, grammar: &Grammar<'_>) -> Option<Vec<Vec<usize>>> {
         if !self.structural.is_empty() {
             return None;
         }

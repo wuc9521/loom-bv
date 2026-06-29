@@ -47,8 +47,7 @@ impl Verifier for FwdDeclsProblem {
         // Cap iterations at entry_bits + 1 (each round must add at
         // least one bit to demand_on_entry, else we've converged).
         for _ in 0..=self.entry_bits {
-            let Some(mut rel) = Relevance::new(grammar, self.entry_bits, &demand_on_entry)
-            else {
+            let Some(mut rel) = Relevance::new(grammar, self.entry_bits, &demand_on_entry) else {
                 return None;
             };
             while !rel.advance(1024) {}
@@ -62,11 +61,8 @@ impl Verifier for FwdDeclsProblem {
             for (nt, recipe) in &aux_nt {
                 for &s in &relevant[*nt] {
                     let mut cache = Default::default();
-                    let Some(bit_dep) = get_deffun_dep_bit(
-                        recipe.propagation_fid,
-                        s,
-                        &mut cache,
-                    ) else {
+                    let Some(bit_dep) = get_deffun_dep_bit(recipe.propagation_fid, s, &mut cache)
+                    else {
                         continue;
                     };
                     if let Some(entry_bits) = bit_dep.per_arg.first() {
@@ -106,10 +102,7 @@ impl Verifier for FwdDeclsProblem {
         deffun::set_candidate(self.entry_synth_idx, Some(candidate.clone()));
         // 1. Seed each auxiliary with its baseline.
         for r in &self.recipes {
-            deffun::set_candidate(
-                r.aux_synth_idx,
-                Some(OwnedExpr::Const(r.baseline.clone())),
-            );
+            deffun::set_candidate(r.aux_synth_idx, Some(OwnedExpr::Const(r.baseline.clone())));
         }
 
         // 2. Iterate to fixpoint. The lattice is finite (per-bit BV at
@@ -127,21 +120,15 @@ impl Verifier for FwdDeclsProblem {
             };
             let mut changed = false;
             for r in &self.recipes {
-                let prop = match deffun::ENV.eval_defined(
-                    r.propagation_fid,
-                    &[g_value.clone()],
-                    &[],
-                ) {
-                    Ok(v) => v,
-                    Err(_) => return false,
-                };
+                let prop =
+                    match deffun::ENV.eval_defined(r.propagation_fid, &[g_value.clone()], &[]) {
+                        Ok(v) => v,
+                        Err(_) => return false,
+                    };
                 let next = bvor(&r.baseline, &prop);
                 let current = current_aux_value(r);
                 if next != current {
-                    deffun::set_candidate(
-                        r.aux_synth_idx,
-                        Some(OwnedExpr::Const(next)),
-                    );
+                    deffun::set_candidate(r.aux_synth_idx, Some(OwnedExpr::Const(next)));
                     changed = true;
                 }
             }
@@ -153,11 +140,9 @@ impl Verifier for FwdDeclsProblem {
         // 3. Evaluate the remaining bit asserts against the now-LFP'd
         //    auxiliaries (their `SynthApp` lookups in the structural
         //    exprs will hit the values just written via `set_candidate`).
-        self.bit_asserts.iter().all(|expr| {
-            expr.eval(&[])
-                .map(|v| v.as_bool().holds())
-                .unwrap_or(false)
-        })
+        self.bit_asserts
+            .iter()
+            .all(|expr| expr.eval(&[]).map(|v| v.as_bool().holds()).unwrap_or(false))
     }
 }
 
@@ -168,10 +153,7 @@ fn bvor(a: &BitVec, b: &BitVec) -> BitVec {
 /// Walk each bit-assert expression collecting `(extract i i (SynthApp entry [])) = #b?`
 /// patterns. Returns the demanded entry-output bit positions with
 /// dummy `true` polarity (Relevance only uses the keys).
-fn extract_initial_demand(
-    bit_asserts: &[OwnedExpr],
-    entry_idx: usize,
-) -> BTreeMap<usize, bool> {
+fn extract_initial_demand(bit_asserts: &[OwnedExpr], entry_idx: usize) -> BTreeMap<usize, bool> {
     fn walk(expr: &OwnedExpr, entry_idx: usize, out: &mut BTreeMap<usize, bool>) {
         if let OwnedExpr::Extract(inner, hi, lo) = expr {
             if hi == lo {
