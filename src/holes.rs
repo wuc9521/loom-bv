@@ -24,6 +24,50 @@ use sygus_parser::ast::{SyGuSGTerm, SyGuSTerm};
 use crate::parse::ProgramEnv;
 use crate::{debg, info};
 
+/// Build an `SmtConf` from environment variables so we can swap SMT solvers
+/// without editing the source between trials.
+///
+/// * `DELIS_SMT_SOLVER` picks the solver family (`z3` [default], `bitwuzla`,
+///   `cvc5`, `yices2`). The associated binary is expected on `PATH` under the
+///   canonical name, overridable via `DELIS_SMT_BINARY`.
+/// * `DELIS_SMT_ARGS` is a semicolon-separated list of extra command-line
+///   options appended to the solver invocation, e.g. `smt.random_seed=1;sat.threads=4`.
+fn smt_conf_from_env() -> SmtConf {
+    let solver = std::env::var("DELIS_SMT_SOLVER").unwrap_or_else(|_| "yices2".into());
+    let bin = std::env::var("DELIS_SMT_BINARY").ok();
+    let mut conf = match solver.as_str() {
+        "bitwuzla" => {
+            let mut c = SmtConf::yices_2(bin.unwrap_or_else(|| "bitwuzla".into()));
+            c.option("--lang");
+            c.option("smt2");
+            c.option("-m");
+            c
+        }
+        "cvc5" => {
+            // cvc5 speaks SMT-LIB2 and supports incremental push/pop. We reuse
+            // the cvc4 factory (same protocol) with the `cvc5` binary name.
+            let mut c = SmtConf::cvc4(bin.unwrap_or_else(|| "cvc5".into()));
+            c.option("--lang=smt2");
+            c.option("--incremental");
+            c.option("--produce-models");
+            c
+        }
+        "yices2" => {
+            let mut c = SmtConf::yices_2(bin.unwrap_or_else(|| "yices-smt2".into()));
+            c.option("--incremental");
+            c
+        }
+        // "z3" and anything else fall back to z3.
+        _ => SmtConf::z3(bin.unwrap_or_else(|| "z3".into())),
+    };
+    if let Ok(extra) = std::env::var("DELIS_SMT_ARGS") {
+        for opt in extra.split(';').filter(|s| !s.is_empty()) {
+            conf.option(opt);
+        }
+    }
+    conf
+}
+
 /// A production template for one grammar nonterminal.
 enum Tmpl {
     /// `(Constant T)` — expands to a fresh hole of the given sort.
@@ -166,7 +210,7 @@ impl HoleSpec {
         // One persistent solver session: the (heavy) define-funs are sent once
         // as the base scope, then each skeleton is solved in a push/pop frame.
         // This amortizes process startup + define-fun setup across all skeletons.
-        let conf = SmtConf::default_z3();
+        let conf = smt_conf_from_env();
         let mut solver = conf
             .spawn(Parser)
             .map_err(|e| format!("failed to spawn z3 (is it on PATH?): {e}"))?;
@@ -277,7 +321,7 @@ impl HoleSpec {
         let mut seen_any = false;
         let mut empty_streak = 0usize;
 
-        let conf = SmtConf::default_z3();
+        let conf = smt_conf_from_env();
         let mut solver = conf
             .spawn(Parser)
             .map_err(|e| format!("failed to spawn z3 (is it on PATH?): {e}"))?;
