@@ -68,6 +68,27 @@ fn smt_conf_from_env() -> SmtConf {
     conf
 }
 
+/// Send `(set-option ...)` commands from `DELIS_SMT_OPTIONS` env var.
+/// Format: semicolon-separated `key=value` pairs (e.g.
+/// `yices-fast-restarts=true;yices-var-elim=true`). Each becomes
+/// `(set-option :key value)`.
+fn apply_smt_options(solver: &mut Solver<Parser>) -> crate::SolverResult<()> {
+    if let Ok(opts) = std::env::var("DELIS_SMT_OPTIONS") {
+        for kv in opts.split(';').filter(|s| !s.is_empty()) {
+            let (key, val) = kv.split_once('=').unwrap_or((kv, "true"));
+            let key = if key.starts_with(':') {
+                key.to_string()
+            } else {
+                format!(":{key}")
+            };
+            solver
+                .set_option(&key, val)
+                .map_err(|e| format!("set-option {key} {val}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 /// A production template for one grammar nonterminal.
 enum Tmpl {
     /// `(Constant T)` — expands to a fresh hole of the given sort.
@@ -217,7 +238,8 @@ impl HoleSpec {
             .map_err(|e| format!("failed to spawn z3 (is it on PATH?): {e}"))?;
         solver
             .set_logic(rsmt2::Logic::QF_BV)
-            .map_err(|e| format!("z3 set-logic: {e}"))?;
+            .map_err(|e| format!("set-logic: {e}"))?;
+        apply_smt_options(&mut solver)?;
         solver
             .declare_const(self.synth_name.as_str(), self.ret_sort.as_str())
             .map_err(|e| format!("z3 declare {}: {e}", self.synth_name))?;
@@ -329,7 +351,8 @@ impl HoleSpec {
             .map_err(|e| format!("failed to spawn z3 (is it on PATH?): {e}"))?;
         solver
             .set_logic(rsmt2::Logic::QF_BV)
-            .map_err(|e| format!("z3 set-logic: {e}"))?;
+            .map_err(|e| format!("set-logic: {e}"))?;
+        apply_smt_options(&mut solver)?;
         solver
             .declare_const(self.synth_name.as_str(), self.ret_sort.as_str())
             .map_err(|e| format!("z3 declare {}: {e}", self.synth_name))?;
