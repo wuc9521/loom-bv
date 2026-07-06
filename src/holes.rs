@@ -44,33 +44,19 @@ fn smt_conf_from_env() -> SmtConf {
             c
         }
         "cvc5" => {
-            // cvc5 speaks SMT-LIB2 and supports incremental push/pop. We reuse
-            // the cvc4 factory (same protocol) with the `cvc5` binary name.
             let mut c = SmtConf::cvc4(bin.unwrap_or_else(|| "cvc5".into()));
             c.option("--lang=smt2");
             c.option("--incremental");
             c.option("--produce-models");
             c
         }
-        "boolector" => {
-            let mut c = SmtConf::yices_2(bin.unwrap_or_else(|| "boolector".into()));
-            c.option("--smt2");
-            c.option("--incremental");
-            c.option("--model-gen");
-            c
-        }
-        "mathsat" => {
-            let mut c = SmtConf::z3(bin.unwrap_or_else(|| "mathsat".into()));
-            c.option("-input=smt2");
-            c
-        }
-        "yices2" => {
+        "z3" => SmtConf::z3(bin.unwrap_or_else(|| "z3".into())),
+        // yices2 is the default — fastest for incremental QF_BV.
+        _ => {
             let mut c = SmtConf::yices_2(bin.unwrap_or_else(|| "yices-smt2".into()));
             c.option("--incremental");
             c
         }
-        // "z3" and anything else fall back to z3.
-        _ => SmtConf::z3(bin.unwrap_or_else(|| "z3".into())),
     };
     if let Ok(extra) = std::env::var("DELIS_SMT_ARGS") {
         for opt in extra.split(';').filter(|s| !s.is_empty()) {
