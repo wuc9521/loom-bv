@@ -264,8 +264,54 @@ impl HoleSpec {
 
         let mut tried = 0usize;
         for size in 0..=max_size {
-            let skels = self.gen(&self.start, size, &mut Vec::new());
-            if skels.is_empty() {
+            let size_start = std::time::Instant::now();
+            let size_tried_start = tried;
+            let size_deduped_start = deduped;
+            let mut size_count = 0usize;
+            let mut found: Option<String> = None;
+
+            self.for_each_gen(&self.start, size, &mut Vec::new(), &mut |skel| {
+                use std::ops::ControlFlow;
+                size_count += 1;
+                if !seen.insert(canon(&skel, &self.laws)) {
+                    deduped += 1;
+                    return ControlFlow::Continue(());
+                }
+                let mut sorts = Vec::new();
+                let body = render(&skel, &mut sorts, None);
+                tried += 1;
+                let t = std::time::Instant::now();
+                let res = match self.check(&mut solver, &body, &sorts) {
+                    Ok(r) => r,
+                    Err(_) => return ControlFlow::Break(()),
+                };
+                debg!(
+                    "skeleton #{tried} (size {size}, {} holes): {} in {:?} — {}",
+                    sorts.len(),
+                    if res.is_some() { "SAT" } else { "unsat" },
+                    t.elapsed(),
+                    summarize(&body)
+                );
+                if let Some(values) = res {
+                    let filled = render(&skel, &mut Vec::new(), Some(&values));
+                    found = Some(filled);
+                    return ControlFlow::Break(());
+                }
+                ControlFlow::Continue(())
+            });
+
+            if let Some(filled) = found {
+                info!(
+                    "const-hole: sat size={size} checked={tried} deduped={deduped} elapsed={:?}",
+                    size_start.elapsed(),
+                );
+                return Ok(format!(
+                    "(define-fun {} () {} {})",
+                    self.synth_name, self.ret_sort, filled
+                ));
+            }
+
+            if size_count == 0 {
                 if !recursive && seen_any {
                     empty_streak += 1;
                     if empty_streak > empty_cap {
@@ -276,41 +322,9 @@ impl HoleSpec {
             }
             seen_any = true;
             empty_streak = 0;
-            let size_start = std::time::Instant::now();
-            let size_tried_start = tried;
-            let size_deduped_start = deduped;
-            for skel in &skels {
-                if !seen.insert(canon(skel, &self.laws)) {
-                    deduped += 1;
-                    continue;
-                }
-                let mut sorts = Vec::new();
-                let body = render(skel, &mut sorts, None);
-                tried += 1;
-                let t = std::time::Instant::now();
-                let res = self.check(&mut solver, &body, &sorts)?;
-                debg!(
-                    "skeleton #{tried} (size {size}, {} holes): {} in {:?} — {}",
-                    sorts.len(),
-                    if res.is_some() { "SAT" } else { "unsat" },
-                    t.elapsed(),
-                    summarize(&body)
-                );
-                if let Some(values) = res {
-                    let filled = render(skel, &mut Vec::new(), Some(&values));
-                    info!(
-                        "const-hole: sat size={size} checked={tried} deduped={deduped} elapsed={:?}",
-                        size_start.elapsed(),
-                    );
-                    return Ok(format!(
-                        "(define-fun {} () {} {})",
-                        self.synth_name, self.ret_sort, filled
-                    ));
-                }
-            }
             debg!(
                 "const-hole: size={size} skeletons={} checked={} deduped={} total_checked={} total_deduped={} elapsed={:?}",
-                skels.len(),
+                size_count,
                 tried - size_tried_start,
                 deduped - size_deduped_start,
                 tried,
@@ -373,8 +387,58 @@ impl HoleSpec {
         let mut deduped = 0usize;
         let mut tried = 0usize;
         for size in 0..=max_size {
-            let skels = self.gen(&self.start, size, &mut Vec::new());
-            if skels.is_empty() {
+            let size_start = std::time::Instant::now();
+            let size_tried_start = tried;
+            let size_deduped_start = deduped;
+            let mut size_count = 0usize;
+            let mut found: Option<String> = None;
+
+            self.for_each_gen(&self.start, size, &mut Vec::new(), &mut |skel| {
+                use std::ops::ControlFlow;
+                size_count += 1;
+                if !seen.insert(canon(&skel, &self.laws)) {
+                    deduped += 1;
+                    return ControlFlow::Continue(());
+                }
+                let mut sorts = Vec::new();
+                let body = render(&skel, &mut sorts, None);
+                tried += 1;
+                let t = std::time::Instant::now();
+                let refuted = match self.check_refuter(&mut solver, &body, &sorts) {
+                    Ok(r) => r,
+                    Err(_) => return ControlFlow::Break(()),
+                };
+                debg!(
+                    "refuter skeleton #{tried} (size {size}, {} holes): {} in {:?} — {}",
+                    sorts.len(),
+                    if refuted { "SAT/refuted" } else { "unsat/accepted" },
+                    t.elapsed(),
+                    summarize(&body)
+                );
+                if !refuted {
+                    let defaults: Vec<String> = sorts
+                        .iter()
+                        .filter_map(|sort| default_value(sort))
+                        .collect();
+                    let filled = render(&skel, &mut Vec::new(), Some(&defaults));
+                    found = Some(filled);
+                    return ControlFlow::Break(());
+                }
+                ControlFlow::Continue(())
+            });
+
+            if let Some(filled) = found {
+                info!(
+                    "const-hole refuter: accepted size={size} checked={tried} deduped={deduped} elapsed={:?}",
+                    size_start.elapsed(),
+                );
+                return Ok(format!(
+                    "(define-fun {} () {} {})",
+                    self.synth_name, self.ret_sort, filled
+                ));
+            }
+
+            if size_count == 0 {
                 if !recursive && seen_any {
                     empty_streak += 1;
                     if empty_streak > empty_cap {
@@ -385,52 +449,9 @@ impl HoleSpec {
             }
             seen_any = true;
             empty_streak = 0;
-            let size_start = std::time::Instant::now();
-            let size_tried_start = tried;
-            let size_deduped_start = deduped;
-            for skel in &skels {
-                if !seen.insert(canon(skel, &self.laws)) {
-                    deduped += 1;
-                    continue;
-                }
-                let mut sorts = Vec::new();
-                let body = render(skel, &mut sorts, None);
-                tried += 1;
-                let t = std::time::Instant::now();
-                let refuted = self.check_refuter(&mut solver, &body, &sorts)?;
-                debg!(
-                    "refuter skeleton #{tried} (size {size}, {} holes): {} in {:?} — {}",
-                    sorts.len(),
-                    if refuted {
-                        "SAT/refuted"
-                    } else {
-                        "unsat/accepted"
-                    },
-                    t.elapsed(),
-                    summarize(&body)
-                );
-                if !refuted {
-                    let defaults = sorts
-                        .iter()
-                        .map(|sort| {
-                            default_value(sort)
-                                .ok_or_else(|| format!("no default value for hole sort {sort}"))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let filled = render(skel, &mut Vec::new(), Some(&defaults));
-                    info!(
-                        "const-hole refuter: accepted size={size} checked={tried} deduped={deduped} elapsed={:?}",
-                        size_start.elapsed(),
-                    );
-                    return Ok(format!(
-                        "(define-fun {} () {} {})",
-                        self.synth_name, self.ret_sort, filled
-                    ));
-                }
-            }
             debg!(
                 "const-hole refuter: size={size} skeletons={} checked={} deduped={} total_checked={} total_deduped={} elapsed={:?}",
-                skels.len(),
+                size_count,
                 tried - size_tried_start,
                 deduped - size_deduped_start,
                 tried,
@@ -546,7 +567,76 @@ impl HoleSpec {
         }
     }
 
-    /// Solve one skeleton's holes in a fresh push/pop frame on the shared
+    /// Callback-based skeleton generation: same enumeration as `gen` but calls
+    /// `f` per skeleton instead of collecting. Returns `Break` on early exit.
+    fn for_each_gen(
+        &self,
+        nt: &str,
+        size: usize,
+        visited: &mut Vec<String>,
+        f: &mut impl FnMut(Skel) -> std::ops::ControlFlow<()>,
+    ) -> std::ops::ControlFlow<()> {
+        use std::ops::ControlFlow;
+        if visited.iter().any(|v| v == nt) {
+            return ControlFlow::Continue(());
+        }
+        let Some(tmpls) = self.prods.get(nt) else {
+            return ControlFlow::Continue(());
+        };
+        for tmpl in tmpls {
+            match tmpl {
+                Tmpl::Hole(sort) => {
+                    if size == 0 {
+                        f(Skel::Hole(sort.clone()))?;
+                    }
+                }
+                Tmpl::Term(node) => {
+                    visited.push(nt.to_string());
+                    self.for_each_gen_node(node, size, visited, f)?;
+                    visited.pop();
+                }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn for_each_gen_node(
+        &self,
+        node: &Node,
+        size: usize,
+        visited: &mut Vec<String>,
+        f: &mut impl FnMut(Skel) -> std::ops::ControlFlow<()>,
+    ) -> std::ops::ControlFlow<()> {
+        use std::ops::ControlFlow;
+        match node {
+            Node::Nt(name) => self.for_each_gen(name, size, visited, f),
+            Node::Leaf(s) => {
+                if size == 0 {
+                    f(Skel::Leaf(s.clone()))?;
+                }
+                ControlFlow::Continue(())
+            }
+            Node::App(head, kids) => {
+                if size == 0 {
+                    return ControlFlow::Continue(());
+                }
+                for split in splits(size - 1, kids.len()) {
+                    let pools: Vec<Vec<Skel>> = kids
+                        .iter()
+                        .zip(&split)
+                        .map(|(kid, &s)| self.gen_node(kid, s, &mut Vec::new()))
+                        .collect();
+                    if pools.iter().any(|p| p.is_empty()) {
+                        continue;
+                    }
+                    for_each_product(&pools, &mut |combo| {
+                        f(Skel::App(head.clone(), combo))
+                    })?;
+                }
+                ControlFlow::Continue(())
+            }
+        }
+    }
     /// session. `Some(values)` on SAT (one per hole, in DFS order); `None` on
     /// UNSAT. A solver error propagates (it is NOT treated as unsat, which
     /// would silently skip a satisfiable skeleton).
@@ -807,6 +897,33 @@ fn product(pools: &[Vec<Skel>]) -> Vec<Vec<Skel>> {
         acc = next;
     }
     acc
+}
+
+/// Callback-based cartesian product — yields each combination without allocating
+/// the full product Vec.
+fn for_each_product(
+    pools: &[Vec<Skel>],
+    f: &mut impl FnMut(Vec<Skel>) -> std::ops::ControlFlow<()>,
+) -> std::ops::ControlFlow<()> {
+    use std::ops::ControlFlow;
+    fn recurse(
+        pools: &[Vec<Skel>],
+        idx: usize,
+        prefix: &mut Vec<Skel>,
+        f: &mut impl FnMut(Vec<Skel>) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        if idx == pools.len() {
+            return f(prefix.clone());
+        }
+        for item in &pools[idx] {
+            prefix.push(item.clone());
+            recurse(pools, idx + 1, prefix, f)?;
+            prefix.pop();
+        }
+        ControlFlow::Continue(())
+    }
+    let mut prefix = Vec::with_capacity(pools.len());
+    recurse(pools, 0, &mut prefix, f)
 }
 
 // ---------------------------------------------------------------------------
