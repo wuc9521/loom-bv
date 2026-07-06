@@ -620,16 +620,26 @@ impl HoleSpec {
                 if size == 0 {
                     return ControlFlow::Continue(());
                 }
+                // Pre-compute child pools: cache[kid_idx][child_size] -> Vec<Skel>
+                // This avoids recomputing gen_node(kid, s) across different splits.
+                let mut pool_cache: Vec<HashMap<usize, Vec<Skel>>> =
+                    kids.iter().map(|_| HashMap::new()).collect();
                 for split in splits(size - 1, kids.len()) {
-                    let pools: Vec<Vec<Skel>> = kids
+                    // Populate cache entries for this split's sizes.
+                    for (i, &s) in split.iter().enumerate() {
+                        pool_cache[i]
+                            .entry(s)
+                            .or_insert_with(|| self.gen_node(&kids[i], s, &mut Vec::new()));
+                    }
+                    let pools: Vec<&Vec<Skel>> = split
                         .iter()
-                        .zip(&split)
-                        .map(|(kid, &s)| self.gen_node(kid, s, &mut Vec::new()))
+                        .enumerate()
+                        .map(|(i, s)| &pool_cache[i][s])
                         .collect();
                     if pools.iter().any(|p| p.is_empty()) {
                         continue;
                     }
-                    for_each_product(&pools, &mut |combo| {
+                    for_each_product_ref(&pools, &mut |combo| {
                         f(Skel::App(head.clone(), combo))
                     })?;
                 }
@@ -901,13 +911,13 @@ fn product(pools: &[Vec<Skel>]) -> Vec<Vec<Skel>> {
 
 /// Callback-based cartesian product — yields each combination without allocating
 /// the full product Vec.
-fn for_each_product(
-    pools: &[Vec<Skel>],
+fn for_each_product_ref(
+    pools: &[&Vec<Skel>],
     f: &mut impl FnMut(Vec<Skel>) -> std::ops::ControlFlow<()>,
 ) -> std::ops::ControlFlow<()> {
     use std::ops::ControlFlow;
     fn recurse(
-        pools: &[Vec<Skel>],
+        pools: &[&Vec<Skel>],
         idx: usize,
         prefix: &mut Vec<Skel>,
         f: &mut impl FnMut(Vec<Skel>) -> ControlFlow<()>,
@@ -915,7 +925,7 @@ fn for_each_product(
         if idx == pools.len() {
             return f(prefix.clone());
         }
-        for item in &pools[idx] {
+        for item in pools[idx].iter() {
             prefix.push(item.clone());
             recurse(pools, idx + 1, prefix, f)?;
             prefix.pop();
