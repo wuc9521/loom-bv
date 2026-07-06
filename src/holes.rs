@@ -188,11 +188,12 @@ impl HoleSpec {
     pub fn solve(&self) -> crate::SolverResult<String> {
         let recursive = self.is_recursive();
         info!(
-            "const-hole: synth={} start={} nts={} recursive={} solver=z3",
+            "const-hole: synth={} start={} nts={} recursive={} solver={}",
             self.synth_name,
             self.start,
             self.prods.len(),
             recursive,
+            std::env::var("DELIS_SMT_SOLVER").unwrap_or_else(|_| "yices2".into()),
         );
         let max_size: usize = std::env::var("DRYAD_HOLE_MAX_SIZE")
             .ok()
@@ -306,11 +307,12 @@ impl HoleSpec {
     pub fn solve_refuter(&self) -> crate::SolverResult<String> {
         let recursive = self.is_recursive();
         info!(
-            "const-hole refuter: synth={} start={} nts={} recursive={} solver=z3",
+            "const-hole refuter: synth={} start={} nts={} recursive={} solver={}",
             self.synth_name,
             self.start,
             self.prods.len(),
             recursive,
+            std::env::var("DELIS_SMT_SOLVER").unwrap_or_else(|_| "yices2".into()),
         );
         let max_size: usize = std::env::var("DRYAD_HOLE_MAX_SIZE")
             .ok()
