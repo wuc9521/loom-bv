@@ -52,6 +52,18 @@ fn smt_conf_from_env() -> SmtConf {
             c.option("--produce-models");
             c
         }
+        "boolector" => {
+            let mut c = SmtConf::yices_2(bin.unwrap_or_else(|| "boolector".into()));
+            c.option("--smt2");
+            c.option("--incremental");
+            c.option("--model-gen");
+            c
+        }
+        "mathsat" => {
+            let mut c = SmtConf::z3(bin.unwrap_or_else(|| "mathsat".into()));
+            c.option("-input=smt2");
+            c
+        }
         "yices2" => {
             let mut c = SmtConf::yices_2(bin.unwrap_or_else(|| "yices-smt2".into()));
             c.option("--incremental");
