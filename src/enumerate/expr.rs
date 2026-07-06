@@ -582,6 +582,12 @@ impl OwnedExpr {
                     }
                     return Ok(acc);
                 }
+                if opname == "=>" && args.len() == 2 {
+                    // (=> a b) = (or (not a) b); internal: And(Not(a), b)
+                    let a = Self::from_term_lower(&args[0], env)?;
+                    let b = Self::from_term_lower(&args[1], env)?;
+                    return Ok(Self::And(Self::Not(a.into()).into(), b.into()));
+                }
                 if opname == "xor" && args.len() >= 2 {
                     let mut it = args.iter();
                     let mut acc = Self::from_term_lower(it.next().unwrap(), env)?;

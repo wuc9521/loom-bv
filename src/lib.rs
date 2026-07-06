@@ -418,6 +418,8 @@ fn solve_refuter_file_inner(
     _min: bool,
 ) -> SolverResult<String> {
     let view = ProgramEnv::from_file(file);
+    deffun::ENV.clear();
+    deffun::ENV.parse_from_view(&view)?;
     if let Some(spec) = holes::HoleSpec::detect(&view) {
         return spec.solve_refuter();
     }

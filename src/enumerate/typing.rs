@@ -147,6 +147,11 @@ pub fn check_sort<'s>(term: &'s SyGuSTerm, env: &[(&'s str, Sort)]) -> parse::Re
                 }
                 return Ok(Sort::Bool);
             }
+            if opname == "=>" && args.len() == 2 {
+                check_sort(&args[0], env)?.expect_bool("=>")?;
+                check_sort(&args[1], env)?.expect_bool("=>")?;
+                return Ok(Sort::Bool);
+            }
             if opname == "=" && args.len() == 2 {
                 let lhs = check_sort(&args[0], env)?;
                 let rhs = check_sort(&args[1], env)?;
