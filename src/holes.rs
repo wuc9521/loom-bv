@@ -651,7 +651,6 @@ impl HoleSpec {
         static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         let mut rng_state: u64 = 0xdeadbeef_cafebabe;
         let mut eval_ok = 0usize;
-        let mut constraint_hits = 0usize;
         for _ in 0..K {
             // Generate random values for each hole.
             let args: Vec<BitVec> = hole_widths
@@ -678,13 +677,12 @@ impl HoleSpec {
             });
 
             if all_sat {
-                constraint_hits += 1;
                 return Some(true); // Refuted by sampling!
             }
         }
 
         if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("sampling: first skeleton: eval_ok={eval_ok}/{K} constraint_hits={constraint_hits} constraints={} holes={} body_len={}",
+            eprintln!("sampling: first skeleton: eval_ok={eval_ok}/{K} constraints={} holes={} body_len={}",
                 constraint_exprs.len(), hole_widths.len(), body.len());
         }
 
