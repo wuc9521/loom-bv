@@ -372,7 +372,6 @@ impl HoleSpec {
         let mut seen: HashSet<String> = HashSet::new();
         let mut deduped = 0usize;
         let mut tried = 0usize;
-        let mut sampled = 0usize;
         for size in 0..=max_size {
             let skels = self.gen(&self.start, size, &mut Vec::new());
             if skels.is_empty() {
@@ -396,13 +395,6 @@ impl HoleSpec {
                 }
                 let mut sorts = Vec::new();
                 let body = render(skel, &mut sorts, None);
-                // Random-sampling pre-filter: try to refute cheaply before SMT.
-                if !sorts.is_empty() {
-                    if let Some(true) = self.try_refute_by_sampling(&body, &sorts) {
-                        sampled += 1;
-                        continue;
-                    }
-                }
                 tried += 1;
                 let t = std::time::Instant::now();
                 let refuted = self.check_refuter(&mut solver, &body, &sorts)?;
@@ -427,7 +419,7 @@ impl HoleSpec {
                         .collect::<Result<Vec<_>, _>>()?;
                     let filled = render(skel, &mut Vec::new(), Some(&defaults));
                     info!(
-                        "const-hole refuter: accepted size={size} checked={tried} deduped={deduped} sampled={sampled} elapsed={:?}",
+                        "const-hole refuter: accepted size={size} checked={tried} deduped={deduped} elapsed={:?}",
                         size_start.elapsed(),
                     );
                     return Ok(format!(
@@ -595,119 +587,6 @@ impl HoleSpec {
         };
         solver.pop(1).map_err(|e| format!("z3 pop: {e}"))?;
         Ok(result)
-    }
-
-    /// Try to refute a skeleton by random evaluation, avoiding the SMT solver.
-    /// Returns `Some(true)` if sampling proves the skeleton is refutable (SAT),
-    /// `None` if sampling cannot determine (either parse failure or all samples
-    /// failed to satisfy the constraints).
-    fn try_refute_by_sampling(
-        &self,
-        body: &str,
-        hole_sorts: &[String],
-    ) -> Option<bool> {
-        use crate::enumerate::expr::OwnedExpr;
-        use crate::enumerate::value::BitVec;
-
-        // Parse hole sorts into widths.
-        let hole_widths: Vec<usize> = hole_sorts
-            .iter()
-            .filter_map(|s| bitvec_width(s))
-            .collect();
-        if hole_widths.len() != hole_sorts.len() {
-            return None;
-        }
-
-        // Build env for parsing: holes h0, h1, ... as variables.
-        let env: Vec<(&str, u64)> = hole_widths
-            .iter()
-            .enumerate()
-            .map(|(i, w)| {
-                // Leak a small string for the lifetime — these are short-lived.
-                let name: &'static str = Box::leak(format!("h{i}").into_boxed_str());
-                (name, *w as u64)
-            })
-            .collect();
-
-        // Parse the body expression. This reuses the already-registered
-        // define-funs in the global Environ.
-        let parsed_term = match sygus_parser::SyGuSTerm::from_str(body) {
-            Ok(t) => t,
-            Err(_e) => {
-                eprintln!("sampling: failed to parse body: {}", &body[..body.len().min(80)]);
-                return None;
-            }
-        };
-        let expr = match OwnedExpr::from_term(&parsed_term, &env) {
-            Ok(e) => e,
-            Err(_e) => {
-                eprintln!("sampling: failed to lower body: {}", &body[..body.len().min(80)]);
-                return None;
-            }
-        };
-
-        // Parse the ret_sort width for the synth-fun result.
-        let ret_width = bitvec_width(&self.ret_sort)?;
-
-        // Parse the constraints once: each constraint is a boolean condition on
-        // the synth-fun value `g`. We parse each into an OwnedExpr that takes
-        // `g` as its sole variable.
-        let g_env: &[(&str, u64)] = &[(&self.synth_name, ret_width as u64)];
-        let constraint_exprs: Vec<OwnedExpr> = self.constraints.iter()
-            .filter_map(|c| {
-                let term = sygus_parser::SyGuSTerm::from_str(c).ok()?;
-                OwnedExpr::from_term(&term, g_env).ok()
-            })
-            .collect();
-        if constraint_exprs.is_empty() {
-            if !self.constraints.is_empty() {
-                eprintln!("sampling: 0/{} constraints parsed. first: {}",
-                    self.constraints.len(), &self.constraints[0][..self.constraints[0].len().min(100)]);
-            }
-            return None;
-        }
-
-        // Try K random hole assignments.
-        const K: usize = 32;
-        static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        let mut rng_state: u64 = 0xdeadbeef_cafebabe;
-        let mut eval_ok = 0usize;
-        for _ in 0..K {
-            // Generate random values for each hole.
-            let args: Vec<BitVec> = hole_widths
-                .iter()
-                .map(|w| {
-                    rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    BitVec::from_u64(rng_state, *w)
-                })
-                .collect();
-
-            // Evaluate the skeleton body with these hole values.
-            let g_val = match expr.eval(&args) {
-                Ok(v) => { eval_ok += 1; v },
-                Err(_) => continue,
-            };
-
-            // Check all constraints on the resulting g value.
-            // Constraints use internal boolean encoding: 0 = true.
-            let all_sat = constraint_exprs.iter().all(|c| {
-                match c.eval(&[g_val.clone()]) {
-                    Ok(v) => v.is_zero(),
-                    Err(_) => false,
-                }
-            });
-
-            if all_sat {
-                return Some(true); // Refuted by sampling!
-            }
-        }
-
-        if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("sampling: first skeleton: eval_ok={eval_ok}/{K} constraints={} holes={} body_len={}",
-                constraint_exprs.len(), hole_widths.len(), body.len());
-        }
-
-        None // Sampling inconclusive.
     }
 
     /// Refuter mode only needs SAT/UNSAT. On SAT the skeleton is discarded, so
