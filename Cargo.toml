@@ -40,7 +40,7 @@ lazy_static = "1.5.0"
 openai = { version = "1.0.0-alpha.13", optional = true }
 spin = "0.9.8"
 rustc-hash = "1.1.0"
-sygus-parser = { path = "../sygus-parser-rs" }
+sygus-parser = "0.1.5"
 
 [features]
 dhat-heap = ["dep:dhat"]
