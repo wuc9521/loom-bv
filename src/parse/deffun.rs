@@ -1,5 +1,6 @@
 use std::cell::UnsafeCell;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use derive_more::DebugCustom;
 use rustc_hash::{FxHashMap, FxHasher};
@@ -713,18 +714,31 @@ impl BitCircuitPlan {
 
 impl BitCircuitPlan {
     pub fn eval(&self, args: &[BitVec]) -> Result<BitVec, DivideByZero> {
-        let mut temps = Vec::with_capacity(self.bindings.len());
+        let mut temps = Vec::new();
+        let mut words = Vec::new();
+        Ok(self.eval_with_scratch(args, &mut temps, &mut words))
+    }
+
+    pub fn eval_with_scratch(
+        &self,
+        args: &[BitVec],
+        temps: &mut Vec<bool>,
+        words: &mut Vec<u64>,
+    ) -> BitVec {
+        temps.clear();
+        temps.reserve(self.bindings.len());
         for binding in &self.bindings {
-            let value = binding.eval(args, &temps);
+            let value = binding.eval(args, temps.as_slice());
             temps.push(value);
         }
-        let mut words = vec![0u64; self.ret_bits.div_ceil(64)];
+        words.clear();
+        words.resize(self.ret_bits.div_ceil(64), 0);
         for (bit_idx, atom) in self.output_bits.iter().enumerate() {
             if atom.eval(args, &temps) {
                 words[bit_idx / 64] |= 1u64 << (bit_idx % 64);
             }
         }
-        Ok(value_from_words(words, self.ret_bits))
+        value_from_word_slice(words, self.ret_bits)
     }
 }
 
@@ -772,7 +786,7 @@ impl BitCircuitPlan {
                 }
 
                 let num_words = self.ret_bits.div_ceil(64);
-                let mut out_words = vec![vec![0u64; num_words]; count];
+                let mut out_words = vec![0u64; count * num_words];
 
                 for (bit_idx, atom) in self.output_bits.iter().enumerate() {
                     let word = atom.word(&input_words, &temps, stride);
@@ -780,14 +794,16 @@ impl BitCircuitPlan {
                     let out_bit = bit_idx % 64;
                     for cand_idx in 0..count {
                         if (word >> cand_idx) & 1 == 1 {
-                            out_words[cand_idx][out_word_idx] |= 1u64 << out_bit;
+                            out_words[cand_idx * num_words + out_word_idx] |= 1u64 << out_bit;
                         }
                     }
                 }
 
-                out_words
-                    .into_iter()
-                    .map(|words| value_from_words(words, self.ret_bits))
+                (0..count)
+                    .map(|idx| {
+                        let start = idx * num_words;
+                        value_from_word_slice(&out_words[start..start + num_words], self.ret_bits)
+                    })
                     .collect()
             })
         })
@@ -1028,16 +1044,19 @@ fn ult_owned(a: &OwnedExpr, b: &OwnedExpr, width: usize) -> Option<OwnedExpr> {
     Some(lt)
 }
 
-fn value_from_words(words: Vec<u64>, bits: usize) -> BitVec {
+fn value_from_word_slice(words: &[u64], bits: usize) -> BitVec {
     if bits <= 64 {
         BitVec::from_u64(words.first().copied().unwrap_or(0), bits)
     } else {
         let mut raw = num_bigint::BigUint::from(0u8);
-        for word in words.iter().enumerate().rev() {
+        for &word in words.iter().rev() {
             raw <<= 64;
-            raw |= num_bigint::BigUint::from(word.1.to_owned());
+            raw |= num_bigint::BigUint::from(word);
         }
-        BitVec::from_biguint(raw, bits)
+        BitVec::Big {
+            bits,
+            raw: Arc::new(raw),
+        }
     }
 }
 

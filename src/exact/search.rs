@@ -476,7 +476,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                             &tuple_sizes,
                                             &tuple_indices,
                                             num_examples,
-                                            nary_pruned.as_deref(),
+                                            nary_batch_plan,
                                         ) {
                                             return Ok(Some(found));
                                         }
@@ -525,7 +525,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                             &tuple_sizes,
                                             &tuple_indices,
                                             num_examples,
-                                            nary_pruned.as_deref(),
+                                            nary_batch_plan,
                                         ) {
                                             return Ok(Some(found));
                                         }
@@ -555,7 +555,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                             &tuple_sizes,
                                             &tuple_indices,
                                             num_examples,
-                                            nary_pruned.as_deref(),
+                                            nary_batch_plan,
                                         ) {
                                             return Ok(Some(found));
                                         }
@@ -605,7 +605,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                         sizes,
                                         indices,
                                         num_examples,
-                                        nary_pruned.as_deref(),
+                                        nary_batch_plan,
                                     ) {
                                         found = Some(result);
                                         return true;
@@ -674,13 +674,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     let mut indices = Vec::with_capacity(child_nts.len());
                     for_each_index_tuple(&pool_lens, &mut indices, &mut |indices| {
                         if let Some(result) = self.try_push_template_from_indices(
-                            nt_idx,
-                            rule_idx,
-                            size,
-                            &template,
-                            &child_nts,
-                            sizes,
-                            indices,
+                            nt_idx, rule_idx, size, &template, &child_nts, sizes, indices,
                         ) {
                             found = Some(result);
                             return true;
@@ -712,16 +706,18 @@ impl<'a, 'g> Searcher<'a, 'g> {
         fid: usize,
         tuple: &[&Candidate],
         num_examples: usize,
-        pruned_plan: Option<&BitCircuitPlan>,
+        bit_circuit_plan: Option<&BitCircuitPlan>,
     ) -> Option<Vec<BitVec>> {
         let k = num_examples;
         let mut values = Vec::with_capacity(k);
         let mut args = Vec::with_capacity(tuple.len());
+        let mut temps = Vec::new();
+        let mut words = Vec::new();
         for i in 0..k {
             args.clear();
             args.extend(tuple.iter().map(|c| c.values[i].clone()));
-            let v = if let Some(plan) = pruned_plan {
-                plan.eval(&args).ok()?
+            let v = if let Some(plan) = bit_circuit_plan {
+                plan.eval_with_scratch(&args, &mut temps, &mut words)
             } else {
                 deffun::ENV.eval_defined(fid, &args, &[]).ok()?
             };
@@ -843,11 +839,9 @@ impl<'a, 'g> Searcher<'a, 'g> {
         for i in 0..k {
             for (j, item) in batch_candidates.iter().enumerate() {
                 example_args[j].clear();
-                example_args[j].extend(
-                    item.slots.iter().map(|(child_nt, child_size, index)| {
-                        self.by_size[*child_nt][*child_size][*index].values[i].clone()
-                    }),
-                );
+                example_args[j].extend(item.slots.iter().map(|(child_nt, child_size, index)| {
+                    self.by_size[*child_nt][*child_size][*index].values[i].clone()
+                }));
             }
             let example_refs: Vec<&[BitVec]> =
                 example_args.iter().map(|args| args.as_slice()).collect();
@@ -897,9 +891,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 .zip(sizes.iter())
                 .zip(indices.iter())
                 .map(|((child_nt, child_size), index)| {
-                    self.by_size[*child_nt][*child_size][*index]
-                        .values[example_idx]
-                        .clone()
+                    self.by_size[*child_nt][*child_size][*index].values[example_idx].clone()
                 })
                 .collect();
             let value = template
@@ -915,7 +907,9 @@ impl<'a, 'g> Searcher<'a, 'g> {
             .iter()
             .zip(sizes.iter())
             .zip(indices.iter())
-            .map(|((child_nt, child_size), index)| self.by_size[*child_nt][*child_size][*index].node)
+            .map(|((child_nt, child_size), index)| {
+                self.by_size[*child_nt][*child_size][*index].node
+            })
             .collect();
         self.try_push_new(nt_idx, size, all_values, || Node {
             nt_idx,
