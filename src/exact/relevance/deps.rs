@@ -19,6 +19,20 @@ use super::bits::{BitDep, BitSet};
 pub type DepCache = FxHashMap<(usize, usize), Option<BitDep>>;
 pub type TemplateDepCache = FxHashMap<(usize, usize), Option<BitDep>>;
 
+fn prefix_bits(width: usize, demanded: &BitSet) -> BitSet {
+    let mut out = BitSet::new(width);
+    if width == 0 {
+        return out;
+    }
+    let Some(bit) = demanded.iter_ones().max() else {
+        return out;
+    };
+    for b in 0..=bit.min(width - 1) {
+        out.insert(b);
+    }
+    out
+}
+
 pub fn get_deffun_dep_bit(fid: usize, bit: usize, cache: &mut DepCache) -> Option<BitDep> {
     if let Some(dep) = cache.get(&(fid, bit)) {
         return dep.clone();
@@ -117,20 +131,7 @@ fn compute_bit_circuit_dep_bits(
                 if std::mem::replace(&mut seen[*idx], true) {
                     return;
                 }
-                match &bindings[*idx] {
-                    BoolNode::Atom(atom) | BoolNode::Not(atom) => {
-                        visit_atom(atom, bindings, seen, out)
-                    }
-                    BoolNode::And(lhs, rhs) | BoolNode::Or(lhs, rhs) | BoolNode::Xor(lhs, rhs) => {
-                        visit_atom(lhs, bindings, seen, out);
-                        visit_atom(rhs, bindings, seen, out);
-                    }
-                    BoolNode::Ite(cond, then_atom, else_atom) => {
-                        visit_atom(cond, bindings, seen, out);
-                        visit_atom(then_atom, bindings, seen, out);
-                        visit_atom(else_atom, bindings, seen, out);
-                    }
-                }
+                bindings[*idx].visit_atoms(&mut |atom| visit_atom(atom, bindings, seen, out));
             }
         }
     }
@@ -247,10 +248,36 @@ fn compute_generic_dep_bit(
                     }
                     Some(combined)
                 }
-                PlanInstr::Neg { .. }
-                | PlanInstr::Add { .. }
-                | PlanInstr::Mul { .. }
-                | PlanInstr::Sub { .. }
+                PlanInstr::Neg { src } => {
+                    let mut dep = BitDep::empty(arg_bits);
+                    if slot_bits[*src] != 0 {
+                        for inner_bit in 0..=bit.min(slot_bits[*src] - 1) {
+                            dep.union_inplace(&slot_dep(
+                                *src, inner_bit, slot_bits, instrs, arg_bits, cache, memo,
+                            )?);
+                        }
+                    }
+                    Some(dep)
+                }
+                PlanInstr::Add { lhs, rhs } | PlanInstr::Sub { lhs, rhs } => {
+                    let mut dep = BitDep::empty(arg_bits);
+                    if slot_bits[*lhs] != 0 {
+                        for inner_bit in 0..=bit.min(slot_bits[*lhs] - 1) {
+                            dep.union_inplace(&slot_dep(
+                                *lhs, inner_bit, slot_bits, instrs, arg_bits, cache, memo,
+                            )?);
+                        }
+                    }
+                    if slot_bits[*rhs] != 0 {
+                        for inner_bit in 0..=bit.min(slot_bits[*rhs] - 1) {
+                            dep.union_inplace(&slot_dep(
+                                *rhs, inner_bit, slot_bits, instrs, arg_bits, cache, memo,
+                            )?);
+                        }
+                    }
+                    Some(dep)
+                }
+                PlanInstr::Mul { .. }
                 | PlanInstr::LShr { .. }
                 | PlanInstr::AShr { .. }
                 | PlanInstr::Shl { .. }
@@ -359,16 +386,16 @@ fn compute_generic_dep_bits(
                 }
             }
             PlanInstr::Neg { src } => {
-                enqueue_slot(
-                    *src,
-                    &BitSet::full(slot_bits[*src]),
-                    &mut demanded_by_slot,
-                    &mut stack,
-                );
+                let src_bits = prefix_bits(slot_bits[*src], &delta);
+                enqueue_slot(*src, &src_bits, &mut demanded_by_slot, &mut stack);
             }
-            PlanInstr::Add { lhs, rhs }
-            | PlanInstr::Mul { lhs, rhs }
-            | PlanInstr::Sub { lhs, rhs }
+            PlanInstr::Add { lhs, rhs } | PlanInstr::Sub { lhs, rhs } => {
+                let lhs_bits = prefix_bits(slot_bits[*lhs], &delta);
+                let rhs_bits = prefix_bits(slot_bits[*rhs], &delta);
+                enqueue_slot(*lhs, &lhs_bits, &mut demanded_by_slot, &mut stack);
+                enqueue_slot(*rhs, &rhs_bits, &mut demanded_by_slot, &mut stack);
+            }
+            PlanInstr::Mul { lhs, rhs }
             | PlanInstr::LShr { lhs, rhs }
             | PlanInstr::AShr { lhs, rhs }
             | PlanInstr::Shl { lhs, rhs }
@@ -484,6 +511,32 @@ fn compute_expr_dep_bit(
             let mut dep = compute_expr_dep_bit(lhs, arg_bits, bit, cache)?;
             let rhs_dep = compute_expr_dep_bit(rhs, arg_bits, bit, cache)?;
             dep.union_inplace(&rhs_dep);
+            Some(dep)
+        }
+        OwnedExpr::Neg(inner) => {
+            let mut dep = BitDep::empty(arg_bits);
+            let width = inner.width();
+            if width != 0 {
+                for inner_bit in 0..=bit.min(width - 1) {
+                    dep.union_inplace(&compute_expr_dep_bit(inner, arg_bits, inner_bit, cache)?);
+                }
+            }
+            Some(dep)
+        }
+        OwnedExpr::Add(lhs, rhs) | OwnedExpr::Sub(lhs, rhs) => {
+            let mut dep = BitDep::empty(arg_bits);
+            let lhs_width = lhs.width();
+            if lhs_width != 0 {
+                for inner_bit in 0..=bit.min(lhs_width - 1) {
+                    dep.union_inplace(&compute_expr_dep_bit(lhs, arg_bits, inner_bit, cache)?);
+                }
+            }
+            let rhs_width = rhs.width();
+            if rhs_width != 0 {
+                for inner_bit in 0..=bit.min(rhs_width - 1) {
+                    dep.union_inplace(&compute_expr_dep_bit(rhs, arg_bits, inner_bit, cache)?);
+                }
+            }
             Some(dep)
         }
         OwnedExpr::Ite(cond, then_expr, else_expr) => {

@@ -1,7 +1,3 @@
-#![feature(portable_simd)]
-#![feature(map_try_insert)]
-#![feature(int_roundings)]
-
 use enumerate::expr::OwnedExpr;
 use figment::{
     providers::{Format, Serialized, Toml},

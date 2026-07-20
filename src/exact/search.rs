@@ -49,6 +49,7 @@ struct Searcher<'a, 'g> {
     verifier: &'g dyn Verifier,
     output_bits: usize,
     num_examples: usize,
+    example_args: Vec<Vec<BitVec>>,
     nodes: Vec<Node>,
     by_size: Vec<Vec<Vec<Candidate>>>,
     seen: SeenMode,
@@ -60,6 +61,10 @@ struct Searcher<'a, 'g> {
     matches_count: usize,
 }
 
+struct BatchCandidate {
+    slots: Vec<(usize, usize, usize)>,
+}
+
 impl<'a, 'g> Searcher<'a, 'g> {
     fn new(
         grammar: Grammar<'a>,
@@ -68,6 +73,9 @@ impl<'a, 'g> Searcher<'a, 'g> {
         enable_decomp: bool,
     ) -> Self {
         let num_examples = verifier.num_examples();
+        let example_args = (0..num_examples)
+            .map(|i| verifier.example_args(i).to_vec())
+            .collect();
         let output_bits = verifier.output_bits();
         let relevance_disabled = !min;
         let eager_relevant_bits = if relevance_disabled {
@@ -118,9 +126,9 @@ impl<'a, 'g> Searcher<'a, 'g> {
         }
         let nt_count = grammar.nts.len();
         let seen = if let Some(relevant_bits) = eager_relevant_bits {
-            SeenMode::multi_projected(relevant_bits, num_examples)
+            SeenMode::projected_values(relevant_bits)
         } else {
-            SeenMode::multi_exact(nt_count, num_examples)
+            SeenMode::exact_values(nt_count)
         };
         // try_compose requires PBE-shaped examples; non-PBE verifiers
         // (e.g. fwd-decls) opt out via `pbe_examples() == None`.
@@ -130,6 +138,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
             verifier,
             output_bits,
             num_examples,
+            example_args,
             nodes: Vec::new(),
             by_size: vec![vec![Vec::<Candidate>::new()]; nt_count],
             seen,
@@ -168,9 +177,11 @@ impl<'a, 'g> Searcher<'a, 'g> {
                         };
                         let child_nt = *child_nt;
                         let before = self.by_size[nt_idx][size].len();
-                        let staged = self.by_size[child_nt][size].clone();
-                        for candidate in staged {
-                            if let Some(found) = self.try_push_existing(nt_idx, candidate, size) {
+                        let child_len = self.by_size[child_nt][size].len();
+                        for child_idx in 0..child_len {
+                            if let Some(found) =
+                                self.try_push_alias_candidate(nt_idx, child_nt, size, child_idx)
+                            {
                                 return Ok(found);
                             }
                         }
@@ -244,9 +255,9 @@ impl<'a, 'g> Searcher<'a, 'g> {
                         };
                         let child_nt = *child_nt;
                         let before = self.by_size[nt_idx][size].len();
-                        let staged = self.by_size[child_nt][size].clone();
-                        for candidate in staged {
-                            self.try_push_existing(nt_idx, candidate, size);
+                        let child_len = self.by_size[child_nt][size].len();
+                        for child_idx in 0..child_len {
+                            self.try_push_alias_candidate(nt_idx, child_nt, size, child_idx);
                         }
                         changed |= self.by_size[nt_idx][size].len() > before;
                     }
@@ -311,8 +322,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                     let plan = nary_batch_plan.unwrap();
                     let k = num_examples;
                     let nargs = child_nts.len();
-                    let mut batch_nodes: Vec<Vec<NodeId>> = Vec::with_capacity(64);
-                    let mut batch_args: Vec<Vec<BitVec>> = Vec::with_capacity(64);
+                    let mut batch_candidates: Vec<BatchCandidate> = Vec::with_capacity(64);
 
                     let is_binary_same_nt = nargs == 2 && child_nts[0] == child_nts[1];
                     if is_binary_same_nt && class.commutative {
@@ -341,17 +351,14 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                             &tuple_indices,
                                             rule_idx,
                                             assoc_skip_lhs,
-                                            &mut batch_nodes,
-                                            &mut batch_args,
-                                            k,
+                                            &mut batch_candidates,
                                         );
-                                        if batch_nodes.len() == 64 {
+                                        if batch_candidates.len() == 64 {
                                             if let Some(found) = self.flush_eval_batch(
                                                 nt_idx,
                                                 rule_idx,
                                                 size,
-                                                &mut batch_nodes,
-                                                &mut batch_args,
+                                                &mut batch_candidates,
                                                 plan,
                                                 k,
                                             ) {
@@ -370,17 +377,14 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                             &tuple_indices,
                                             rule_idx,
                                             assoc_skip_lhs,
-                                            &mut batch_nodes,
-                                            &mut batch_args,
-                                            k,
+                                            &mut batch_candidates,
                                         );
-                                        if batch_nodes.len() == 64 {
+                                        if batch_candidates.len() == 64 {
                                             if let Some(found) = self.flush_eval_batch(
                                                 nt_idx,
                                                 rule_idx,
                                                 size,
-                                                &mut batch_nodes,
-                                                &mut batch_args,
+                                                &mut batch_candidates,
                                                 plan,
                                                 k,
                                             ) {
@@ -413,19 +417,16 @@ impl<'a, 'g> Searcher<'a, 'g> {
                                     indices,
                                     rule_idx,
                                     assoc_skip_lhs,
-                                    &mut batch_nodes,
-                                    &mut batch_args,
-                                    k,
+                                    &mut batch_candidates,
                                 ) {
                                     return false;
                                 }
-                                if batch_nodes.len() == 64 {
+                                if batch_candidates.len() == 64 {
                                     if let Some(result) = self.flush_eval_batch(
                                         nt_idx,
                                         rule_idx,
                                         size,
-                                        &mut batch_nodes,
-                                        &mut batch_args,
+                                        &mut batch_candidates,
                                         plan,
                                         k,
                                     ) {
@@ -444,8 +445,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                         nt_idx,
                         rule_idx,
                         size,
-                        &mut batch_nodes,
-                        &mut batch_args,
+                        &mut batch_candidates,
                         plan,
                         k,
                     ) {
@@ -635,8 +635,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
                         let k = self.num_examples;
                         let mut values = Vec::with_capacity(k);
                         let mut ok = true;
-                        for i in 0..k {
-                            let args = self.verifier.example_args(i);
+                        for args in &self.example_args {
                             match template.evaluate_with_args(args, &mut self.leaf_cache) {
                                 Ok(v) => values.push(v),
                                 Err(_) => {
@@ -658,12 +657,6 @@ impl<'a, 'g> Searcher<'a, 'g> {
                 if child_total < child_nts.len() {
                     return Ok(None);
                 }
-                let num_examples = self.num_examples;
-                // Snapshot per-example args once so the inner closures
-                // don't borrow `self` (which is needed mutably elsewhere).
-                let example_arg_snapshot: Vec<Vec<BitVec>> = (0..num_examples)
-                    .map(|i| self.verifier.example_args(i).to_vec())
-                    .collect();
                 let mut splits = Vec::with_capacity(child_nts.len());
                 let mut found = None;
                 for_each_size_split(child_total, child_nts.len(), &mut splits, &mut |sizes| {
@@ -688,7 +681,6 @@ impl<'a, 'g> Searcher<'a, 'g> {
                             &child_nts,
                             sizes,
                             indices,
-                            &example_arg_snapshot,
                         ) {
                             found = Some(result);
                             return true;
@@ -709,8 +701,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
     fn eval_leaf(&mut self, expr: &OwnedExpr) -> Option<Vec<BitVec>> {
         let k = self.num_examples;
         let mut values = Vec::with_capacity(k);
-        for i in 0..k {
-            let args = self.verifier.example_args(i);
+        for args in &self.example_args {
             let v = expr.eval(args).ok()?;
             values.push(v);
         }
@@ -725,8 +716,10 @@ impl<'a, 'g> Searcher<'a, 'g> {
     ) -> Option<Vec<BitVec>> {
         let k = num_examples;
         let mut values = Vec::with_capacity(k);
+        let mut args = Vec::with_capacity(tuple.len());
         for i in 0..k {
-            let args: Vec<BitVec> = tuple.iter().map(|c| c.values[i].clone()).collect();
+            args.clear();
+            args.extend(tuple.iter().map(|c| c.values[i].clone()));
             let v = if let Some(plan) = pruned_plan {
                 plan.eval(&args).ok()?
             } else {
@@ -813,31 +806,18 @@ impl<'a, 'g> Searcher<'a, 'g> {
         indices: &[usize],
         rule_idx: usize,
         assoc_skip_lhs: bool,
-        batch_nodes: &mut Vec<Vec<NodeId>>,
-        batch_args: &mut Vec<Vec<BitVec>>,
-        k: usize,
+        batch_candidates: &mut Vec<BatchCandidate>,
     ) -> bool {
         if self.should_skip_tuple(child_nts, sizes, indices, rule_idx, assoc_skip_lhs, false) {
             return false;
         }
-        let children = child_nts
+        let slots = child_nts
             .iter()
             .zip(sizes.iter())
             .zip(indices.iter())
-            .map(|((child_nt, child_size), index)| self.by_size[*child_nt][*child_size][*index].node)
+            .map(|((child_nt, child_size), index)| (*child_nt, *child_size, *index))
             .collect();
-        for i in 0..k {
-            let args = child_nts
-                .iter()
-                .zip(sizes.iter())
-                .zip(indices.iter())
-                .map(|((child_nt, child_size), index)| {
-                    self.by_size[*child_nt][*child_size][*index].values[i].clone()
-                })
-                .collect();
-            batch_args.push(args);
-        }
-        batch_nodes.push(children);
+        batch_candidates.push(BatchCandidate { slots });
         true
     }
 
@@ -846,21 +826,31 @@ impl<'a, 'g> Searcher<'a, 'g> {
         nt_idx: usize,
         rule_idx: usize,
         size: usize,
-        batch_nodes: &mut Vec<Vec<NodeId>>,
-        batch_args: &mut Vec<Vec<BitVec>>,
+        batch_candidates: &mut Vec<BatchCandidate>,
         plan: &BitCircuitPlan,
         k: usize,
     ) -> Option<OwnedExpr> {
-        let count = batch_nodes.len();
+        let count = batch_candidates.len();
         if count == 0 {
             return None;
         }
 
         let mut batch_values: Vec<Vec<BitVec>> =
             (0..count).map(|_| Vec::with_capacity(k)).collect();
-        let refs: Vec<&[BitVec]> = batch_args.iter().map(|a| a.as_slice()).collect();
+        let nargs = batch_candidates[0].slots.len();
+        let mut example_args: Vec<Vec<BitVec>> =
+            (0..count).map(|_| Vec::with_capacity(nargs)).collect();
         for i in 0..k {
-            let example_refs: Vec<&[BitVec]> = (0..count).map(|j| refs[j * k + i]).collect();
+            for (j, item) in batch_candidates.iter().enumerate() {
+                example_args[j].clear();
+                example_args[j].extend(
+                    item.slots.iter().map(|(child_nt, child_size, index)| {
+                        self.by_size[*child_nt][*child_size][*index].values[i].clone()
+                    }),
+                );
+            }
+            let example_refs: Vec<&[BitVec]> =
+                example_args.iter().map(|args| args.as_slice()).collect();
             let results = plan.eval_batch(&example_refs, count);
             for (j, val) in results.into_iter().enumerate() {
                 batch_values[j].push(val);
@@ -869,19 +859,23 @@ impl<'a, 'g> Searcher<'a, 'g> {
 
         for j in 0..count {
             let values = std::mem::take(&mut batch_values[j]);
-            let children = std::mem::take(&mut batch_nodes[j]);
+            let slots = std::mem::take(&mut batch_candidates[j].slots);
+            let children = slots
+                .iter()
+                .map(|(child_nt, child_size, index)| {
+                    self.by_size[*child_nt][*child_size][*index].node
+                })
+                .collect();
             if let Some(found) = self.try_push_new(nt_idx, size, values, || Node {
                 nt_idx,
                 rule_idx,
                 children,
             }) {
-                batch_nodes.clear();
-                batch_args.clear();
+                batch_candidates.clear();
                 return Some(found);
             }
         }
-        batch_nodes.clear();
-        batch_args.clear();
+        batch_candidates.clear();
         None
     }
 
@@ -894,23 +888,26 @@ impl<'a, 'g> Searcher<'a, 'g> {
         child_nts: &[usize],
         sizes: &[usize],
         indices: &[usize],
-        example_arg_snapshot: &[Vec<BitVec>],
     ) -> Option<OwnedExpr> {
-        let num_examples = self.num_examples;
+        let num_examples = self.example_args.len();
         let mut all_values = Vec::with_capacity(num_examples);
-        for example_args in example_arg_snapshot.iter().take(num_examples) {
+        for example_idx in 0..num_examples {
             let child_values: Vec<BitVec> = child_nts
                 .iter()
                 .zip(sizes.iter())
                 .zip(indices.iter())
                 .map(|((child_nt, child_size), index)| {
                     self.by_size[*child_nt][*child_size][*index]
-                        .values[all_values.len()]
+                        .values[example_idx]
                         .clone()
                 })
                 .collect();
             let value = template
-                .evaluate_with_args_and_children(example_args, &child_values, &mut self.leaf_cache)
+                .evaluate_with_args_and_children(
+                    &self.example_args[example_idx],
+                    &child_values,
+                    &mut self.leaf_cache,
+                )
                 .ok()?;
             all_values.push(value);
         }
@@ -941,7 +938,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
         // when there are no examples (structural-only spec). Skip it then —
         // intern_node gives per-call uniqueness, and structural matching
         // happens via the materialize closure in `run_verify`.
-        if !values.is_empty() && self.seen.contains_or_insert_multi(nt_idx, &values, size) {
+        if !values.is_empty() && self.seen.contains_or_insert_values(nt_idx, &values, size) {
             return None;
         }
         let node = self.intern_node(build_node());
@@ -960,19 +957,21 @@ impl<'a, 'g> Searcher<'a, 'g> {
         None
     }
 
-    fn try_push_existing(
+    fn try_push_alias_candidate(
         &mut self,
         nt_idx: usize,
-        candidate: Candidate,
+        child_nt: usize,
         size: usize,
+        child_idx: usize,
     ) -> Option<OwnedExpr> {
-        if !candidate.values.is_empty()
-            && self
-                .seen
-                .contains_or_insert_multi(nt_idx, &candidate.values, size)
-        {
+        let duplicate = {
+            let values = &self.by_size[child_nt][size][child_idx].values;
+            !values.is_empty() && self.seen.contains_or_insert_values(nt_idx, values, size)
+        };
+        if duplicate {
             return None;
         }
+        let candidate = self.by_size[child_nt][size][child_idx].clone();
         let node = candidate.node;
         let is_start = nt_idx == self.grammar.start;
         let matches_spec = is_start && self.run_verify(node, &candidate.values);
@@ -1263,8 +1262,7 @@ fn log_grammar_summary(grammar: &Grammar<'_>) {
 // The removed code: BitOwner, DecompRule, analyze_decomposable_rules,
 // probe_polarity, solve_sub, decompose, find_match, spec_masks.
 
-/// Build the `Grammar` and dispatch to the `Searcher`. Replaces the
-/// old free-function `search_nullary_multi_nt`.
+/// Build the `Grammar` and dispatch to the `Searcher`.
 pub fn search_problem<'a>(
     problem: &'a SynthProblem<'static>,
     verifier: &dyn Verifier,
@@ -1272,10 +1270,10 @@ pub fn search_problem<'a>(
     enable_decomp: bool,
 ) -> parse::Result<OwnedExpr> {
     let cfg_start = Instant::now();
-    let multi = Config::from_problem(problem)?;
-    debg!("exact multi-config built in {:?}", cfg_start.elapsed());
+    let config = Config::from_problem(problem)?;
+    debg!("exact config built in {:?}", cfg_start.elapsed());
     let grammar_start = Instant::now();
-    let grammar = Grammar::from_config(&multi);
+    let grammar = Grammar::from_config(&config);
     debg!("exact grammar built in {:?}", grammar_start.elapsed());
     run_search(grammar, verifier, min, enable_decomp)
 }

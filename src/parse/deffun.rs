@@ -342,6 +342,21 @@ impl BoolAtom {
 }
 
 impl BoolNode {
+    pub(crate) fn visit_atoms(&self, f: &mut impl FnMut(&BoolAtom)) {
+        match self {
+            BoolNode::Atom(a) | BoolNode::Not(a) => f(a),
+            BoolNode::And(a, b) | BoolNode::Or(a, b) | BoolNode::Xor(a, b) => {
+                f(a);
+                f(b);
+            }
+            BoolNode::Ite(a, b, c) => {
+                f(a);
+                f(b);
+                f(c);
+            }
+        }
+    }
+
     fn partial_resolve(
         &self,
         fixed_arg: usize,
@@ -608,28 +623,12 @@ impl BitCircuitPlan {
             }
         }
 
-        fn mark_node(node: &BoolNode, needed: &mut [bool]) {
-            match node {
-                BoolNode::Atom(a) => mark_atom(a, needed),
-                BoolNode::Not(a) => mark_atom(a, needed),
-                BoolNode::And(a, b) | BoolNode::Or(a, b) | BoolNode::Xor(a, b) => {
-                    mark_atom(a, needed);
-                    mark_atom(b, needed);
-                }
-                BoolNode::Ite(a, b, c) => {
-                    mark_atom(a, needed);
-                    mark_atom(b, needed);
-                    mark_atom(c, needed);
-                }
-            }
-        }
-
         for &bit_idx in demanded_output_bits {
             mark_atom(&self.output_bits[bit_idx], &mut needed);
         }
         for idx in (0..num_bindings).rev() {
             if needed[idx] {
-                mark_node(&self.bindings[idx], &mut needed);
+                self.bindings[idx].visit_atoms(&mut |atom| mark_atom(atom, &mut needed));
             }
         }
 
@@ -676,12 +675,16 @@ impl BitCircuitPlan {
             .map(|node| remap_node(&node, &remap))
             .collect();
 
+        let mut demanded = vec![false; self.output_bits.len()];
+        for &idx in demanded_output_bits {
+            demanded[idx] = true;
+        }
         let new_output_bits: Vec<BoolAtom> = self
             .output_bits
             .iter()
             .enumerate()
             .map(|(idx, atom)| {
-                if demanded_output_bits.contains(&idx) {
+                if demanded[idx] {
                     remap_atom(atom, &remap)
                 } else {
                     BoolAtom::Const(false)
@@ -841,19 +844,7 @@ impl BoolAtom {
 
 impl BoolNode {
     fn collect_input_bits(&self, out: &mut rustc_hash::FxHashSet<(usize, usize)>) {
-        match self {
-            BoolNode::Atom(a) => a.collect_input_bits(out),
-            BoolNode::Not(a) => a.collect_input_bits(out),
-            BoolNode::And(a, b) | BoolNode::Or(a, b) | BoolNode::Xor(a, b) => {
-                a.collect_input_bits(out);
-                b.collect_input_bits(out);
-            }
-            BoolNode::Ite(a, b, c) => {
-                a.collect_input_bits(out);
-                b.collect_input_bits(out);
-                c.collect_input_bits(out);
-            }
-        }
+        self.visit_atoms(&mut |atom| atom.collect_input_bits(out));
     }
 }
 

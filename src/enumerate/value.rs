@@ -169,6 +169,23 @@ impl BitVec {
         }
     }
 
+    pub fn u64_words_into(&self, out: &mut Vec<u64>) {
+        let n = self.bits().div_ceil(64);
+        match self {
+            BitVec::Small { raw, .. } => {
+                if n != 0 {
+                    out.push(*raw);
+                }
+            }
+            BitVec::Big { raw, .. } => {
+                let mut digits = raw.as_ref().iter_u64_digits();
+                for _ in 0..n {
+                    out.push(digits.next().unwrap_or(0));
+                }
+            }
+        }
+    }
+
     pub fn to_biguint(&self) -> BigUint {
         match self {
             BitVec::Small { raw, .. } => BigUint::from(*raw),
@@ -221,6 +238,11 @@ impl BitVec {
 
     pub fn project_bits(&self, bits: &[usize]) -> Vec<u64> {
         let mut words = Vec::with_capacity(bits.len().div_ceil(64));
+        self.project_bits_into(bits, &mut words);
+        words
+    }
+
+    pub fn project_bits_into(&self, bits: &[usize], words: &mut Vec<u64>) {
         let mut current = 0u64;
         match self {
             BitVec::Small { raw, bits: width } => {
@@ -258,7 +280,6 @@ impl BitVec {
         if !bits.is_empty() && bits.len() % 64 != 0 {
             words.push(current);
         }
-        words
     }
 
     pub fn to_smt_hex(&self) -> String {

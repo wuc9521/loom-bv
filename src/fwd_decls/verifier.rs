@@ -58,9 +58,9 @@ impl Verifier for FwdDeclsProblem {
             });
             // Add aux feedback to demand_on_entry.
             let before = demand_on_entry.len();
+            let mut cache = Default::default();
             for (nt, recipe) in &aux_nt {
                 for &s in &relevant[*nt] {
-                    let mut cache = Default::default();
                     let Some(bit_dep) = get_deffun_dep_bit(recipe.propagation_fid, s, &mut cache)
                     else {
                         continue;

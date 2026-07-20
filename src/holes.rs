@@ -270,7 +270,7 @@ impl HoleSpec {
             let mut size_count = 0usize;
             let mut found: Option<String> = None;
 
-            self.for_each_gen(&self.start, size, &mut Vec::new(), &mut |skel| {
+            let _ = self.for_each_gen(&self.start, size, &mut Vec::new(), &mut |skel| {
                 use std::ops::ControlFlow;
                 size_count += 1;
                 if !seen.insert(canon(&skel, &self.laws)) {
@@ -393,7 +393,7 @@ impl HoleSpec {
             let mut size_count = 0usize;
             let mut found: Option<String> = None;
 
-            self.for_each_gen(&self.start, size, &mut Vec::new(), &mut |skel| {
+            let _ = self.for_each_gen(&self.start, size, &mut Vec::new(), &mut |skel| {
                 use std::ops::ControlFlow;
                 size_count += 1;
                 if !seen.insert(canon(&skel, &self.laws)) {
