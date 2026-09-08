@@ -18,7 +18,7 @@ struct Cli {
     #[arg(short, long)]
     config: Option<String>,
 
-    /// Enable exact-nullary relevance (bit minimization); use --min=false to disable.
+    /// Enable semantic candidate deduplication and relevance/circuit pruning; --min=false disables both.
     #[arg(
         long = "min",
         default_value_t = true,

@@ -22,6 +22,8 @@ const SEEN_MAP_INIT_CAP: usize = 256;
 const USE_FINGERPRINT_DEDUP: bool = true;
 
 pub enum SeenMode {
+    /// Ablation: retain distinct candidates even when their values agree.
+    Disabled,
     /// Dedup by flat-concat of all K example values. K=1 degenerates to exact
     /// single-value dedup.
     ExactValues {
@@ -70,6 +72,7 @@ impl SeenMode {
         // reduce to a fixed-width fingerprint. `maps` and `scratch` are disjoint
         // fields, so the mutable borrows don't conflict.
         let (map, key) = match self {
+            SeenMode::Disabled => return false,
             SeenMode::ExactValues { maps, scratch } => {
                 scratch.clear();
                 for value in values {

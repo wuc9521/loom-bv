@@ -30,7 +30,11 @@ pub fn run_search<'a>(
     min: bool,
     enable_decomp: bool,
 ) -> parse::Result<OwnedExpr> {
-    Searcher::new(grammar, verifier, min, enable_decomp).run()
+    let mut searcher = Searcher::new(grammar, verifier, min, enable_decomp);
+    let start = Instant::now();
+    let result = searcher.run();
+    info!("exact search time: {:.9}s", start.elapsed().as_secs_f64());
+    result
 }
 
 pub fn enumerate_start<'a>(
@@ -53,6 +57,8 @@ struct Searcher<'a, 'g> {
     nodes: Vec<Node>,
     by_size: Vec<Vec<Vec<Candidate>>>,
     seen: SeenMode,
+    /// Node identity only: terminate alias propagation without value dedup.
+    alias_seen: Option<rustc_hash::FxHashSet<(usize, NodeId)>>,
     leaf_cache: ExactEvalCache,
     pruned_plans: rustc_hash::FxHashMap<(usize, usize), std::rc::Rc<BitCircuitPlan>>,
     value_index: Vec<rustc_hash::FxHashMap<Vec<u64>, Vec<NodeId>>>,
@@ -63,6 +69,34 @@ struct Searcher<'a, 'g> {
 
 struct BatchCandidate {
     slots: Vec<(usize, usize, usize)>,
+}
+
+#[cfg(test)]
+mod ablation_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_dedup_retains_equal_values() {
+        let mut off = SeenMode::Disabled;
+        let mut on = SeenMode::exact_values(1);
+        let value = [BitVec::from_u64(0, 1)];
+        assert!(!off.contains_or_insert_values(0, &value, 1));
+        assert!(!off.contains_or_insert_values(0, &value, 2));
+        assert!(!on.contains_or_insert_values(0, &value, 1));
+        assert!(on.contains_or_insert_values(0, &value, 2));
+    }
+
+    #[test]
+    fn alias_cycles_terminate_without_semantic_dedup() {
+        let grammar = Grammar { start: 0, nts: vec![
+            ("A", vec![ExactRule::Alias(1)]),
+            ("B", vec![ExactRule::Alias(0), ExactRule::Leaf(OwnedExpr::Const(BitVec::from_u64(0, 1)))]),
+        ] };
+        let spec = crate::exact::Constraint::from_labels(1, [(0, true)].into_iter().collect());
+        let mut count = 0;
+        enumerate_start(grammar, &spec, false, 2, |_, _| { count += 1; Ok(()) }).unwrap();
+        assert_eq!(count, 1);
+    }
 }
 
 impl<'a, 'g> Searcher<'a, 'g> {
@@ -125,7 +159,10 @@ impl<'a, 'g> Searcher<'a, 'g> {
             }
         }
         let nt_count = grammar.nts.len();
-        let seen = if let Some(relevant_bits) = eager_relevant_bits {
+        let seen = if !min {
+            info!("COI disabled: semantic candidate deduplication and relevance pruning disabled");
+            SeenMode::Disabled
+        } else if let Some(relevant_bits) = eager_relevant_bits {
             SeenMode::projected_values(relevant_bits)
         } else {
             SeenMode::exact_values(nt_count)
@@ -133,6 +170,8 @@ impl<'a, 'g> Searcher<'a, 'g> {
         // try_compose requires PBE-shaped examples; non-PBE verifiers
         // (e.g. fwd-decls) opt out via `pbe_examples() == None`.
         let enable_compose = enable_decomp && verifier.pbe_examples().is_some();
+        let alias_seen = (!min && grammar.nts.iter().any(|(_, rules)| rules.iter().any(|r| matches!(r, ExactRule::Alias(_)))))
+            .then(Default::default);
         Self {
             grammar,
             verifier,
@@ -142,6 +181,7 @@ impl<'a, 'g> Searcher<'a, 'g> {
             nodes: Vec::new(),
             by_size: vec![vec![Vec::<Candidate>::new()]; nt_count],
             seen,
+            alias_seen,
             leaf_cache: ExactEvalCache::default(),
             pruned_plans,
             value_index: vec![rustc_hash::FxHashMap::default(); nt_count],
@@ -936,6 +976,9 @@ impl<'a, 'g> Searcher<'a, 'g> {
             return None;
         }
         let node = self.intern_node(build_node());
+        if let Some(seen) = &mut self.alias_seen {
+            seen.insert((nt_idx, node));
+        }
         let matches_spec = is_start && self.run_verify(node, &values);
         if self.enable_compose && !values.is_empty() {
             let vi_key: Vec<u64> = values.iter().map(|v| v.first_u64_word()).collect();
@@ -958,6 +1001,12 @@ impl<'a, 'g> Searcher<'a, 'g> {
         size: usize,
         child_idx: usize,
     ) -> Option<OwnedExpr> {
+        if let Some(seen) = &mut self.alias_seen {
+            let node = self.by_size[child_nt][size][child_idx].node;
+            if !seen.insert((nt_idx, node)) {
+                return None;
+            }
+        }
         let duplicate = {
             let values = &self.by_size[child_nt][size][child_idx].values;
             !values.is_empty() && self.seen.contains_or_insert_values(nt_idx, values, size)

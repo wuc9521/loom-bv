@@ -1,3 +1,4 @@
+#![cfg_attr(test, feature(portable_simd))]
 use enumerate::expr::OwnedExpr;
 use figment::{
     providers::{Format, Serialized, Toml},

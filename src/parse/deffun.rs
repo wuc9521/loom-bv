@@ -1821,7 +1821,7 @@ mod tests {
         if bits % 64 != 0 {
             words[num_words - 1] &= (1u64 << (bits % 64)) - 1;
         }
-        value_from_words(words, bits)
+        value_from_word_slice(&words, bits)
     }
 
     fn verify_pruned_circuit(plan: &BitCircuitPlan, demanded: &[usize], num_trials: usize) {
