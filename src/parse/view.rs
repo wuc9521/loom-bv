@@ -77,8 +77,12 @@ pub struct ProgramEnv<'a> {
     pub define_funs: Vec<DefineFunView<'a>>,
     pub constraints: Vec<&'a SyGuSTerm>,
     /// `(assume …)` terms — operator laws the backend may use for canonical
-    /// dedup. Not asserted into the solver (they carry free variables).
+    /// dedup. Not asserted into the solver, but SyGuS 2.1 still requires them
+    /// well-sorted: free variables must be `(declare-var …)`'d, which
+    /// `validate_assumes` enforces.
     pub assumes: Vec<&'a SyGuSTerm>,
+    /// Names introduced by `(declare-var …)`.
+    pub vars: HashSet<&'a str>,
     pub grammar_deps: Vec<GrammarDeps>,
 }
 
@@ -92,10 +96,14 @@ impl<'a> ProgramEnv<'a> {
         let mut define_funs = Vec::new();
         let mut constraints = Vec::new();
         let mut assumes = Vec::new();
+        let mut vars: HashSet<&'a str> = HashSet::new();
 
         for cmd in &file.cmds {
             match cmd {
                 SyGuSCmd::Assume(term) => assumes.push(term),
+                SyGuSCmd::DeclareVar(name, _) => {
+                    vars.insert(name);
+                }
                 SyGuSCmd::SetFeature(feature, value) => features.set(feature, *value),
                 SyGuSCmd::SynthFun(name, args, ret, grammar) => {
                     synth_funs.push(SynthFunView {
@@ -127,8 +135,34 @@ impl<'a> ProgramEnv<'a> {
             define_funs,
             constraints,
             assumes,
+            vars,
             grammar_deps,
         }
+    }
+
+    /// SyGuS 2.1: every symbol in an `(assume …)` must be a declared variable
+    /// or a defined/synthesized function. Reject underspecified files instead
+    /// of silently treating free variables as uninterpreted.
+    pub fn validate_assumes(&self) -> Result<(), String> {
+        if self.assumes.is_empty() {
+            return Ok(());
+        }
+        let mut known: HashSet<&str> = self.vars.clone();
+        for f in &self.define_funs {
+            known.insert(f.name);
+        }
+        for f in &self.synth_funs {
+            known.insert(f.name);
+        }
+        let mut scope = Vec::new();
+        for term in &self.assumes {
+            if let Some(name) = undeclared_leaf(term, &known, &mut scope) {
+                return Err(format!(
+                    "undeclared variable `{name}` in assume `{term}`"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The primary synth-fun: the one with a non-trivial grammar.
@@ -180,6 +214,44 @@ pub fn term_mentions_symbol(term: &SyGuSTerm, target: &str) -> bool {
             term_mentions_symbol(body, target)
         }
         SyGuSTerm::Literal(_) => false,
+    }
+}
+
+/// The first leaf symbol not in `known` and not bound by an enclosing
+/// let/quantifier (`scope`). Application heads are operators, never leaves.
+fn undeclared_leaf<'t>(
+    term: &'t SyGuSTerm,
+    known: &HashSet<&str>,
+    scope: &mut Vec<&'t str>,
+) -> Option<&'t str> {
+    match term {
+        SyGuSTerm::Identifier(id) => {
+            let name = id.get_name();
+            (!known.contains(name) && !scope.iter().any(|b| *b == name)).then_some(name)
+        }
+        SyGuSTerm::Application(_, args) => {
+            args.iter()
+                .find_map(|arg| undeclared_leaf(arg, known, scope))
+        }
+        SyGuSTerm::Annotated(inner, _) => undeclared_leaf(inner, known, scope),
+        SyGuSTerm::Let(bindings, body) => {
+            for binding in bindings {
+                if let Some(name) = undeclared_leaf(&binding.term, known, scope) {
+                    return Some(name);
+                }
+            }
+            scope.extend(bindings.iter().map(|b| b.name.as_str()));
+            let found = undeclared_leaf(body, known, scope);
+            scope.truncate(scope.len() - bindings.len());
+            found
+        }
+        SyGuSTerm::Forall(vars, body) | SyGuSTerm::Exists(vars, body) => {
+            scope.extend(vars.iter().map(|v| v.name.as_str()));
+            let found = undeclared_leaf(body, known, scope);
+            scope.truncate(scope.len() - vars.len());
+            found
+        }
+        SyGuSTerm::Literal(_) => None,
     }
 }
 
@@ -383,5 +455,31 @@ mod tests {
 
         assert!(env.grammar_deps[0].uses_self);
         assert!(env.grammar_deps[0].requires_recursion());
+    }
+
+    #[test]
+    fn validate_assumes_requires_declared_vars() {
+        let file = SyGuSFile::from_str(
+            r#"
+            (define-fun f ((a (_ BitVec 2))) (_ BitVec 2) a)
+            (assume (= (f x) x))
+            (check-synth)
+            "#,
+        )
+        .unwrap();
+        let env = ProgramEnv::from_file(&file);
+        let err = env.validate_assumes().unwrap_err();
+        assert!(err.contains("`x`"), "{err}");
+
+        let file = SyGuSFile::from_str(
+            r#"
+            (define-fun f ((a (_ BitVec 2))) (_ BitVec 2) a)
+            (declare-var x (_ BitVec 2))
+            (assume (= (f x) x))
+            (check-synth)
+            "#,
+        )
+        .unwrap();
+        ProgramEnv::from_file(&file).validate_assumes().unwrap();
     }
 }

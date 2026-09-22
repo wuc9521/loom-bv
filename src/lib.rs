@@ -195,6 +195,7 @@ fn solve_file_inner(
     min: bool,
 ) -> SolverResult<String> {
     let view = ProgramEnv::from_file(file);
+    view.validate_assumes()?;
 
     // Constant-hole pattern: a single nullary synth-fun whose grammar uses the
     // SyGuS `(Constant T)` construct (which the value enumerator drops).
@@ -415,6 +416,7 @@ fn solve_refuter_file_inner(
     _min: bool,
 ) -> SolverResult<String> {
     let view = ProgramEnv::from_file(file);
+    view.validate_assumes()?;
     deffun::ENV.clear();
     deffun::ENV.parse_from_view(&view)?;
     if let Some(spec) = holes::HoleSpec::detect(&view) {
