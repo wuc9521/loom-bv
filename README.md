@@ -1,35 +1,36 @@
+# loom-bv
 
-# DryadSynth-BV
+The bit-vector SyGuS solver behind [Loom](https://github.com/wuc9521/loom),
+derived from [DryadSynth](https://github.com/purdue-cap/DryadSynth). Loom links
+it as a library; it also builds as a standalone binary.
 
-The current DryadSynth is already embedded all the techniques mentioned in the paper [Enhanced Enumeration of Techniques for Syntax-Guided Synthesis of Bit-Vector Manipulations](https://dl.acm.org/doi/10.1145/3632913). To further configure the arguments mentioned in the paper, A TOML file can be passed into DryadSynth using the following command:
+## Usage
 
 ```bash
-DryadSynth [-B <config-file>] <sygus-if-file>
+cargo run --release -- [-c <config.toml>] <file.sl>   # or `-in` to read stdin
 ```
 
-1. Usage of `sygus-parser` (thus supporting sygus v2.)
-2. `extract` and `concat`
-3. multi-nonterminals
+| Flag | Effect |
+|---|---|
+| `-c`, `--config <FILE>` | Search configuration (TOML); see [`conf.toml`](conf.toml) and [`config/`](config) |
+| `--min=false` | Disable candidate deduplication and relevance/circuit pruning |
+| `-v`, `-vv` | More logging |
 
-In `src/meet-middle/config`, there are a lot of commonly used configuration files.
-Here is the default configuration file for PBE problems with explanation of each parameter:
+Example configuration:
 
 ```toml
-random_example = 10 # How many additional random examples are generated from reference implementation 
-limited_ite = false # Limit ITE condition search size to 10000 
-ite_tree_limit = 30 # Limit the size of decition tree
-chatgpt = true # Disable/Enable ChatGPT
-smt_solver = "bitwuzla" # Using command bitwuzla as SMT-Solver. Require `bitwuzla` command installed
+random_example = 10   # extra random examples drawn from the reference implementation
+limited_ite = true    # cap ITE condition search at 10000
+smt_solver = "bitwuzla"
 
 [expr_search]
-sample = 64 # The number of sampling
-dag_size = true # Enable Graph-Based Enumeration
-filter = {
-    deductive_combine = true, # Enable/Disable deduction for AND and OR
-    deductive_reverse = true  # Enable/Disable deduction for XOR and ADD
-} 
+sample = 64           # number of samples
+dag_size = true       # graph-based enumeration
+filter = { deductive_combine = true, deductive_reverse = true }
 ```
 
-# Publications
+## Publication
 
-- [Enhanced Enumeration of Techniques for Syntax-Guided Synthesis of Bit-Vector Manipulations](https://dl.acm.org/doi/10.1145/3632913) Yuantian Ding, Xiaokang Qiu, In Proc. 51st ACM SIGPLAN Symposium on Principles of Programming Languages (POPL '24), 2024. [author version](https://github.com/purdue-cap/DryadSynth/blob/master/docs/popl2024.pdf).
+Yuantian Ding, Xiaokang Qiu.
+[Enhanced Enumeration Techniques for Syntax-Guided Synthesis of Bit-Vector Manipulations](https://dl.acm.org/doi/10.1145/3632913).
+POPL 2024.

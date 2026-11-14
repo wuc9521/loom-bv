@@ -5,7 +5,6 @@ data.pref
 perf.data
 perf.data.old
 test.sl
-Cargo.lock
 .todo/
 .codegraph/
 .claude/

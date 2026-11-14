@@ -10,7 +10,7 @@ use std::{env, fs, io::Read};
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 #[derive(Debug, Parser)]
-#[command(name = "bvmiddle")]
+#[command(name = "loom-bv")]
 struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
