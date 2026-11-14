@@ -82,7 +82,7 @@ fn run_cegis_with_large_stack(
 /// Diagnostic: take a candidate body as an S-expression string, lift it
 /// to an `OwnedExpr` via `from_term`, install it as the current synth
 /// candidate, and report per-constraint pass/fail. Used to determine
-/// whether `dryadsynth-bv`'s eval agrees with z3 on a hand-supplied
+/// whether `loom-bv`'s eval agrees with z3 on a hand-supplied
 /// candidate that we already know the encoding admits.
 fn probe_candidate(
     body_str: &str,

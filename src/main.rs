@@ -63,7 +63,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let file = sygus_parser::ast::SyGuSFile::from_str(&input)
         .map_err(|e| format!("SyGuS parse failed: {e}"))?;
-    let output = dryadsynth_bv::solve_sygus_file(
+    let output = loom_bv::solve_sygus_file(
         &file,
         args.config.as_deref(),
         &description,
