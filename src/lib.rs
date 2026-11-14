@@ -413,7 +413,6 @@ fn solve_refuter_file_inner(
     file: &SyGuSFile,
     _config_path: Option<&str>,
     description: String,
-    _min: bool,
 ) -> SolverResult<String> {
     let view = ProgramEnv::from_file(file);
     view.validate_assumes()?;
@@ -459,7 +458,6 @@ pub fn solve_refuter_sygus_file(
     config_path: Option<&str>,
     description: &str,
     verbose: u8,
-    min: bool,
 ) -> SolverResult<String> {
     log::set_log_level(verbose + 2);
     unsafe {
@@ -472,7 +470,7 @@ pub fn solve_refuter_sygus_file(
     let handle = thread::Builder::new()
         .name("main-worker".to_string())
         .stack_size(MAIN_STACK_SIZE)
-        .spawn(move || solve_refuter_file_inner(&file, config_path.as_deref(), description, min))
+        .spawn(move || solve_refuter_file_inner(&file, config_path.as_deref(), description))
         .map_err(|e| format!("failed to spawn main worker: {e}"))?;
     let result = handle
         .join()
